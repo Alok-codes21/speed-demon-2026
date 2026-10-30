@@ -164,12 +164,23 @@ struct Worker {
   const char *start, *end; Stats stats[MAX_C];
 };
 
+static inline void setbit(uint32_t nid, uint8_t c) {
+  uint64_t *pw = &CB[c][nid >> 6], mask = 1ULL << (nid & 63);
+  if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0) __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
+}
+// flush up to n buffered bitsets: prefetch all lines, then set
+static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
+  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+  for (uint32_t j = 0; j < n; j++) setbit(bnid[j], bc[j]);
+}
+
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
 void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
+  uint32_t bnid[16], nb = 0; uint8_t bc[16];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
     uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
@@ -217,10 +228,10 @@ void *parse_chunk(void *arg) {
       s.amount_max = cents;
     s.name_bytes += name_len; s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
-    uint64_t *pw = &CB[c][nid >> 6], mask = 1ULL << (nid & 63);
-    if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
-      __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
+    bnid[nb] = nid; bc[nb] = c;
+    if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
+  bflush(bnid, bc, nb);
   return nullptr;
 }
 
