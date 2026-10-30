@@ -31,8 +31,9 @@ struct CacheEntry { uint64_t key; uint32_t id, len; uint64_t w0, w1, w2, w3; };
 static inline uint32_t intern_name(CacheEntry* cache, uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint32_t len) {
     if (len == 0) return 0;
     uint64_t h = hash_4w(w0, w1, w2, w3, len);
-    uint32_t c_idx = h & CACHE_MASK;
+    uint32_t c_idx = (h & CACHE_MASK) & ~1u;
     if (cache[c_idx].key == h && cache[c_idx].len == len && cache[c_idx].w0 == w0 && cache[c_idx].w1 == w1 && cache[c_idx].w2 == w2 && cache[c_idx].w3 == w3) return cache[c_idx].id;
+    if (cache[c_idx + 1].key == h && cache[c_idx + 1].len == len && cache[c_idx + 1].w0 == w0 && cache[c_idx + 1].w1 == w1 && cache[c_idx + 1].w2 == w2 && cache[c_idx + 1].w3 == w3) return cache[c_idx + 1].id;
 
     uint32_t idx = h & HASH_MASK;
     while (true) {
@@ -43,14 +44,14 @@ static inline uint32_t intern_name(CacheEntry* cache, uint64_t w0, uint64_t w1, 
                 uint32_t id = __atomic_fetch_add(&total_names, 1, __ATOMIC_RELAXED);
                 name_table[idx] = {0, id, len, w0, w1, w2, w3};
                 __atomic_store_n(&name_table[idx].key, h, __ATOMIC_RELEASE);
-                cache[c_idx] = {h, id, len, w0, w1, w2, w3};
+                cache[c_idx + (id & 1)] = {h, id, len, w0, w1, w2, w3};
                 return id;
             }
             k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
         }
         while (k == 1ULL) k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
         if (k == h && name_table[idx].len == len && name_table[idx].w0 == w0 && name_table[idx].w1 == w1 && name_table[idx].w2 == w2 && name_table[idx].w3 == w3) {
-            cache[c_idx] = {h, name_table[idx].id, len, w0, w1, w2, w3};
+            cache[c_idx + (name_table[idx].id & 1)] = {h, name_table[idx].id, len, w0, w1, w2, w3};
             return name_table[idx].id;
         }
         idx = (idx + 1) & HASH_MASK;
@@ -167,10 +168,10 @@ void parse_chunk(Worker* w) {
         uint32_t name_len = 0;
         auto pack_words = [&](const char* src, uint32_t l) {
             name_len = l;
-            memcpy(&w0, src, std::min(8u, l));
-            if (l > 8) memcpy(&w1, src + 8, std::min(8u, l - 8));
-            if (l > 16) memcpy(&w2, src + 16, std::min(8u, l - 16));
-            if (l > 24) memcpy(&w3, src + 24, std::min(8u, l - 24));
+            if (l <= 8) { memcpy(&w0, src, l); }
+            else if (l <= 16) { memcpy(&w0, src, 8); memcpy(&w1, src + 8, l - 8); }
+            else if (l <= 24) { memcpy(&w0, src, 8); memcpy(&w1, src + 8, 8); memcpy(&w2, src + 16, l - 16); }
+            else { memcpy(&w0, src, 8); memcpy(&w1, src + 8, 8); memcpy(&w2, src + 16, 8); memcpy(&w3, src + 24, l - 24); }
         };
 
         if (*p == '"') {
