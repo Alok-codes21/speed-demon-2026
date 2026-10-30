@@ -148,7 +148,8 @@ static inline const char *find_quote(const char *s, const char *end) {
   return (const char *)memchr(s, '"', end - s);
 }
 
-static const char *quoted_end(const char *s, const char *end, uint32_t *esc) {
+static __attribute__((always_inline)) inline const char *
+quoted_end(const char *s, const char *end, uint32_t *esc) {
   *esc = 0;
   const char *q = find_quote(s, end);
   // "" decodes to one data quote
@@ -192,6 +193,8 @@ void *parse_chunk(void *arg) {
     } else
       p++;
 
+    if (name_len)
+      __builtin_prefetch(&name_table[name_hash & HASH_MASK]);
     // note: only its unescaped byte length is needed
     uint32_t note_len = 0;
     if (*p == '"') {
