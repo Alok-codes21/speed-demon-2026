@@ -267,7 +267,7 @@ int main(int argc, char **argv) {
   fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
-  const int nth = 12;
+  const int nth = 6;
   const char *c_starts[nth + 1];
   c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   c_starts[nth] = fend;
