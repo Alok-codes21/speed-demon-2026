@@ -16,7 +16,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 9 | AVX2 (32-byte) quote scanning, 16 worker threads. Regression on the 12-core runner (oversubscription); reverted to 12 threads | run-e47aa98dc22a | 0.067 | 10.4 | 70.51 |
 | 10 | Dropped the per-thread intern cache (2% measured hit rate: names have no temporal locality), keeping AVX2 scanning and 12 threads. Source: 294 -> 284 scc code lines | run-ee72935ed30f | 0.0497 | 9.9 | 73.91 |
 | 11 | Experiment: 6 worker threads (runner: 6 P-cores x 2 SMT, cpuset 0-11). Regressed - hyperthread pairs help this memory-latency-bound parse; reverted to 12 | run-f1f3a1f19375 | 0.065 | 9.0 | 71.62 |
-| 12 | Prefetch the intern-table slot as soon as the name hash exists (hides L2 latency behind the note scan), force-inline the quoted-field scanner | pending | | | |
+| 12 | Prefetch the intern-table slot as soon as the name hash exists (hides L2 latency behind the note scan), force-inline the quoted-field scanner | run-5100146c0575 | 0.0492 | 9.9 | 74.21 |
 
 ## Step 13: SWAR regions.csv parse + relaxed-atomic bitset pre-test
 - regions.csv rid fields: SWAR comma-index + branch-free digit convert (removes
@@ -25,4 +25,17 @@ Every step from the reference to your final version, each with the live-board ru
   identical x86 codegen).
 - Local: ~1% wall on full (noisy sandbox); expected larger on the runner where
   single-core speed is lower (load_regions is serial). S 299, M unchanged.
+- Run: run-9c76fdf66355. Board: T 0.048229 (2% faster than step 12), M 10.1 MB,
+  S 299, 74.18 points - kept as tip (within noise of best; TSAN-clean base).
+
+## Step 14: Huge-page tables, populated records mapping, bitset-line prefetch
+- Intern table, rid->country map and distinct bitsets packed into one 2MB-aligned
+  6MB anonymous mapping with MADV_HUGEPAGE (3 huge pages instead of ~1500 small
+  ones: dTLB pressure down, M unchanged). records.csv mapped with MAP_POPULATE
+  to batch the soft-fault sweep. The distinct-bitset cache line is prefetched
+  right after region_id is parsed (the slot id is the name hash's low bits, so
+  the line address is known before interning runs); out-of-range region ids
+  prefetch the UNMATCHED country's line, guarded exactly like the join.
+- Local full: min-of-13 0.262s vs 0.278s (-6%). Hashes exact on all four
+  datasets; ASAN/UBSAN/TSAN clean; 48-run stress hash-stable.
 - Run: PENDING

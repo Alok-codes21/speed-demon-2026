@@ -27,14 +27,14 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
-static uint64_t country_bits[MAX_C][BITS_W];
-static uint8_t region_to_country[1000000];
+static uint64_t (*country_bits)[BITS_W];
+static uint8_t *region_to_country;
 // packed 3-letter code per slot; '_' for _UNMATCHED
 static uint32_t country_key[MAX_C];
 static uint32_t n_countries = 0, UNMATCHED = 0;
 
 // slot 0 stays reserved: id 0 is the empty name
-static uint64_t name_table[HASH_SIZE];
+static uint64_t *name_table;
 
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
@@ -108,7 +108,7 @@ void load_regions(const std::string &path) {
   p = (const char *)memchr(p, '\n', end - p) + 1; // skip the header line
   int16_t slot_of[1024]; // country code -> slot, by first appearance
   memset(slot_of, -1, sizeof(slot_of));
-  memset(region_to_country, 255, sizeof(region_to_country));
+  memset(region_to_country, 255, 1000000);
   while (p < end) {
     // SWAR rid parse: comma index = digit count, branch-free convert
     uint64_t rid = 0, n = 0, zm = 0;
@@ -226,6 +226,9 @@ void *parse_chunk(void *arg) {
     while (*p != ',')
       reg_id = reg_id * 10 + (*p++ - '0');
     p++;
+    uint8_t c = (reg_id < 1000000) ? region_to_country[reg_id] : 255;
+    if (name_len)
+      __builtin_prefetch(&country_bits[c][(name_hash & HASH_MASK) >> 6]);
     bool neg = (*p == '-');
     p += neg;
     int64_t cents = 0;
@@ -239,7 +242,6 @@ void *parse_chunk(void *arg) {
     p += (p < end && *p == '\n');
 
     // join and aggregate
-    uint8_t c = (reg_id < 1000000) ? region_to_country[reg_id] : 255;
     if (__builtin_expect(c == 255, 0))
       c = UNMATCHED;
     Stats &s = stats[c];
@@ -272,6 +274,13 @@ static void pr_money(FILE *f, int64_t c, char sep) {
 int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data";
   std::string out_dir = argc > 2 ? argv[2] : "/out";
+  char *big = (char *)mmap(0, 8 << 20, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  uintptr_t al = ((uintptr_t)big + 0x1FFFFF) & ~(uintptr_t)0x1FFFFF;
+  madvise((void *)al, 6 << 20, MADV_HUGEPAGE);
+  name_table = (uint64_t *)al;                           // 1 MB
+  region_to_country = (uint8_t *)(al + (1 << 20));       // 1 MB
+  country_bits = (uint64_t (*)[BITS_W])(al + (2 << 20)); // 4 MB
   name_table[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
@@ -279,7 +288,8 @@ int main(int argc, char **argv) {
     return 1;
   struct stat st;
   fstat(fd, &st);
-  auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  auto data = (const char *)mmap(0, st.st_size, PROT_READ,
+                                 MAP_PRIVATE | MAP_POPULATE, fd, 0);
   madvise((void *)data, st.st_size, MADV_SEQUENTIAL);
   fend = data + st.st_size;
 
