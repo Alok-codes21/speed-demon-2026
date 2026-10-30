@@ -15,25 +15,30 @@
 #include <pthread.h>
 #endif
 
+static const uint64_t MASKS[9] = {
+    0ULL, 0xFFULL, 0xFFFFULL, 0xFFFFFFULL, 0xFFFFFFFFULL,
+    0xFFFFFFFFFFULL, 0xFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
+};
+
 static inline uint64_t hash_4w(uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint32_t len) {
     uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^ (w2 * 0x517cc1b727220a95ULL) ^ (w3 * 0x85ebca6bULL) ^ ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
     h ^= h >> 32; h *= 0xd6e8feb86659fd93ULL; h ^= h >> 32;
     return h | (1ULL << 63);
 }
 
-const uint32_t HASH_SIZE = 262144, HASH_MASK = HASH_SIZE - 1, MAX_C = 256, BITS_W = 2500, CACHE_SIZE = 4096, CACHE_MASK = CACHE_SIZE - 1;
-struct Slot { uint64_t key; uint32_t id, len; uint64_t w0, w1, w2, w3; };
+const uint32_t HASH_SIZE = 262144, HASH_MASK = HASH_SIZE - 1, MAX_C = 256, BITS_W = 1600;
+const uint32_t CACHE_SIZE = 4096, CACHE_MASK = CACHE_SIZE - 1;
+
+struct Slot { uint64_t key; uint32_t id, pad; };
 static Slot name_table[HASH_SIZE];
 static uint32_t total_names = 1;
 
-struct CacheEntry { uint64_t key; uint32_t id, len; uint64_t w0, w1, w2, w3; };
+struct CacheEntry { uint64_t key; uint32_t id; };
 
-static inline uint32_t intern_name(CacheEntry* cache, uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint32_t len) {
-    if (len == 0) return 0;
-    uint64_t h = hash_4w(w0, w1, w2, w3, len);
+static inline uint32_t intern_name(CacheEntry* cache, uint64_t h) {
     uint32_t c_idx = (h & CACHE_MASK) & ~1u;
-    if (cache[c_idx].key == h && cache[c_idx].len == len && cache[c_idx].w0 == w0 && cache[c_idx].w1 == w1 && cache[c_idx].w2 == w2 && cache[c_idx].w3 == w3) return cache[c_idx].id;
-    if (cache[c_idx + 1].key == h && cache[c_idx + 1].len == len && cache[c_idx + 1].w0 == w0 && cache[c_idx + 1].w1 == w1 && cache[c_idx + 1].w2 == w2 && cache[c_idx + 1].w3 == w3) return cache[c_idx + 1].id;
+    if (cache[c_idx].key == h) return cache[c_idx].id;
+    if (cache[c_idx + 1].key == h) return cache[c_idx + 1].id;
 
     uint32_t idx = h & HASH_MASK;
     while (true) {
@@ -42,16 +47,16 @@ static inline uint32_t intern_name(CacheEntry* cache, uint64_t w0, uint64_t w1, 
             uint64_t zero = 0;
             if (__atomic_compare_exchange_n(&name_table[idx].key, &zero, 1ULL, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                 uint32_t id = __atomic_fetch_add(&total_names, 1, __ATOMIC_RELAXED);
-                name_table[idx] = {0, id, len, w0, w1, w2, w3};
+                name_table[idx].id = id;
                 __atomic_store_n(&name_table[idx].key, h, __ATOMIC_RELEASE);
-                cache[c_idx + (id & 1)] = {h, id, len, w0, w1, w2, w3};
+                cache[c_idx + (id & 1)] = {h, id};
                 return id;
             }
             k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
         }
         while (k == 1ULL) k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
-        if (k == h && name_table[idx].len == len && name_table[idx].w0 == w0 && name_table[idx].w1 == w1 && name_table[idx].w2 == w2 && name_table[idx].w3 == w3) {
-            cache[c_idx + (name_table[idx].id & 1)] = {h, name_table[idx].id, len, w0, w1, w2, w3};
+        if (k == h) {
+            cache[c_idx + (name_table[idx].id & 1)] = {h, name_table[idx].id};
             return name_table[idx].id;
         }
         idx = (idx + 1) & HASH_MASK;
@@ -89,8 +94,8 @@ void load_regions(const std::string& path) {
     CEntry c_table[512] = {};
     std::vector<std::string> unique_countries;
     struct RawPair { uint32_t rid; uint16_t c_idx; };
-    static RawPair pairs[250000];
-    uint32_t num_pairs = 0;
+    std::vector<RawPair> pairs;
+    pairs.reserve(210000);
 
     while (p < end) {
         if (*p == '\r' || *p == '\n') { p++; continue; }
@@ -116,7 +121,7 @@ void load_regions(const std::string& path) {
             unique_countries.push_back(std::string(c_start, c_len));
             found_idx = slot;
         }
-        pairs[num_pairs++] = {rid, (uint16_t)found_idx};
+        pairs.push_back({rid, (uint16_t)found_idx});
         if (p < end && *p == '\r') p++;
         if (p < end && *p == '\n') p++;
     }
@@ -136,8 +141,8 @@ void load_regions(const std::string& path) {
     }
 
     memset(region_to_country, UNMATCHED_ID, sizeof(region_to_country));
-    for (uint32_t i = 0; i < num_pairs; ++i) {
-        if (pairs[i].rid < 1000000) region_to_country[pairs[i].rid] = slot_to_sorted[pairs[i].c_idx];
+    for (const auto& pr : pairs) {
+        if (pr.rid < 1000000) region_to_country[pr.rid] = slot_to_sorted[pr.c_idx];
     }
 #ifdef _WIN32
     UnmapViewOfFile(data); CloseHandle(hm); CloseHandle(hf);
@@ -166,19 +171,25 @@ void parse_chunk(Worker* w) {
 
         uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
         uint32_t name_len = 0;
-        auto pack_words = [&](const char* src, uint32_t l) {
-            name_len = l;
-            if (l <= 8) { memcpy(&w0, src, l); }
-            else if (l <= 16) { memcpy(&w0, src, 8); memcpy(&w1, src + 8, l - 8); }
-            else if (l <= 24) { memcpy(&w0, src, 8); memcpy(&w1, src + 8, 8); memcpy(&w2, src + 16, l - 16); }
-            else { memcpy(&w0, src, 8); memcpy(&w1, src + 8, 8); memcpy(&w2, src + 16, 8); memcpy(&w3, src + 24, l - 24); }
-        };
 
         if (*p == '"') {
             const char* start = ++p, *q = p;
             while (*q != '"') q++;
             if (q[1] != '"') {
-                pack_words(start, q - start);
+                name_len = q - start;
+                uint64_t r0 = *(const uint64_t*)start;
+                if (name_len <= 8) { w0 = r0 & MASKS[name_len]; }
+                else {
+                    w0 = r0;
+                    uint64_t r1 = *(const uint64_t*)(start + 8);
+                    if (name_len <= 16) { w1 = r1 & MASKS[name_len - 8]; }
+                    else {
+                        w1 = r1;
+                        uint64_t r2 = *(const uint64_t*)(start + 16);
+                        if (name_len <= 24) { w2 = r2 & MASKS[name_len - 16]; }
+                        else { w2 = r2; w3 = (uint8_t)start[24]; }
+                    }
+                }
                 p = q + 2;
             } else {
                 bool esc = false;
@@ -189,14 +200,31 @@ void parse_chunk(Worker* w) {
                     } else p++;
                 }
                 if (!esc) {
-                    pack_words(start, p - start);
+                    name_len = p - start;
+                    uint64_t r0 = *(const uint64_t*)start;
+                    if (name_len <= 8) { w0 = r0 & MASKS[name_len]; }
+                    else {
+                        w0 = r0;
+                        uint64_t r1 = *(const uint64_t*)(start + 8);
+                        if (name_len <= 16) { w1 = r1 & MASKS[name_len - 8]; }
+                        else {
+                            w1 = r1;
+                            uint64_t r2 = *(const uint64_t*)(start + 16);
+                            if (name_len <= 24) { w2 = r2 & MASKS[name_len - 16]; }
+                            else { w2 = r2; w3 = (uint8_t)start[24]; }
+                        }
+                    }
                 } else {
                     uint32_t l = 0;
                     for (const char* s = start; s < p; ) {
                         if (*s == '"' && *(s + 1) == '"') { unesc[l++] = '"'; s += 2; }
                         else unesc[l++] = *s++;
                     }
-                    pack_words(unesc, l);
+                    name_len = l;
+                    if (l <= 8) memcpy(&w0, unesc, l);
+                    else if (l <= 16) { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, l - 8); }
+                    else if (l <= 24) { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, 8); memcpy(&w2, unesc + 16, l - 16); }
+                    else { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, 8); memcpy(&w2, unesc + 16, 8); memcpy(&w3, unesc + 24, l - 24); }
                 }
                 p += 2;
             }
@@ -243,7 +271,11 @@ void parse_chunk(Worker* w) {
         if (cents > s.amount_max) s.amount_max = cents;
         s.name_bytes += name_len; s.note_bytes += note_len;
 
-        uint32_t nid = intern_name(cache, w0, w1, w2, w3, name_len);
+        uint32_t nid = 0;
+        if (name_len > 0) {
+            uint64_t h = hash_4w(w0, w1, w2, w3, name_len);
+            nid = intern_name(cache, h);
+        }
         uint64_t mask = 1ULL << (nid & 63);
         uint64_t* pw = &country_bits[c][nid >> 6];
         if ((*pw & mask) == 0) __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
@@ -355,14 +387,14 @@ int main(int argc, char** argv) {
 #else
     mkdir(out_dir.c_str(), 0777);
 #endif
-    std::ofstream out_f(out_dir + "/aggregates.txt", std::ios::binary);
-    char buf[512];
+    char out_buf[65536];
+    char* pt = out_buf;
     for (size_t c = 0; c < country_names.size(); ++c) {
         const Stats& g = final_s[c];
         if (g.count == 0) continue;
         uint32_t dist = 0;
         for (uint32_t w = 0; w < BITS_W; ++w) if (country_bits[c][w]) dist += __builtin_popcountll(country_bits[c][w]);
-        char* pt = buf; const std::string& nm = country_names[c];
+        const std::string& nm = country_names[c];
         memcpy(pt, nm.data(), nm.size()); pt += nm.size(); *pt++ = ' ';
         pt = write_u64(pt, g.count); *pt++ = ' ';
         pt = write_u64(pt, g.id_sum); *pt++ = ' ';
@@ -372,7 +404,8 @@ int main(int argc, char** argv) {
         pt = write_u64(pt, dist); *pt++ = ' ';
         pt = write_u64(pt, g.name_bytes); *pt++ = ' ';
         pt = write_u64(pt, g.note_bytes); *pt++ = '\n';
-        out_f.write(buf, pt - buf);
     }
+    std::ofstream out_f(out_dir + "/aggregates.txt", std::ios::binary);
+    out_f.write(out_buf, pt - out_buf);
     return 0;
 }
