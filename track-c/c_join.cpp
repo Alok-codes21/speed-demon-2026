@@ -15,10 +15,7 @@
 #include <pthread.h>
 #endif
 
-static const uint64_t MASKS[9] = {
-    0ULL, 0xFFULL, 0xFFFFULL, 0xFFFFFFULL, 0xFFFFFFFFULL,
-    0xFFFFFFFFFFULL, 0xFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
-};
+static const uint64_t MASKS[9] = {0ULL, 0xFFULL, 0xFFFFULL, 0xFFFFFFULL, 0xFFFFFFFFULL, 0xFFFFFFFFFFULL, 0xFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 
 static inline uint64_t hash_4w(uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint32_t len) {
     uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^ (w2 * 0x517cc1b727220a95ULL) ^ (w3 * 0x85ebca6bULL) ^ ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
@@ -26,13 +23,10 @@ static inline uint64_t hash_4w(uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w
     return h | (1ULL << 63);
 }
 
-const uint32_t HASH_SIZE = 262144, HASH_MASK = HASH_SIZE - 1, MAX_C = 256, BITS_W = 1600;
-const uint32_t CACHE_SIZE = 4096, CACHE_MASK = CACHE_SIZE - 1;
-
+const uint32_t HASH_SIZE = 262144, HASH_MASK = HASH_SIZE - 1, MAX_C = 256, BITS_W = 1600, CACHE_SIZE = 4096, CACHE_MASK = CACHE_SIZE - 1;
 struct Slot { uint64_t key; uint32_t id, pad; };
 static Slot name_table[HASH_SIZE];
 static uint32_t total_names = 1;
-
 struct CacheEntry { uint64_t key; uint32_t id; };
 
 static inline uint32_t intern_name(CacheEntry* cache, uint64_t h) {
@@ -157,11 +151,20 @@ struct Worker {
     CacheEntry cache[CACHE_SIZE];
 };
 
+static inline uint64_t pack_and_hash(const char* src, uint32_t len) {
+    uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+    if (len <= 8) { w0 = *(const uint64_t*)src & MASKS[len]; }
+    else if (len <= 16) { w0 = *(const uint64_t*)src; w1 = *(const uint64_t*)(src + 8) & MASKS[len - 8]; }
+    else if (len <= 24) { w0 = *(const uint64_t*)src; w1 = *(const uint64_t*)(src + 8); w2 = *(const uint64_t*)(src + 16) & MASKS[len - 16]; }
+    else { w0 = *(const uint64_t*)src; w1 = *(const uint64_t*)(src + 8); w2 = *(const uint64_t*)(src + 16); w3 = (uint8_t)src[24]; }
+    return hash_4w(w0, w1, w2, w3, len);
+}
+
 void parse_chunk(Worker* w) {
     const char *p = w->start, *end = w->end;
     Stats* stats = w->stats;
     CacheEntry* cache = w->cache;
-    char unesc[64];
+    char unesc[64] = {};
 
     while (p < end) {
         if (__builtin_expect((uint8_t)*p == 0xEF, 0)) p += 3;
@@ -169,7 +172,7 @@ void parse_chunk(Worker* w) {
         while (*p != ',') id = id * 10 + (*p++ - '0');
         p++;
 
-        uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        uint64_t name_hash = 0;
         uint32_t name_len = 0;
 
         if (*p == '"') {
@@ -177,19 +180,7 @@ void parse_chunk(Worker* w) {
             while (*q != '"') q++;
             if (q[1] != '"') {
                 name_len = q - start;
-                uint64_t r0 = *(const uint64_t*)start;
-                if (name_len <= 8) { w0 = r0 & MASKS[name_len]; }
-                else {
-                    w0 = r0;
-                    uint64_t r1 = *(const uint64_t*)(start + 8);
-                    if (name_len <= 16) { w1 = r1 & MASKS[name_len - 8]; }
-                    else {
-                        w1 = r1;
-                        uint64_t r2 = *(const uint64_t*)(start + 16);
-                        if (name_len <= 24) { w2 = r2 & MASKS[name_len - 16]; }
-                        else { w2 = r2; w3 = (uint8_t)start[24]; }
-                    }
-                }
+                name_hash = pack_and_hash(start, name_len);
                 p = q + 2;
             } else {
                 bool esc = false;
@@ -201,19 +192,7 @@ void parse_chunk(Worker* w) {
                 }
                 if (!esc) {
                     name_len = p - start;
-                    uint64_t r0 = *(const uint64_t*)start;
-                    if (name_len <= 8) { w0 = r0 & MASKS[name_len]; }
-                    else {
-                        w0 = r0;
-                        uint64_t r1 = *(const uint64_t*)(start + 8);
-                        if (name_len <= 16) { w1 = r1 & MASKS[name_len - 8]; }
-                        else {
-                            w1 = r1;
-                            uint64_t r2 = *(const uint64_t*)(start + 16);
-                            if (name_len <= 24) { w2 = r2 & MASKS[name_len - 16]; }
-                            else { w2 = r2; w3 = (uint8_t)start[24]; }
-                        }
-                    }
+                    name_hash = pack_and_hash(start, name_len);
                 } else {
                     uint32_t l = 0;
                     for (const char* s = start; s < p; ) {
@@ -221,10 +200,7 @@ void parse_chunk(Worker* w) {
                         else unesc[l++] = *s++;
                     }
                     name_len = l;
-                    if (l <= 8) memcpy(&w0, unesc, l);
-                    else if (l <= 16) { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, l - 8); }
-                    else if (l <= 24) { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, 8); memcpy(&w2, unesc + 16, l - 16); }
-                    else { memcpy(&w0, unesc, 8); memcpy(&w1, unesc + 8, 8); memcpy(&w2, unesc + 16, 8); memcpy(&w3, unesc + 24, l - 24); }
+                    name_hash = pack_and_hash(unesc, l);
                 }
                 p += 2;
             }
@@ -271,11 +247,7 @@ void parse_chunk(Worker* w) {
         if (cents > s.amount_max) s.amount_max = cents;
         s.name_bytes += name_len; s.note_bytes += note_len;
 
-        uint32_t nid = 0;
-        if (name_len > 0) {
-            uint64_t h = hash_4w(w0, w1, w2, w3, name_len);
-            nid = intern_name(cache, h);
-        }
+        uint32_t nid = (name_len > 0) ? intern_name(cache, name_hash) : 0;
         uint64_t mask = 1ULL << (nid & 63);
         uint64_t* pw = &country_bits[c][nid >> 6];
         if ((*pw & mask) == 0) __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
@@ -305,11 +277,9 @@ static inline char* write_cents(char* p, int64_t c) {
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
-    std::string data_dir = (argc > 1) ? argv[1] : "data/c";
-    std::string out_dir = (argc > 2) ? argv[2] : ".out/track-c";
+    std::string data_dir = (argc > 1) ? argv[1] : "data/c", out_dir = (argc > 2) ? argv[2] : ".out/track-c";
 #else
-    std::string data_dir = (argc > 1) ? argv[1] : "/data";
-    std::string out_dir = (argc > 2) ? argv[2] : "/out";
+    std::string data_dir = (argc > 1) ? argv[1] : "/data", out_dir = (argc > 2) ? argv[2] : "/out";
 #endif
     load_regions(data_dir + "/regions.csv");
 
