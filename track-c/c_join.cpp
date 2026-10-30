@@ -110,11 +110,26 @@ void load_regions(const std::string &path) {
   memset(slot_of, -1, sizeof(slot_of));
   memset(region_to_country, 255, sizeof(region_to_country));
   while (p < end) {
-    uint32_t rid = 0;
-    while (*p != ',')
-      rid = rid * 10 + (*p++ - '0');
-    p++;
-    uint32_t key = ((uint8_t)p[0] << 16) | ((uint8_t)p[1] << 8) | (uint8_t)p[2];
+    // SWAR rid parse: comma index = digit count, branch-free convert
+    uint64_t rid = 0, n = 0, zm = 0;
+    if (p + 16 <= end) {
+      uint64_t v, x;
+      memcpy(&v, p, 8);
+      x = v ^ 0x2C2C2C2C2C2C2C2CULL;
+      zm = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
+      if (zm) {
+        n = __builtin_ctzll(zm) >> 3;
+        v <<= 64 - 8 * n; // left-align digits in the 8 lanes
+        // digit lanes only, no borrows:
+        v -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * n));
+        v = v * 2561 >> 8;
+        v = (v & 0x00FF00FF00FF00FFULL) * 6553601 >> 16;
+        rid = (uint32_t)((v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);
+      }
+    }
+    while (zm == 0 && p[n] != ',')
+      rid = rid * 10 + (p[n++] - '0'); // tail / long rid
+    uint32_t w, key = (memcpy(&w, p + n + 1, 4), __builtin_bswap32(w) >> 8);
     uint32_t h = (key * 0x9E3779B1u) >> 22;
     while (slot_of[h] >= 0 && country_key[slot_of[h]] != key)
       h = (h + 1) & 1023;
@@ -122,8 +137,7 @@ void load_regions(const std::string &path) {
       country_key[slot_of[h] = (int16_t)n_countries++] = key;
     if (rid < 1000000)
       region_to_country[rid] = (uint8_t)slot_of[h];
-    p += 3;
-    p += (p < end && *p == '\n');
+    p += n + 5;
   }
   UNMATCHED = n_countries++;
   country_key[UNMATCHED] = 0x5F0000; // '_' sorts after every [A-Z] code
@@ -240,7 +254,7 @@ void *parse_chunk(void *arg) {
     s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
     uint64_t *pw = &country_bits[c][nid >> 6], mask = 1ULL << (nid & 63);
-    if ((*pw & mask) == 0)
+    if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
       __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
   }
   return nullptr;

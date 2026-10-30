@@ -17,3 +17,12 @@ Every step from the reference to your final version, each with the live-board ru
 | 10 | Dropped the per-thread intern cache (2% measured hit rate: names have no temporal locality), keeping AVX2 scanning and 12 threads. Source: 294 -> 284 scc code lines | run-ee72935ed30f | 0.0497 | 9.9 | 73.91 |
 | 11 | Experiment: 6 worker threads (runner: 6 P-cores x 2 SMT, cpuset 0-11). Regressed - hyperthread pairs help this memory-latency-bound parse; reverted to 12 | run-f1f3a1f19375 | 0.065 | 9.0 | 71.62 |
 | 12 | Prefetch the intern-table slot as soon as the name hash exists (hides L2 latency behind the note scan), force-inline the quoted-field scanner | pending | | | |
+
+## Step 13: SWAR regions.csv parse + relaxed-atomic bitset pre-test
+- regions.csv rid fields: SWAR comma-index + branch-free digit convert (removes
+  a data-dependent branch per lookup row); scalar fallback for the tail and
+  over-long ids. Bitset pre-test load made atomic-relaxed (TSAN-clean UB fix,
+  identical x86 codegen).
+- Local: ~1% wall on full (noisy sandbox); expected larger on the runner where
+  single-core speed is lower (load_regions is serial). S 299, M unchanged.
+- Run: PENDING
