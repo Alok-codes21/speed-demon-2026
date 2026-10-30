@@ -16,10 +16,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const uint32_t HASH_SIZE = 262144, HASH_MASK = HASH_SIZE - 1;
+static const uint32_t HASH_SIZE = 131072, HASH_MASK = HASH_SIZE - 1;
 // country slots, 64-bit words per bitset
-static const uint32_t MAX_C = 256, BITS_W = 1600;
-static const uint32_t CACHE_SIZE = 4096, CACHE_MASK = CACHE_SIZE - 1;
+static const uint32_t MAX_C = 256, BITS_W = HASH_SIZE / 64;
+static const uint32_t CACHE_SIZE = 2048, CACHE_MASK = CACHE_SIZE - 1;
 static const char *fend; // end of the records.csv mapping
 
 struct Stats {
@@ -33,47 +33,31 @@ static uint8_t region_to_country[1000000];
 static uint32_t country_key[MAX_C];
 static uint32_t n_countries = 0, UNMATCHED = 0;
 
-struct Slot {
-  uint64_t key;
-  uint32_t id, pad;
-};
-static Slot name_table[HASH_SIZE];
-static uint32_t total_names = 1; // id 0 is the empty name
+// slot 0 stays reserved: id 0 is the empty name
+static uint64_t name_table[HASH_SIZE];
 struct CacheEntry {
   uint64_t key;
   uint32_t id;
 };
 
 // Names intern to small ids: 2-way thread cache in front of a lock-free
-// open-addressing table (CAS reserves a slot, then the key is published).
+// open-addressing table; the slot index is the id (all hashes have bit 63
+// set, so a plain CAS publishes the slot and no value is ever pending).
 static inline uint32_t intern_name(CacheEntry *cache, uint64_t h) {
-  uint32_t c_idx = (h & CACHE_MASK) & ~1u;
-  if (cache[c_idx].key == h)
-    return cache[c_idx].id;
-  if (cache[c_idx + 1].key == h)
-    return cache[c_idx + 1].id;
+  uint32_t c_idx = (h & CACHE_MASK) & ~1u, hit = cache[c_idx].key != h;
+  if (cache[c_idx + hit].key == h)
+    return cache[c_idx + hit].id;
   uint32_t idx = h & HASH_MASK;
   while (true) {
-    uint64_t k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
-    if (k == 0) {
-      uint64_t zero = 0;
-      if (!__atomic_compare_exchange_n(&name_table[idx].key, &zero, 1ULL, false,
-                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        continue;
-      uint32_t id = __atomic_fetch_add(&total_names, 1, __ATOMIC_RELAXED);
-      name_table[idx].id = id;
-      __atomic_store_n(&name_table[idx].key, h, __ATOMIC_RELEASE);
-      cache[c_idx + (id & 1)] = {h, id};
-      return id;
-    }
-    while (k == 1ULL)
-      k = __atomic_load_n(&name_table[idx].key, __ATOMIC_ACQUIRE);
-    if (k == h)
-      break;
+    uint64_t k = __atomic_load_n(&name_table[idx], __ATOMIC_ACQUIRE);
+    if (k == 0)
+      k = __sync_val_compare_and_swap(&name_table[idx], 0, h);
+    if (k == h || k == 0)
+      break; // k==0: the CAS above installed h
     idx = (idx + 1) & HASH_MASK;
   }
-  cache[c_idx + (name_table[idx].id & 1)] = {h, name_table[idx].id};
-  return name_table[idx].id;
+  cache[c_idx + (idx & 1)] = {h, idx};
+  return idx;
 }
 
 // 8 bytes with the high (8 - n) bytes zeroed, never reading past end.
@@ -126,8 +110,7 @@ void load_regions(const std::string &path) {
     return;
   struct stat st;
   fstat(fd, &st);
-  const char *data =
-      (const char *)mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   const char *p = data, *end = data + st.st_size;
   p = (const char *)memchr(p, '\n', end - p) + 1; // skip the header line
   int16_t slot_of[1024]; // country code -> slot, by first appearance
@@ -142,10 +125,8 @@ void load_regions(const std::string &path) {
     uint32_t h = (key * 0x9E3779B1u) >> 22;
     while (slot_of[h] >= 0 && country_key[slot_of[h]] != key)
       h = (h + 1) & 1023;
-    if (slot_of[h] < 0) {
-      slot_of[h] = (int16_t)n_countries;
-      country_key[n_countries++] = key;
-    }
+    if (slot_of[h] < 0)
+      country_key[slot_of[h] = (int16_t)n_countries++] = key;
     if (rid < 1000000)
       region_to_country[rid] = (uint8_t)slot_of[h];
     p += 3;
@@ -159,6 +140,8 @@ void load_regions(const std::string &path) {
 
 // -------------------------------------------------------------------- parsing
 
+// End of the quoted field whose value starts at s: one past the comma after
+// the closing quote, or nullptr on malformed input. *esc counts "" pairs.
 // Find the next quote; SSE2 scan with a memchr tail. End-bounded.
 static inline const char *find_quote(const char *s, const char *end) {
   __m128i q = _mm_set1_epi8('"');
@@ -172,10 +155,7 @@ static inline const char *find_quote(const char *s, const char *end) {
   return (const char *)memchr(s, '"', end - s);
 }
 
-// End of the quoted field whose value starts at s: one past the comma after
-// the closing quote, or nullptr on malformed input. *esc counts "" pairs.
-static inline const char *quoted_end(const char *s, const char *end,
-                                     uint32_t *esc) {
+static const char *quoted_end(const char *s, const char *end, uint32_t *esc) {
   *esc = 0;
   const char *q = find_quote(s, end);
   // "" decodes to one data quote
@@ -274,50 +254,31 @@ void *parse_chunk(void *arg) {
 
 // -------------------------------------------------------------------- output
 
-static inline char *write_u64(char *p, uint64_t v, char sep) {
-  char b[24];
-  int n = 0;
-  do {
-    b[n++] = '0' + (v % 10);
-    v /= 10;
-  } while (v > 0);
-  while (n > 0)
-    *p++ = b[--n];
-  *p++ = sep;
-  return p;
-}
-
-static inline char *write_cents(char *p, int64_t c, char sep) {
-  if (c < 0) {
-    *p++ = '-';
-    c = -c;
-  }
-  p = write_u64(p, (uint64_t)(c / 100), '.');
-  *p++ = '0' + (uint32_t)(c % 100) / 10;
-  *p++ = '0' + (uint32_t)(c % 100) % 10;
-  *p++ = sep;
-  return p;
+static void pr_money(FILE *f, int64_t c, char sep) {
+  if (c < 0)
+    fputc('-', f), c = -c;
+  fprintf(f, "%llu.%02u%c", (unsigned long long)(c / 100), (uint32_t)(c % 100),
+          sep);
 }
 
 int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data";
   std::string out_dir = argc > 2 ? argv[2] : "/out";
+  name_table[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   if (fd < 0)
     return 1;
   struct stat st;
   fstat(fd, &st);
-  size_t file_sz = st.st_size;
-  const char *data =
-      (const char *)mmap(nullptr, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
-  madvise((void *)data, file_sz, MADV_SEQUENTIAL);
-  fend = data + file_sz;
+  auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  madvise((void *)data, st.st_size, MADV_SEQUENTIAL);
+  fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
   const int nth = 12;
   const char *c_starts[nth + 1];
-  c_starts[0] = (const char *)memchr(data, '\n', file_sz) + 1;
+  c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   c_starts[nth] = fend;
   size_t total = fend - c_starts[0];
   for (int i = 1; i < nth; i++) {
@@ -345,10 +306,8 @@ int main(int argc, char **argv) {
       fs.count += ws.count;
       fs.id_sum += ws.id_sum;
       fs.amount_sum += ws.amount_sum;
-      if (ws.amount_min < fs.amount_min)
-        fs.amount_min = ws.amount_min;
-      if (ws.amount_max > fs.amount_max)
-        fs.amount_max = ws.amount_max;
+      fs.amount_min = std::min(fs.amount_min, ws.amount_min);
+      fs.amount_max = std::max(fs.amount_max, ws.amount_max);
       fs.name_bytes += ws.name_bytes;
       fs.note_bytes += ws.note_bytes;
     }
@@ -362,8 +321,9 @@ int main(int argc, char **argv) {
   });
 
   mkdir(out_dir.c_str(), 0777);
-  char out_buf[65536];
-  char *pt = out_buf;
+  FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
+  if (!out)
+    return 1;
   for (uint32_t oi = 0; oi < n_countries; oi++) {
     uint32_t c = order[oi];
     const Stats &g = final_s[c];
@@ -372,35 +332,17 @@ int main(int argc, char **argv) {
     uint32_t dist = 0;
     for (uint32_t i = 0; i < BITS_W; i++)
       dist += __builtin_popcountll(country_bits[c][i]);
-    if (c == UNMATCHED)
-      pt = (char *)mempcpy(pt, "_UNMATCHED ", 11);
-    else {
-      char cc[4] = {(char)(country_key[c] >> 16), (char)(country_key[c] >> 8),
-                    (char)country_key[c], ' '};
-      pt = (char *)mempcpy(pt, cc, 4);
-    }
-    pt = write_u64(pt, g.count, ' ');
-    pt = write_u64(pt, g.id_sum, ' ');
-    pt = write_cents(pt, g.amount_sum, ' ');
-    pt = write_cents(pt, g.amount_min, ' ');
-    pt = write_cents(pt, g.amount_max, ' ');
-    pt = write_u64(pt, dist, ' ');
-    pt = write_u64(pt, g.name_bytes, ' ');
-    pt = write_u64(pt, g.note_bytes, '\n');
+    char code[4] = {(char)(country_key[c] >> 16), (char)(country_key[c] >> 8),
+                    (char)country_key[c], 0};
+    const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
+    fprintf(out, "%s %lu %lu ", nm, (unsigned long)g.count,
+            (unsigned long)g.id_sum);
+    pr_money(out, g.amount_sum, ' ');
+    pr_money(out, g.amount_min, ' ');
+    pr_money(out, g.amount_max, ' ');
+    fprintf(out, "%u %lu %lu\n", dist, (unsigned long)g.name_bytes,
+            (unsigned long)g.note_bytes);
   }
-  int out_fd = open((out_dir + "/aggregates.txt").c_str(),
-                    O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  if (out_fd < 0)
-    return 1;
-  const char *b = out_buf;
-  size_t left = pt - out_buf;
-  while (left > 0) {
-    ssize_t nw = write(out_fd, b, left);
-    if (nw <= 0)
-      break;
-    b += nw;
-    left -= nw;
-  }
-  close(out_fd);
+  fclose(out);
   return 0;
 }
