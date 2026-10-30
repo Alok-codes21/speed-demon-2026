@@ -66,4 +66,13 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 19 (revert to v31a)
 - Change: c_join.cpp back to step-17 batch-16 code (v31a.cpp); Dockerfile unchanged (digest-pinned).
 - Reason: step-18 batch-8 scored lower (74.639 < 74.671); tip must stay best-known code for the final holdout freeze.
-- Run: PENDING
+- Board T_s/M/S/points: T_s=0.045769 M=10194944 S=311 points=74.601 (same code as step 17's 74.671; run-to-run noise ~±0.07 pts)
+- Rank/watch: no change; best stays run-a47c62b1a994 (74.671), rank 2
+- Run: run-c6a48b13dacd
+
+
+## Experiments tried and rejected (local, never pushed)
+- v33 dense-id intern (16B {hash,id} slots + fetch_add id): -4% local. Pending-id spin hurts; reverted.
+- v34 drop NT/CB prefetches: -4% local. Prefetches earn their place.
+- v35 SoA staged granules (parse 64/512/4096 records into buffers, then bulk intern+bitset loops): -6..-9% local at every granule size. Staging store/load round-trip costs more than the bulk-prefetch MLP saves over bflush-16.
+- Regions load measured: 2.1ms of 249ms - negligible, not worth parallelizing.
