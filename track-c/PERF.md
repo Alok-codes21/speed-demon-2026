@@ -50,3 +50,13 @@ Every step from the reference to your final version, each with the live-board ru
 - Run: run-2bc6a025a7a9. Board: T 0.047388 (fastest yet; v21 0.049185, step 13
   0.048229), M 10.3 MB, S 308, 74.20 points - flat vs best because the S and M
   increases ate the +1.9% T gain. Step 16 golfs the source lines back out.
+
+
+## Step 18 (v31n8)
+- Source: v31n8.cpp → track-c/c_join.cpp
+- Change: bitset write batch 16 -> 8 (fits per-core MLP better; local min/mean slightly better than 16).
+- Local: v31a(16) 0.318/0.339/0.336 vs v31n8 0.309/0.327/0.329 (min/med/mean). Gates: full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full ✓.
+- Board T_s/M/S/points: pending
+- Rank/watch: pending
+- Run: PENDING
+- Notes: Dockerfile stays digest-pinned
