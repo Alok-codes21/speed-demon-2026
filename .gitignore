@@ -1,2 +1,5 @@
 .out/
 data/
+specs/
+__pycache__/
+*.pyc
