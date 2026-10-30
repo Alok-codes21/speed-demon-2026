@@ -288,8 +288,7 @@ int main(int argc, char **argv) {
     return 1;
   struct stat st;
   fstat(fd, &st);
-  auto data = (const char *)mmap(0, st.st_size, PROT_READ,
-                                 MAP_PRIVATE | MAP_POPULATE, fd, 0);
+  auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   madvise((void *)data, st.st_size, MADV_SEQUENTIAL);
   fend = data + st.st_size;
 

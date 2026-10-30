@@ -38,4 +38,13 @@ Every step from the reference to your final version, each with the live-board ru
   prefetch the UNMATCHED country's line, guarded exactly like the join.
 - Local full: min-of-13 0.262s vs 0.278s (-6%). Hashes exact on all four
   datasets; ASAN/UBSAN/TSAN clean; 48-run stress hash-stable.
+- Run: run-6c9449b0bde4. REGRESSED on the board: T 0.055019 (+14% vs step 13),
+  M 9.65 MB, S 309, 72.86 points. Suspect: MAP_POPULATE's serial prefault sweep
+  (neutral locally where the cache is warm, costly on the runner).
+
+## Step 15: drop MAP_POPULATE, keep huge pages and the bitset prefetch
+- Same as step 14 without MAP_POPULATE on the records mapping; the 12 workers
+  fault their own slices in parallel instead of one synchronous prefault pass.
+- Local full: min 0.258s (= step 14 within noise). Hashes exact on all four
+  datasets.
 - Run: PENDING
