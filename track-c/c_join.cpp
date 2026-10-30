@@ -8,8 +8,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <emmintrin.h>
 #include <fcntl.h>
+#include <immintrin.h>
 #include <pthread.h>
 #include <string>
 #include <sys/mman.h>
@@ -142,15 +142,15 @@ void load_regions(const std::string &path) {
 
 // End of the quoted field whose value starts at s: one past the comma after
 // the closing quote, or nullptr on malformed input. *esc counts "" pairs.
-// Find the next quote; SSE2 scan with a memchr tail. End-bounded.
+// Find the next quote; 32-byte AVX2 scan with a memchr tail. End-bounded.
 static inline const char *find_quote(const char *s, const char *end) {
-  __m128i q = _mm_set1_epi8('"');
-  while (s + 16 <= end) {
-    int m = _mm_movemask_epi8(
-        _mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)s), q));
+  __m256i q = _mm256_set1_epi8('"');
+  while (s + 32 <= end) {
+    int m = _mm256_movemask_epi8(
+        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)s), q));
     if (m)
       return s + __builtin_ctz(m);
-    s += 16;
+    s += 32;
   }
   return (const char *)memchr(s, '"', end - s);
 }
@@ -276,7 +276,7 @@ int main(int argc, char **argv) {
   fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
-  const int nth = 12;
+  const int nth = 16;
   const char *c_starts[nth + 1];
   c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   c_starts[nth] = fend;
