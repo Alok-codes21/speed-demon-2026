@@ -56,7 +56,14 @@ Every step from the reference to your final version, each with the live-board ru
 - Source: v31n8.cpp → track-c/c_join.cpp
 - Change: bitset write batch 16 -> 8 (fits per-core MLP better; local min/mean slightly better than 16).
 - Local: v31a(16) 0.318/0.339/0.336 vs v31n8 0.309/0.327/0.329 (min/med/mean). Gates: full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full ✓.
-- Board T_s/M/S/points: pending
-- Rank/watch: pending
+- Board T_s/M/S/points: T_s=0.045995 M=9981952 S=311 points=74.639
+- Rank/watch: no change; best stays run-a47c62b1a994 (74.671)
+- Run: run-8f3863ac2bf3
+- Notes: batch 8 ≈ batch 16 on board (within noise, slightly worse); tip reverted to batch-16 code (step 19)
+
+
+
+## Step 19 (revert to v31a)
+- Change: c_join.cpp back to step-17 batch-16 code (v31a.cpp); Dockerfile unchanged (digest-pinned).
+- Reason: step-18 batch-8 scored lower (74.639 < 74.671); tip must stay best-known code for the final holdout freeze.
 - Run: PENDING
-- Notes: Dockerfile stays digest-pinned
