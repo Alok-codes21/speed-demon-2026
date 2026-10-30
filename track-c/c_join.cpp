@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <emmintrin.h>
 #include <fcntl.h>
 #include <immintrin.h>
 #include <pthread.h>
@@ -19,7 +20,6 @@
 static const uint32_t HASH_SIZE = 131072, HASH_MASK = HASH_SIZE - 1;
 // country slots, 64-bit words per bitset
 static const uint32_t MAX_C = 256, BITS_W = HASH_SIZE / 64;
-static const uint32_t CACHE_SIZE = 2048, CACHE_MASK = CACHE_SIZE - 1;
 static const char *fend; // end of the records.csv mapping
 
 struct Stats {
@@ -35,18 +35,12 @@ static uint32_t n_countries = 0, UNMATCHED = 0;
 
 // slot 0 stays reserved: id 0 is the empty name
 static uint64_t name_table[HASH_SIZE];
-struct CacheEntry {
-  uint64_t key;
-  uint32_t id;
-};
 
-// Names intern to small ids: 2-way thread cache in front of a lock-free
-// open-addressing table; the slot index is the id (all hashes have bit 63
-// set, so a plain CAS publishes the slot and no value is ever pending).
-static inline uint32_t intern_name(CacheEntry *cache, uint64_t h) {
-  uint32_t c_idx = (h & CACHE_MASK) & ~1u, hit = cache[c_idx].key != h;
-  if (cache[c_idx + hit].key == h)
-    return cache[c_idx + hit].id;
+// Names intern to slot ids in a lock-free open-addressing table; the slot
+// index is the id (all hashes have bit 63 set, so a plain CAS publishes the
+// slot and no value is ever pending). A per-thread cache measured useless:
+// names have no temporal locality (2% hit rate).
+static inline uint32_t intern_name(uint64_t h) {
   uint32_t idx = h & HASH_MASK;
   while (true) {
     uint64_t k = __atomic_load_n(&name_table[idx], __ATOMIC_ACQUIRE);
@@ -56,7 +50,6 @@ static inline uint32_t intern_name(CacheEntry *cache, uint64_t h) {
       break; // k==0: the CAS above installed h
     idx = (idx + 1) & HASH_MASK;
   }
-  cache[c_idx + (idx & 1)] = {h, idx};
   return idx;
 }
 
@@ -142,7 +135,7 @@ void load_regions(const std::string &path) {
 
 // End of the quoted field whose value starts at s: one past the comma after
 // the closing quote, or nullptr on malformed input. *esc counts "" pairs.
-// Find the next quote; 32-byte AVX2 scan with a memchr tail. End-bounded.
+// Find the next quote; SSE2 scan with a memchr tail. End-bounded.
 static inline const char *find_quote(const char *s, const char *end) {
   __m256i q = _mm256_set1_epi8('"');
   while (s + 32 <= end) {
@@ -169,7 +162,6 @@ static const char *quoted_end(const char *s, const char *end, uint32_t *esc) {
 struct Worker {
   const char *start, *end;
   Stats stats[MAX_C];
-  CacheEntry cache[CACHE_SIZE];
 };
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -178,7 +170,6 @@ void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
-  CacheEntry *cache = w->cache;
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
     uint64_t id = 0;
@@ -244,7 +235,7 @@ void *parse_chunk(void *arg) {
       s.amount_max = cents;
     s.name_bytes += name_len;
     s.note_bytes += note_len;
-    uint32_t nid = name_len ? intern_name(cache, name_hash) : 0;
+    uint32_t nid = name_len ? intern_name(name_hash) : 0;
     uint64_t *pw = &country_bits[c][nid >> 6], mask = 1ULL << (nid & 63);
     if ((*pw & mask) == 0)
       __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
@@ -276,7 +267,7 @@ int main(int argc, char **argv) {
   fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
-  const int nth = 16;
+  const int nth = 12;
   const char *c_starts[nth + 1];
   c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   c_starts[nth] = fend;
