@@ -1,8 +1,15 @@
-FROM gcc:16@sha256:43978d7710a803d1c3d32f4117c1528ec7285a4ce2c0a51e982ec1a6e3d87d95 AS build
-WORKDIR /src
-COPY . .
-RUN g++ -O3 -march=native -std=c++20 -pthread -fno-exceptions -fno-rtti -static-libstdc++ -static-libgcc -o solution c_join.cpp
+# track-c build image: modern gcc on Ubuntu 24.04.
+FROM gcc:16
 
-FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-COPY --from=build /src/solution /app/solution
-ENTRYPOINT ["/app/solution"]
+WORKDIR /app
+
+# Copy only the sources needed for the build.
+COPY track-c/c_join.cpp /app/c_join.cpp
+
+# Prebuild the binary so container start just runs it.
+RUN g++ -O3 -march=native -std=c++20 -pthread -fno-exceptions -fno-rtti \
+    -static-libstdc++ -static-libgcc \
+    -o /app/c_join /app/c_join.cpp
+
+ENTRYPOINT ["/app/c_join"]
+CMD ["data", "out"]

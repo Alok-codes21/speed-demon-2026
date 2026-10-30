@@ -17,7 +17,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const uint32_t HASH_SIZE = 131072, HASH_MASK = HASH_SIZE - 1;
+static const uint32_t HASH_SIZE = 131072, HM = HASH_SIZE - 1;
 // country slots, 64-bit words per bitset
 static const uint32_t MAX_C = 256, BITS_W = HASH_SIZE / 64;
 static const char *fend; // end of the records.csv mapping
@@ -27,28 +27,27 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
-static uint64_t (*country_bits)[BITS_W];
-static uint8_t *region_to_country;
+static uint64_t (*CB)[BITS_W];
+static uint8_t *R2C;
 // packed 3-letter code per slot; '_' for _UNMATCHED
-static uint32_t country_key[MAX_C];
-static uint32_t n_countries = 0, UNMATCHED = 0;
+static uint32_t CK[MAX_C];
+static uint32_t NC = 0, UNMATCHED = 0;
 
 // slot 0 stays reserved: id 0 is the empty name
-static uint64_t *name_table;
+static uint64_t *NT;
 
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
 // slot and no value is ever pending). A per-thread cache measured useless:
 // names have no temporal locality (2% hit rate).
 static inline uint32_t intern_name(uint64_t h) {
-  uint32_t idx = h & HASH_MASK;
+  uint32_t idx = h & HM;
   while (true) {
-    uint64_t k = __atomic_load_n(&name_table[idx], __ATOMIC_ACQUIRE);
+    uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);
     if (k == 0)
-      k = __sync_val_compare_and_swap(&name_table[idx], 0, h);
-    if (k == h || k == 0)
-      break; // k==0: the CAS above installed h
-    idx = (idx + 1) & HASH_MASK;
+      k = __sync_val_compare_and_swap(&NT[idx], 0, h);
+    if (k == h || k == 0) break; // k==0: the CAS above installed h
+    idx = (idx + 1) & HM;
   }
   return idx;
 }
@@ -59,23 +58,19 @@ static inline uint64_t load8(const char *s, uint32_t n, const char *end) {
   if (__builtin_expect(s + 8 <= end, 1))
     memcpy(&v, s, 8);
   else {
-    char tmp[8] = {};
-    memcpy(tmp, s, n);
-    memcpy(&v, tmp, 8);
+    char tmp[8] = {}; memcpy(tmp, s, n); memcpy(&v, tmp, 8);
   }
   return n < 8 ? v & ((1ULL << (8 * n)) - 1) : v;
 }
 
 // Fast path: a name of at most 25 bytes packs into four 64-bit words.
-static inline uint64_t hash_short(const char *s, uint32_t len,
-                                  const char *end) {
+static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
   uint64_t w0 = load8(s, len < 8 ? len : 8, end);
   uint64_t w1 = len > 8 ? load8(s + 8, len - 8 < 8 ? len - 8 : 8, end) : 0;
   uint64_t w2 = len > 16 ? load8(s + 16, len - 16 < 8 ? len - 16 : 8, end) : 0;
   uint64_t w3 = len > 24 ? (uint8_t)s[24] : 0;
-  uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^
-               (w2 * 0x517cc1b727220a95ULL) ^ (w3 * 0x85ebca6bULL) ^
-               ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
+  uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^ (w2 * 0x517cc1b727220a95ULL);
+  h ^= (w3 * 0x85ebca6bULL) ^ ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
   h ^= h >> 32;
   h *= 0xd6e8feb86659fd93ULL;
   h ^= h >> 32;
@@ -99,23 +94,19 @@ static uint64_t hash_long(const char *s, const char *e) {
 
 void load_regions(const std::string &path) {
   int fd = open(path.c_str(), O_RDONLY);
-  if (fd < 0)
-    return;
-  struct stat st;
-  fstat(fd, &st);
+  if (fd < 0) return;
+  struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   const char *p = data, *end = data + st.st_size;
   p = (const char *)memchr(p, '\n', end - p) + 1; // skip the header line
   int16_t slot_of[1024]; // country code -> slot, by first appearance
   memset(slot_of, -1, sizeof(slot_of));
-  memset(region_to_country, 255, 1000000);
+  memset(R2C, 255, 1000000);
   while (p < end) {
     // SWAR rid parse: comma index = digit count, branch-free convert
     uint64_t rid = 0, n = 0, zm = 0;
     if (p + 16 <= end) {
-      uint64_t v, x;
-      memcpy(&v, p, 8);
-      x = v ^ 0x2C2C2C2C2C2C2C2CULL;
+      uint64_t v, x; memcpy(&v, p, 8); x = v ^ 0x2C2C2C2C2C2C2C2CULL;
       zm = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
       if (zm) {
         n = __builtin_ctzll(zm) >> 3;
@@ -127,20 +118,16 @@ void load_regions(const std::string &path) {
         rid = (uint32_t)((v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);
       }
     }
-    while (zm == 0 && p[n] != ',')
-      rid = rid * 10 + (p[n++] - '0'); // tail / long rid
+    while (zm == 0 && p[n] != ',') rid = rid * 10 + (p[n++] - '0'); // tail
     uint32_t w, key = (memcpy(&w, p + n + 1, 4), __builtin_bswap32(w) >> 8);
     uint32_t h = (key * 0x9E3779B1u) >> 22;
-    while (slot_of[h] >= 0 && country_key[slot_of[h]] != key)
-      h = (h + 1) & 1023;
-    if (slot_of[h] < 0)
-      country_key[slot_of[h] = (int16_t)n_countries++] = key;
-    if (rid < 1000000)
-      region_to_country[rid] = (uint8_t)slot_of[h];
+    while (slot_of[h] >= 0 && CK[slot_of[h]] != key) h = (h + 1) & 1023;
+    if (slot_of[h] < 0) CK[slot_of[h] = (int16_t)NC++] = key;
+    if (rid < 1000000) R2C[rid] = (uint8_t)slot_of[h];
     p += n + 5;
   }
-  UNMATCHED = n_countries++;
-  country_key[UNMATCHED] = 0x5F0000; // '_' sorts after every [A-Z] code
+  UNMATCHED = NC++;
+  CK[UNMATCHED] = 0x5F0000; // '_' sorts after every [A-Z] code
   munmap((void *)data, st.st_size);
   close(fd);
 }
@@ -155,8 +142,7 @@ static inline const char *find_quote(const char *s, const char *end) {
   while (s + 32 <= end) {
     int m = _mm256_movemask_epi8(
         _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)s), q));
-    if (m)
-      return s + __builtin_ctz(m);
+    if (m) return s + __builtin_ctz(m);
     s += 32;
   }
   return (const char *)memchr(s, '"', end - s);
@@ -175,8 +161,7 @@ quoted_end(const char *s, const char *end, uint32_t *esc) {
 }
 
 struct Worker {
-  const char *start, *end;
-  Stats stats[MAX_C];
+  const char *start, *end; Stats stats[MAX_C];
 };
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -187,75 +172,52 @@ void *parse_chunk(void *arg) {
   Stats *stats = w->stats;
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
-    uint64_t id = 0;
-    while (*p != ',')
-      id = id * 10 + (*p++ - '0');
-    p++;
+    uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
 
     // name: empty unquoted, or quoted (non-empty names are always quoted)
-    uint32_t name_len = 0, esc;
-    uint64_t name_hash = 0;
+    uint32_t name_len = 0, esc; uint64_t name_hash = 0;
     if (*p == '"') {
-      const char *s = ++p;
-      const char *e = quoted_end(s, end, &esc);
-      if (__builtin_expect(e == nullptr, 0))
-        break;
+      const char *s = ++p, *e = quoted_end(s, end, &esc);
+      if (__builtin_expect(e == nullptr, 0)) break;
       name_len = (uint32_t)(e - 2 - s) - esc; // e[-2] is the closing quote
-      name_hash = (esc == 0 && name_len <= 25) ? hash_short(s, name_len, fend)
+      name_hash = (esc == 0 && name_len <= 25) ? hs(s, name_len, fend)
                                                : hash_long(s, e - 2);
       p = e;
     } else
       p++;
 
-    if (name_len)
-      __builtin_prefetch(&name_table[name_hash & HASH_MASK]);
+    if (name_len) __builtin_prefetch(&NT[name_hash & HM]);
     // note: only its unescaped byte length is needed
     uint32_t note_len = 0;
     if (*p == '"') {
-      const char *s = ++p;
-      const char *e = quoted_end(s, end, &esc);
-      if (__builtin_expect(e == nullptr, 0))
-        break;
+      const char *s = ++p, *e = quoted_end(s, end, &esc);
+      if (__builtin_expect(e == nullptr, 0)) break;
       note_len = (uint32_t)(e - 2 - s) - esc;
       p = e;
     } else
       p++;
 
     // region, amount
-    uint32_t reg_id = 0;
-    while (*p != ',')
-      reg_id = reg_id * 10 + (*p++ - '0');
-    p++;
-    uint8_t c = (reg_id < 1000000) ? region_to_country[reg_id] : 255;
-    if (name_len)
-      __builtin_prefetch(&country_bits[c][(name_hash & HASH_MASK) >> 6]);
-    bool neg = (*p == '-');
-    p += neg;
-    int64_t cents = 0;
-    while (*p != '.')
-      cents = cents * 10 + (*p++ - '0');
+    uint32_t reg_id = 0; while (*p != ',') reg_id = reg_id * 10 + (*p++ - '0'); p++;
+    uint8_t c = (reg_id < 1000000) ? R2C[reg_id] : 255;
+    if (name_len) __builtin_prefetch(&CB[c][(name_hash & HM) >> 6]);
+    bool neg = (*p == '-'); p += neg;
+    int64_t cents = 0; while (*p != '.') cents = cents * 10 + (*p++ - '0');
     cents = cents * 100 + (p[1] - '0') * 10 + (p[2] - '0');
     p += 3; // '.' and two fraction digits
-    if (neg)
-      cents = -cents;
-    p += (p < end && *p == '\r');
-    p += (p < end && *p == '\n');
+    if (neg) cents = -cents;
+    p += (p < end && *p == '\r'); p += (p < end && *p == '\n');
 
     // join and aggregate
-    if (__builtin_expect(c == 255, 0))
-      c = UNMATCHED;
-    Stats &s = stats[c];
-    s.count++;
-    s.id_sum += id;
-    s.amount_sum += cents;
+    if (__builtin_expect(c == 255, 0)) c = UNMATCHED;
+    Stats &s = stats[c]; s.count++; s.id_sum += id; s.amount_sum += cents;
     if (cents < s.amount_min)
       s.amount_min = cents;
     if (cents > s.amount_max)
       s.amount_max = cents;
-    s.name_bytes += name_len;
-    s.note_bytes += note_len;
+    s.name_bytes += name_len; s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
-    uint64_t *pw = &country_bits[c][nid >> 6], mask = 1ULL << (nid & 63);
+    uint64_t *pw = &CB[c][nid >> 6], mask = 1ULL << (nid & 63);
     if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
       __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
   }
@@ -265,32 +227,27 @@ void *parse_chunk(void *arg) {
 // -------------------------------------------------------------------- output
 
 static void pr_money(FILE *f, int64_t c, char sep) {
-  if (c < 0)
-    fputc('-', f), c = -c;
-  fprintf(f, "%llu.%02u%c", (unsigned long long)(c / 100), (uint32_t)(c % 100),
-          sep);
+  if (c < 0) fputc('-', f), c = -c;
+  fprintf(f, "%zu.%02u%c", (size_t)(c / 100), (uint32_t)(c % 100), sep);
 }
 
 int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data";
   std::string out_dir = argc > 2 ? argv[2] : "/out";
-  char *big = (char *)mmap(0, 8 << 20, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  uintptr_t al = ((uintptr_t)big + 0x1FFFFF) & ~(uintptr_t)0x1FFFFF;
+  // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
+  char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
+  size_t al = ((size_t)big + (2 << 20) - 1) & ~((size_t)(2 << 20) - 1);
   madvise((void *)al, 6 << 20, MADV_HUGEPAGE);
-  name_table = (uint64_t *)al;                           // 1 MB
-  region_to_country = (uint8_t *)(al + (1 << 20));       // 1 MB
-  country_bits = (uint64_t (*)[BITS_W])(al + (2 << 20)); // 4 MB
-  name_table[0] = 1; // reserve id 0: real hashes all have bit 63 set
+  NT = (uint64_t *)al;                     // 1 MB
+  R2C = (uint8_t *)(al + (1 << 20)); // 1 MB
+  CB = (uint64_t(*)[BITS_W])(al + (2 << 20));
+  NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
-  if (fd < 0)
-    return 1;
-  struct stat st;
-  fstat(fd, &st);
+  if (fd < 0) return 1;
+  struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  madvise((void *)data, st.st_size, MADV_SEQUENTIAL);
-  fend = data + st.st_size;
+  madvise((void *)data, st.st_size, MADV_SEQUENTIAL); fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
   const int nth = 12;
@@ -307,8 +264,7 @@ int main(int argc, char **argv) {
   static Worker workers[nth];
   pthread_t ths[nth];
   for (int i = 0; i < nth; i++) {
-    workers[i].start = c_starts[i];
-    workers[i].end = c_starts[i + 1];
+    workers[i].start = c_starts[i]; workers[i].end = c_starts[i + 1];
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   }
   for (int i = 0; i < nth; i++)
@@ -316,49 +272,36 @@ int main(int argc, char **argv) {
 
   // Merge the per-thread aggregates (empty threads merge as zeros).
   Stats final_s[MAX_C];
-  for (int i = 0; i < nth; i++)
-    for (uint32_t c = 0; c < n_countries; c++) {
-      const Stats &ws = workers[i].stats[c];
-      Stats &fs = final_s[c];
-      fs.count += ws.count;
-      fs.id_sum += ws.id_sum;
-      fs.amount_sum += ws.amount_sum;
+  for (uint32_t i = 0; i < (uint32_t)(nth * NC); i++) {
+      const Stats &ws = workers[i / NC].stats[i % NC];
+      Stats &fs = final_s[i % NC];
+      fs.count += ws.count; fs.id_sum += ws.id_sum; fs.amount_sum += ws.amount_sum;
       fs.amount_min = std::min(fs.amount_min, ws.amount_min);
       fs.amount_max = std::max(fs.amount_max, ws.amount_max);
-      fs.name_bytes += ws.name_bytes;
-      fs.note_bytes += ws.note_bytes;
+      fs.name_bytes += ws.name_bytes; fs.note_bytes += ws.note_bytes;
     }
 
   // Countries sort by their packed 3-byte key; '_' (UNMATCHED) is last.
-  uint32_t order[MAX_C];
-  for (uint32_t i = 0; i < n_countries; i++)
-    order[i] = i;
-  std::sort(order, order + n_countries, [](uint32_t a, uint32_t b) {
-    return country_key[a] < country_key[b];
-  });
+  uint32_t order[MAX_C]; for (uint32_t i = 0; i < NC; i++) order[i] = i;
+  std::sort(order, order + NC, [](auto a, auto b) { return CK[a] < CK[b]; });
 
   mkdir(out_dir.c_str(), 0777);
   FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
-  if (!out)
-    return 1;
-  for (uint32_t oi = 0; oi < n_countries; oi++) {
+  if (!out) return 1;
+  for (uint32_t oi = 0; oi < NC; oi++) {
     uint32_t c = order[oi];
     const Stats &g = final_s[c];
-    if (g.count == 0)
-      continue;
-    uint32_t dist = 0;
-    for (uint32_t i = 0; i < BITS_W; i++)
-      dist += __builtin_popcountll(country_bits[c][i]);
-    char code[4] = {(char)(country_key[c] >> 16), (char)(country_key[c] >> 8),
-                    (char)country_key[c], 0};
+    if (g.count == 0) continue;
+    uint32_t d = 0;
+    for (uint32_t i = 0; i < BITS_W; i++) d += __builtin_popcountll(CB[c][i]);
+    char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8),
+                    (char)CK[c], 0};
     const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
-    fprintf(out, "%s %lu %lu ", nm, (unsigned long)g.count,
-            (unsigned long)g.id_sum);
+    fprintf(out, "%s %zu %zu ", nm, (size_t)g.count, (size_t)g.id_sum);
     pr_money(out, g.amount_sum, ' ');
     pr_money(out, g.amount_min, ' ');
     pr_money(out, g.amount_max, ' ');
-    fprintf(out, "%u %lu %lu\n", dist, (unsigned long)g.name_bytes,
-            (unsigned long)g.note_bytes);
+    fprintf(out, "%u %zu %zu\n", d, (size_t)g.name_bytes, (size_t)g.note_bytes);
   }
   fclose(out);
   return 0;

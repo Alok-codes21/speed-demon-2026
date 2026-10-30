@@ -47,4 +47,6 @@ Every step from the reference to your final version, each with the live-board ru
   fault their own slices in parallel instead of one synchronous prefault pass.
 - Local full: min 0.258s (= step 14 within noise). Hashes exact on all four
   datasets.
-- Run: PENDING
+- Run: run-2bc6a025a7a9. Board: T 0.047388 (fastest yet; v21 0.049185, step 13
+  0.048229), M 10.3 MB, S 308, 74.20 points - flat vs best because the S and M
+  increases ate the +1.9% T gain. Step 16 golfs the source lines back out.
