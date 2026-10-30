@@ -271,8 +271,13 @@ static inline char* write_cents(char* p, int64_t c) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
     std::string data_dir = (argc > 1) ? argv[1] : "data/c";
     std::string out_dir = (argc > 2) ? argv[2] : ".out/track-c";
+#else
+    std::string data_dir = (argc > 1) ? argv[1] : "/data";
+    std::string out_dir = (argc > 2) ? argv[2] : "/out";
+#endif
     load_regions(data_dir + "/regions.csv");
 
     std::string rec_path = data_dir + "/records.csv";
