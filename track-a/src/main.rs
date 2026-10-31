@@ -59,6 +59,7 @@ extern "C" {
     fn write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 const MADV_DONTNEED: i32 = 4;
+const MADV_HUGEPAGE: i32 = 14;
 
 // ------------------------------------------------------------- byte helpers
 
@@ -721,9 +722,6 @@ enum Claim {
 // --------------------------------------------------------------------- main
 
 fn main() {
-    unsafe {
-        prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-    }
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(String::as_str).unwrap_or("/data");
     let out_dir = args.get(2).map(String::as_str).unwrap_or("/out");
@@ -750,6 +748,12 @@ fn main() {
         }
         region
     };
+    // Back the log with huge pages when the kernel has them: the scan faults
+    // ~120 2 MiB pages instead of ~58k 4 KiB ones. Advisory; the kernel
+    // falls back to small pages under fragmentation.
+    unsafe {
+        madvise(log, size, MADV_HUGEPAGE);
+    }
 
     let simd = std::arch::is_x86_feature_detected!("avx2");
 
