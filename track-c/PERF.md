@@ -234,5 +234,10 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 44 (v71 thread count 12 -> 16)
 - Change: nth 12 -> 16 (granules stay 96, stealing balances). Step 34 showed 12 > 10, so the box has >= 12 SMT slots; if it has 16, T wins up to +25%; if it has exactly 12, mild oversubscription costs a few % on this run only (best-score unaffected). Board is the measurement (1-vCPU sandbox cannot measure thread scaling).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
-- Board T_s/M/S/points: pending
+- Board T_s/M/S/points: T_s=0.0443 M=10.1MB S=248 points=75.925192 - REGRESSION vs run-f12e9567f984 (76.016): the box has 12 SMT slots; 16 threads oversubscribe. Thread count settled at 12.
+- Run: run-da6d96c3d713
+
+## Step 45 (revert to v69b; step-44 16-thread bet lost)
+- Change: c_join.cpp back to step-43 code (nth=12). Best stays run-f12e9567f984 (76.016).
+- Board T_s/M/S/points: pending (same code as step 43)
 - Run: pending
