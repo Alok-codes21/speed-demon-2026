@@ -566,4 +566,18 @@ synthetic single-term suite: 0 matches instead of 144).
 
 - Dockerfile and Cargo.toml back to the step-27 plain build; src/gen.rs
   removed. Code unchanged from v29.
+- Run: run-523b5d78f4d0 - PASS: T=0.2577 s, M=51.4 MB, S=628, 68.51 pts.
+  Below the v29 band; the best stays run-fe8181c1fbf8 (69.11, T=0.2446).
+
+## Step 30: 4-byte term-table slots + comment diet (v31, this push)
+
+- Terms::slot entries shrink u64 -> u32: 15 hash tag bits above id + 1
+  (17 bits, asserted under 0x1FFFF). The table halves (2 MB -> 1 MB on
+  the full queries), so scan probes sit closer to L2. A 15-bit tag makes
+  a wrong-slot key load ~1/32768 per probe; same() still confirms.
+- Comment diet: 12 redundant comment lines condensed (wording only, no
+  design content lost); S 628 -> 617 counted lines.
+- Local gates: synthetic/sample/full all byte-exact (sha256
+  f86973c2...80927); local A/B vs v29 neutral (+/-2%, dev box noise
+  bound). The board decides, as with steps 23/25/28.
 - Run: run-pending
