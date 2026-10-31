@@ -323,3 +323,24 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 6x sample / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 54: parallel popcount + _exit
+- Popcount of country bitsets split across threads at the end; _exit after the
+  buffered write. Run: pushed 13:29 IST, board reading lost (superseded in the
+  board's latest slot before it could be recorded).
+
+## Step 55: 6-thread scaling diagnostic
+- Same code as step 54 with 6 worker threads to read the T(n) scaling curve.
+  Run: pushed 13:32 IST, board reading lost (same supersede race).
+
+## Step 56: two-phase redesign (stream dedup) - REVERTED
+- Phase 1 appended 64-bit (name, country) pair-keys to thread-local chunked
+  streams with no shared tables in the record loop; phase 2 counted distinct
+  keys per country in private sets after a barrier. Local (1 vCPU): -12%.
+  Board: T 0.0423 -> 0.0598 (+41%), M 10.0 -> 56.7 MB, points 64.74
+  (run-1829599a08a6). The extra 27 MB write+read pass is memory-bandwidth
+  bound on the 12-core runner; decisive loss, reverted.
+
+## Step 57: revert to step-53 code (step-49 shape + empty-name guard)
+- Tip restored to the best-known code (board best 76.718, run-a2f020e15701).
+- Run: PENDING

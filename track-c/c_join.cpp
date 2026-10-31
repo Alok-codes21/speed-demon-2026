@@ -1,11 +1,8 @@
 // Speed Demon 2026, Track C (Join). Linux, C++20, no dependencies.
 //
 // mmap records.csv -> 12 threads parse disjoint granules at record boundaries
-// -> merge per-thread aggregates -> one buffered write. Two phases: parse
-// appends each record's (name, country) pair-key to a thread-local chunked
-// stream per country (no shared-table traffic in the hot loop); after a
-// barrier, countries are dealt to threads which count distinct keys in
-// private hash sets.
+// -> merge per-thread aggregates -> one buffered write. Names intern to small
+// ids in a lock-free hash table; each country keeps a bitset over name ids.
 
 #include <algorithm>
 #include <cstdint>
@@ -17,9 +14,9 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <cstdlib>
 
-static const uint32_t MAX_C = 256;
+// table geometry: 2^17 name slots; 256 country slots of 2^17 bits
+static const uint32_t HM = 131071, MAX_C = 256, BITS_W = 2048;
 static const char *fend, *gst[193]; // records.csv end; granule boundaries
 
 struct Stats {
@@ -27,25 +24,21 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
+static uint64_t (*CB)[BITS_W]; // per-country bitsets over name ids
 static uint8_t *R2C;           // region id -> country slot
 static uint32_t CK[MAX_C], NC = 0, UNMATCHED = 0; // packed codes; '_' unmatched
+static uint64_t *NT; // name hash table; slot 0 reserved (id 0 = empty name)
 static uint32_t gn; // granule counter
 
-// Dedup streams: each (thread, country) pair owns a chain of 1KB chunks of
-// 64-bit pair-keys; chunks come from a shared pool with an atomic bump
-// pointer (one atomic per 127 records, none per record).
-struct Chunk {
-  Chunk *next;
-  uint64_t keys[127];
-};
-struct Stream {
-  Chunk *head = nullptr, *cur = nullptr;
-  uint32_t n = 127; // forces chunk allocation on the first append
-};
-static Chunk *pool;
-static uint32_t pool_n, pool_cap;
-static uint32_t dcnt[MAX_C];
-static pthread_barrier_t bar;
+// Names intern to slot ids in a lock-free open-addressing table; the slot
+// index is the id (all hashes have bit 63 set, so a plain CAS publishes the
+// slot and no value is ever pending). k==0 below: our CAS installed h.
+static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
+  for (uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);;
+       idx = (idx + 1) & HM, k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE))
+    if ((k = k ? k : __sync_val_compare_and_swap(&NT[idx], 0, h)) == h || !k)
+      return idx;
+}
 
 // 8 bytes with the high (8 - n) bytes zeroed, never reading past end.
 static inline uint64_t load8(const char *s, uint32_t n, const char *end) {
@@ -139,11 +132,7 @@ static inline const char *quoted_end(const char *s, const char *end,
 
 struct Worker {
   Stats stats[MAX_C];
-  Stream streams[MAX_C];
-  uint64_t *pset = nullptr; // phase-2 scratch set
-  uint32_t pcap = 0;
 };
-static Worker workers[12];
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -160,25 +149,36 @@ static Worker workers[12];
     esc = 0, p++;
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
-  Worker *wk = (Worker *)arg;
-  Stats *stats = wk->stats;
+  Stats *stats = ((Worker *)arg)->stats;
+  uint32_t bnid[16], nb = 0, bc[16];
+  // flush n buffered bitsets: prefetch all lines, then set
+  auto bf = [&](uint32_t n) {
+    for (uint32_t j = 0; j < n; j++)
+      __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+    for (uint32_t j = 0; j < n; j++) {
+      uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], m = 1ULL << (bnid[j] & 63);
+      (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
+    }
+  };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
     while (p < end) {
       // skip a UTF-8 BOM before a record, then the id field
       const char *s, *e;
-      uint32_t esc, name_len = 0, note_len = 0;
+      uint32_t esc, name_len = 0, note_len = 0, slot;
       uint64_t id = (p += 3 * ((uint8_t)*p == 0xEF), num(p, ','));
       // name: empty unquoted, or quoted (non-empty names are always quoted)
       QF(name_len);
-      // empty names share one key per country; skip the hash for them
+      // empty names never intern; skip the hash (s is only set by QF)
       uint64_t nh = name_len
                         ? (esc | (name_len > 25) ? hl(s, e - 2)
                                                  : hs(s, name_len, fend))
                         : 0;
+      __builtin_prefetch(&NT[slot = nh & HM]);
       QF(note_len); // note: only its unescaped byte length is needed
       uint32_t reg = num(p, ',');
       uint8_t c = (reg < 1000000) ? R2C[reg] : 255;
+      __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
       int64_t neg = *p == '-';
       int64_t cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0');
       p += 2, cents = neg ? -cents : cents; // two fraction digits consumed
@@ -190,67 +190,11 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_min = cents < st.amount_min ? cents : st.amount_min;
       st.amount_max = cents > st.amount_max ? cents : st.amount_max;
       st.name_bytes += name_len, st.note_bytes += note_len;
-      // append the pair-key to this thread's stream for the country
-      Stream &sm = wk->streams[c];
-      if (__builtin_expect(sm.n == 127, 0)) {
-        Chunk *nc =
-            &pool[__atomic_fetch_add(&pool_n, 1, 0)];
-        if (__builtin_expect(sm.cur == nullptr, 0))
-          sm.head = nc;
-        else
-          sm.cur->next = nc;
-        sm.cur = nc, sm.n = 0;
-      }
-      sm.cur->keys[sm.n++] = nh ^ (0x9e3779b97f4a7c15ULL * (c + 1));
+      bnid[nb] = name_len ? intern_name(nh, slot) : 0, bc[nb] = c;
+      ++nb == 16 && (bf(16), nb = 0);
     }
   }
-
-  // Phase 2: after all parsing, countries are dealt to threads by decreasing
-  // size (each thread recomputes the same deal); a thread counts distinct
-  // keys per country in a private open-addressing set.
-  pthread_barrier_wait(&bar);
-  uint64_t ctot[MAX_C] = {}, tload[MAX_C];
-  for (uint32_t c = 0; c < NC; c++)
-    for (auto &w : workers)
-      ctot[c] += w.stats[c].count;
-  uint32_t order[MAX_C];
-  std::iota(order, order + NC, 0u);
-  std::sort(order, order + NC,
-            [&](auto a, auto b) { return ctot[a] > ctot[b]; });
-  uint32_t tid = (uint32_t)(wk - workers);
-  for (uint32_t oi = tid; oi < NC; oi += 12) {
-    uint32_t c = order[oi];
-    if (!ctot[c])
-      continue;
-    uint32_t need = 16;
-    while (need < ctot[c] * 3 / 2)
-      need *= 2;
-    if (need > wk->pcap) {
-      free(wk->pset);
-      wk->pset = (uint64_t *)calloc(need, 8);
-      wk->pcap = need;
-    } else
-      memset(wk->pset, 0, (size_t)wk->pcap * 8);
-    uint64_t *t = wk->pset, d = 0;
-    uint32_t mask = wk->pcap - 1;
-    for (auto &w : workers)
-      for (Chunk *ch = w.streams[c].head; ch; ch = ch->next) {
-        uint32_t lim = ch->next ? 127 : w.streams[c].n;
-        for (uint32_t i = 0; i < lim; i++) {
-          uint64_t k = ch->keys[i] | (1ULL << 63);
-          for (uint32_t j = k & mask;; j = (j + 1) & mask) {
-            uint64_t v = t[j];
-            if (!v) {
-              t[j] = k, d++;
-              break;
-            }
-            if (v == k)
-              break;
-          }
-        }
-      }
-    dcnt[c] = (uint32_t)d;
-  }
+  bf(nb);
   return nullptr;
 }
 
@@ -264,14 +208,13 @@ static void pr_money(FILE *f, int64_t c, char sep) {
 int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data",
               out_dir = argc > 2 ? argv[2] : "/out";
-  // 40MB anon (RW, private); align to 2MB for huge pages. R2C 1MB, then the
-  // chunk pool for the dedup streams.
-  char *big = (char *)mmap(0, 48 << 20, 3, 0x22, -1, 0);
+  // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
+  char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
   size_t al = (size_t)(big + (2 << 20) - 1) & -(2 << 20);
-  madvise((void *)al, 40 << 20, 14); // MADV_HUGEPAGE
-  R2C = (uint8_t *)al;
-  pool = (Chunk *)(al + (1 << 20));
-  pool_cap = (39u << 20) / sizeof(Chunk), pool_n = 0;
+  madvise((void *)al, 6 << 20, 14); // MADV_HUGEPAGE
+  // NT 1MB, R2C 1MB, CB the rest; slot 0 reserved (real hashes set bit 63)
+  NT = (uint64_t *)al, R2C = (uint8_t *)(al + (1 << 20)),
+  CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1;
   load_regions(data_dir + "/regions.csv");
   struct stat st;
   fstat(open((data_dir + "/records.csv").c_str(), O_RDONLY), &st);
@@ -291,11 +234,10 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
-  pthread_barrier_init(&bar, nullptr, 13);
+  static Worker workers[12];
   pthread_t ths[12];
   for (int i = 0; i < 12; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
-  pthread_barrier_wait(&bar); // parsing done; phase 2 runs inside the workers
   for (int i = 0; i < 12; i++)
     pthread_join(ths[i], nullptr);
 
@@ -318,10 +260,12 @@ int main(int argc, char **argv) {
   FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
   out || (exit(1), 0);
   for (uint32_t oi = 0; oi < NC; oi++) {
-    uint32_t c = order[oi], d = dcnt[c];
+    uint32_t c = order[oi], d = 0;
     const Stats &g = final_s[c];
     if (g.count == 0)
       continue;
+    for (uint32_t i = 0; i < BITS_W; i++)
+      d += __builtin_popcountll(CB[c][i]);
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     fprintf(out, "%s %lu %lu ", c == UNMATCHED ? "_UNMATCHED" : code, g.count,
             g.id_sum),
