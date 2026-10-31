@@ -352,3 +352,18 @@ Every step from the reference to your final version, each with the live-board ru
   id-field variant measured slower locally and was dropped (ablation: id mask
   +5%, SWAR id +10%, region/amount mask -4.4% vs step-53 code on 1 vCPU).
 - Run: PENDING
+
+## Step 58 result: mask-parsed region + amount fields - REVERTED
+- Board: T 0.0423 -> 0.0400 (-5.4%, the delimiter-mask parse pays on the
+  runner), but S 218 -> 255 and M +0.5 MB: points 76.583 (run-da982ad1c7f2),
+  -0.135 vs best. Reverted; the parse trick is folded into step 59.
+
+## Step 59: no locked RMWs in the record loop (intern + id streams)
+- Phase 1: parse (with the step-58 mask tail), intern names in the shared
+  read-mostly table (CAS only for never-seen names), append 4-byte
+  (slot << 8 | country) keys to thread-local chunked streams. The per-country
+  shared-bitset fetch_or per record is gone.
+- Phase 2 (after a barrier): countries dealt to threads by decreasing size;
+  distinct ids counted in a private 16 KB (L1-resident) bitset per country.
+- Local: -8.6% vs step-53 code (1 vCPU); maxrss delta +12 MB (~22 MB board).
+- Run: PENDING
