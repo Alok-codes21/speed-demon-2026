@@ -36,6 +36,13 @@ On an Apple M4 Pro the same reference is 27.2 s with 2.29 GB peak RSS.
    cgroup CPU quota (cpu.max / cfs_quota) instead of the host core count the
    container reports (capped at the quota, else host, max 16). Board memory
    did not move (501 MB) - the bloat is not thread buffers; still hunting it.
+8. **Peak-memory trim (v7).** Per-thread posting vectors are shrunk to fit
+   before the merge, so the build peak is exact parts + index instead of
+   parts with Vec growth slack (~1.7x) + index. Merge now precomputes exact
+   spans with a prefix sum. Env-gated stage/IO statistics (TRACKB_STATS)
+   added for profiling; no effect when off. Local wall unchanged
+   (3.2-3.8 s on 1 vCPU), all four correctness gates byte-identical.
+
 7. **AVX2 tokenizer (v6, current).** The corpus scan classifies 32 bytes per
    instruction into token/separator bitmasks (unsigned range tests via the
    xor-0x80 trick, case folded with | 0x20, exact on [a-z0-9A-Z]) and walks
@@ -75,3 +82,4 @@ identical to 4d9f7f3.
 | 66d14cf (runtime-first v4) | run-06ed87c66719 | PASS: T=0.886 s, M=477 MB, K=7.96, 45.06 pts |
 | 4d9f7f3 (quota threads v5) | run-8b18b13d78cd (measured at d2793ac, same track-b code) | PASS: T=0.863 s, M=501 MB, K=8.02, 45.22 pts |
 | 7fa17fc (AVX2 tokenizer v6) | run-ddbd7deaacbb | PASS: T=0.723 s, M=501 MB, K=8.46, 46.36 pts |
+| peak-trim v7 (this push) | pending | awaiting board run |

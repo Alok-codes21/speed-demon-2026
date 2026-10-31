@@ -550,9 +550,16 @@ fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usi
     let mut buf = vec![0u8; BLOCK + (1 << 16)];
     let mut carry = 0usize; // leading partial line in buf
     let mut pos = start;
+    let stats = std::env::var_os("TRACKB_STATS").is_some();
+    let mut t_io = std::time::Duration::ZERO;
+    let mut t_scan = std::time::Duration::ZERO;
     while pos < end {
         let want = BLOCK.min(end - pos);
+        let tr = std::time::Instant::now();
         let n = f.read_at(&mut buf[carry..carry + want], pos as u64).expect("read docs.txt");
+        if stats {
+            t_io += tr.elapsed();
+        }
         if n == 0 {
             break;
         }
@@ -567,12 +574,27 @@ fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usi
             }
         };
         if cut > 0 {
+            let ts = std::time::Instant::now();
             scan_lines(&buf[..cut], terms, &mut post, &mut recent, use_avx2);
+            if stats {
+                t_scan += ts.elapsed();
+            }
             buf.copy_within(cut..avail, 0);
             carry = avail - cut;
         }
     }
     debug_assert!(carry == 0);
+    if stats {
+        eprintln!("STATS thread_range=[{start},{end}) io={t_io:?} scan_lines={t_scan:?}");
+    }
+    // Release Vec growth slack before the merge so peak memory during
+    // build_index is exact parts + index, not ~1.7x parts + index.
+    for v in post.docs.iter_mut() {
+        v.shrink_to_fit();
+    }
+    for v in post.ents.iter_mut() {
+        v.shrink_to_fit();
+    }
     post
 }
 
@@ -645,15 +667,27 @@ fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
     for p in parts.iter_mut() {
         p.ovf.sort_unstable();
     }
+    // Exact spans first (prefix sums over per-thread lengths), then a single
+    // copy pass; per-thread vecs are freed as they are taken.
+    {
+        let mut d_off = 0u32;
+        let mut e_off = 0u32;
+        for tid in 0..n_terms {
+            d_spans[tid].0 = d_off;
+            e_spans[tid].0 = e_off;
+            for p in parts.iter() {
+                d_off += p.docs[tid].len() as u32;
+                e_off += p.ents[tid].len() as u32;
+            }
+            d_spans[tid].1 = d_off - d_spans[tid].0;
+            e_spans[tid].1 = e_off - e_spans[tid].0;
+        }
+    }
     for tid in 0..n_terms {
-        let ds = docs.len() as u32;
-        let es = ents.len() as u32;
         for p in parts.iter_mut() {
             docs.extend_from_slice(&std::mem::take(&mut p.docs[tid]));
             ents.extend_from_slice(&std::mem::take(&mut p.ents[tid]));
         }
-        d_spans[tid] = (ds, docs.len() as u32 - ds);
-        e_spans[tid] = (es, ents.len() as u32 - es);
     }
     // Per-term overflow spans (per-thread overflow lists are sorted by
     // (tid, doc); overflow is normally empty, so a simple scan suffices).
@@ -669,6 +703,24 @@ fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
             }
             o_spans[tid as usize] = (s, ovf.len() as u32 - s);
         }
+    }
+    if std::env::var_os("TRACKB_STATS").is_some() {
+        let mut counts: Vec<(u32, u32)> = (0..n_terms as u32)
+            .map(|t| (t, e_spans[t as usize].1))
+            .filter(|&(_, c)| c > 0)
+            .collect();
+        counts.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        let total: u64 = counts.iter().map(|&(_, c)| c as u64).sum();
+        eprintln!("STATS phrase_terms_with_pos={} total_pos_entries={} ({} MB as u32)", counts.len(), total, total * 4 / 1_000_000);
+        for (t, c) in counts.iter().take(15) {
+            eprintln!("STATS term#{t} count={c}");
+        }
+        for cap in [100u32, 500, 1000, 2000, 5000, 10000, 50000] {
+            let kept: u64 = counts.iter().map(|&(_, c)| (c as u64).min(cap as u64)).sum();
+            let rare_terms = counts.iter().filter(|&&(_, c)| c <= cap).count();
+            eprintln!("STATS cap={cap}: kept_entries={kept} ({} MB) terms_under_cap={rare_terms}/{}", kept * 4 / 1_000_000, counts.len());
+        }
+        eprintln!("STATS docs_entries={} ({} MB)", d_total, d_total * 4 / 1_000_000);
     }
     Index { docs, d_spans, ents, e_spans, ovf, o_spans }
 }
@@ -867,11 +919,13 @@ fn main() {
     let out_dir = args.get(2).map(String::as_str).unwrap_or("/out");
     let docs_path = format!("{data_dir}/docs.txt");
 
+    let t0 = std::time::Instant::now();
     let qdata = fs::read(format!("{data_dir}/queries.txt")).expect("read queries.txt");
     let mut terms = Terms::new(1 << 16);
     let queries = parse_queries(&qdata, &mut terms);
     drop(qdata);
     let n_terms = terms.len();
+    let t_queries = t0.elapsed();
 
     let file_len = fs::metadata(&docs_path).expect("stat docs.txt").len() as usize;
     let nthreads = worker_threads();
@@ -892,8 +946,10 @@ fn main() {
         }
     });
 
+    let t_scan = t0.elapsed();
     let index = build_index(&mut parts, n_terms);
     drop(parts);
+    let t_merge = t0.elapsed();
 
     let mut pieces: Vec<Vec<u8>> = Vec::new();
     std::thread::scope(|s| {
@@ -909,6 +965,11 @@ fn main() {
         }
     });
 
+    let t_eval = t0.elapsed();
+    if std::env::var_os("TRACKB_STATS").is_some() {
+        eprintln!("STATS threads={} queries_setup={:?} scan={:?} merge={:?} eval={:?}",
+            nthreads, t_queries, t_scan - t_queries, t_merge - t_scan, t_eval - t_merge);
+    }
     fs::create_dir_all(out_dir).ok();
     let mut f = fs::File::create(format!("{out_dir}/results.txt")).expect("create results.txt");
     for p in &pieces {
