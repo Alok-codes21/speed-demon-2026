@@ -1,6 +1,6 @@
 // Speed Demon 2026, Track C (Join). Linux, C++20, no dependencies.
 //
-// mmap records.csv -> 6 threads parse disjoint granules at record boundaries
+// mmap records.csv -> 12 threads parse disjoint granules at record boundaries
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
 // ids in a lock-free hash table; each country keeps a bitset over name ids.
 
@@ -155,16 +155,16 @@ static uint32_t nready;
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  // Pre-populate this thread's share of the shared tables: six threads
+  // Pre-populate this thread's share of the shared tables: twelve threads
   // faulting the same pages in races queue on the kernel's page-table lock,
   // and a read-then-written page faults twice (zero page, then private).
   {
     int T = ((Worker *)arg)->tid;
-    size_t pages = popbytes / 4096, from = pages * T / 6, to = pages * (T + 1) / 6;
+    size_t pages = popbytes / 4096, from = pages * T / 12, to = pages * (T + 1) / 12;
     if (to > from)
       madvise(pool + from * 4096, (to - from) * 4096, 23); // MADV_POPULATE_WRITE
     __atomic_fetch_add(&nready, 1, 0);
-    while (__atomic_load_n(&nready, 0) < 6)
+    while (__atomic_load_n(&nready, 0) < 12)
       ;
   }
   // Every record's three random reads (region table, name slot, bitset word)
@@ -275,18 +275,18 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
-  static Worker workers[6];
-  pthread_t ths[6];
-  for (int i = 0; i < 6; i++)
+  static Worker workers[12];
+  pthread_t ths[12];
+  for (int i = 0; i < 12; i++)
     workers[i].tid = i;
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < 12; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < 12; i++)
     pthread_join(ths[i], nullptr);
 
   // Merge the per-thread aggregates (empty threads merge as zeros).
   Stats final_s[MAX_C];
-  for (uint32_t i = 0; i < 6 * NC; i++) {
+  for (uint32_t i = 0; i < 12 * NC; i++) {
     auto &w = workers[i / NC].stats[i % NC], &f = final_s[i % NC];
     f.count += w.count, f.id_sum += w.id_sum, f.amount_sum += w.amount_sum;
     f.amount_min = std::min(f.amount_min, w.amount_min),

@@ -565,4 +565,12 @@ Every step from the reference to your final version, each with the live-board ru
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
   parallel stress stable, ASAN+UBSAN clean. (Local thread-count timing is
   meaningless on the 1-vCPU sandbox; board decides.)
+- Run: LOST, reverted. Two board runs of identical code read T=0.047358 and
+  T=0.048679 vs v135's three-run band of 0.0380-0.0442; SMT siblings were
+  hiding this latency-bound workload's random-access stalls, not thrashing
+  caches. 12 threads stands.
+
+## Step 79 - revert to v135 (12 parse threads)
+- Restores the banked-best code byte-for-byte (run-533baf549c40, 77.702040)
+  after the step-78 probe lost on two confirming board runs.
 - Run: PENDING
