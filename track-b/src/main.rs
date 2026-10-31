@@ -66,6 +66,11 @@ const fn build_class() -> [u8; 256] {
 }
 static CLASS: [u8; 256] = build_class();
 
+#[inline(always)]
+fn is_tok(c: u8) -> bool {
+    CLASS[c as usize] == 1
+}
+
 // ------------------------------------------------------------ hashing ----
 // fxhash-style; tokens <= 32 bytes, read in 8-byte chunks. The 0x20 fold is
 // exactly the spec's A-Z -> a-z fold on token bytes ([a-z0-9A-Z]).
@@ -137,6 +142,7 @@ unsafe fn tok_eq(p: *const u8, len: usize, term: &[u8]) -> bool {
 const EMPTY: u64 = u64::MAX;
 
 struct Terms {
+    bloom: Vec<u64>,
     slots: Vec<u64>, // (hash32 << 32) | tid ; EMPTY when free
     mask: usize,
     toff: Vec<u32>,
@@ -147,7 +153,7 @@ struct Terms {
 impl Terms {
     fn with_cap(n: usize) -> Self {
         let cap = (n * 2).next_power_of_two().max(16);
-        Terms { slots: vec![EMPTY; cap], mask: cap - 1, toff: vec![], tlen: vec![], arena: vec![], flags: vec![] }
+        Terms { bloom: vec![0u64; 32768], slots: vec![EMPTY; cap], mask: cap - 1, toff: vec![], tlen: vec![], arena: vec![], flags: vec![] }
     }
     fn insert(&mut self, w: &[u8], flag: u8) -> u32 {
         let h = unsafe { hash_tok(w.as_ptr(), w.len()) };
@@ -163,6 +169,8 @@ impl Terms {
                 self.tlen.push(w.len() as u8);
                 self.arena.extend_from_slice(w);
                 self.flags.push(flag);
+                let b = ((h >> 32) as usize) & 32767;
+                self.bloom[b >> 6] |= 1u64 << (b & 63);
                 return tid;
             }
             let tid = (s & 0xffff_ffff) as u32;
@@ -328,7 +336,70 @@ fn parse_queries(data: &[u8]) -> Queries {
     Queries { qs, phr_tids, phr_bids, terms, bigrams, n_terms, n_bids }
 }
 
+
 // ---------------------------------------------------------- corpus scan ----
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn handle_token(
+    buf: &Map, s: usize, len: usize, q: &Queries,
+    posts: &mut [Vec<u32>], bposts: &mut [Vec<u32>],
+    last_doc: &mut [u32], blast: &mut [u32], docid: u32, prev: &mut u32,
+) {
+    unsafe {
+        if len > 32 {
+            *prev = NONE;
+            return;
+        }
+        let p = buf.ptr(s);
+        let h = hash_tok(p, len);
+        let b = ((h >> 32) as usize) & 32767;
+        if q.terms.bloom[b >> 6] >> (b & 63) & 1 == 0 {
+            *prev = NONE;
+            return;
+        }
+        let tid = q.terms.probe(p, len, h);
+        if tid != NONE {
+            if q.terms.flags[tid as usize] & 1 != 0 && last_doc[tid as usize] != docid {
+                posts[tid as usize].push(docid);
+                last_doc[tid as usize] = docid;
+            }
+            if *prev != NONE {
+                let bid = q.bigrams.probe(*prev, tid);
+                if bid != NONE && blast[bid as usize] != docid {
+                    bposts[bid as usize].push(docid);
+                    blast[bid as usize] = docid;
+                }
+            }
+            *prev = tid;
+        } else {
+            *prev = NONE;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_tokens_scalar(
+    buf: &Map, start: usize, end: usize, q: &Queries,
+    posts: &mut [Vec<u32>], bposts: &mut [Vec<u32>],
+    last_doc: &mut [u32], blast: &mut [u32], docid: u32,
+) -> u32 {
+    let mut prev = NONE;
+    let mut i = start;
+    while i < end {
+        if is_tok(buf.b(i)) {
+            let s = i;
+            i += 1;
+            while i < end && is_tok(buf.b(i)) {
+                i += 1;
+            }
+            handle_token(buf, s, i - s, q, posts, bposts, last_doc, blast, docid, &mut prev);
+        } else {
+            i += 1;
+        }
+    }
+    prev
+}
+
 struct ScanRes {
     posts: Vec<Vec<u32>>,  // per tid (only BOOL terms fill)
     bposts: Vec<Vec<u32>>, // per bid
@@ -359,96 +430,22 @@ fn scan(buf: &Map, mut i: usize, end: usize, q: &Queries) -> ScanRes {
         }
         i += 1;
         offs.push(line_start as u64);
-        let mut prev = NONE;
         // tokenize until the newline (a separator itself)
-        loop {
-            while CLASS[buf.b(i) as usize] == 0 {
-                if buf.b(i) == b'\n' {
-                    break;
-                }
-                i += 1;
+        let line_end = {
+            let mut j = i;
+            while buf.b(j) != b'\n' {
+                j += 1;
             }
-            if buf.b(i) == b'\n' {
-                i += 1;
-                break;
-            }
-            let s = i;
-            while CLASS[buf.b(i) as usize] != 0 {
-                i += 1;
-            }
-            let len = i - s;
-            let mut tid = NONE;
-            if len <= 32 {
-                let h = unsafe { hash_tok(buf.ptr(s), len) };
-                tid = unsafe { q.terms.probe(buf.ptr(s), len, h) };
-            }
-            if tid != NONE {
-                if q.terms.flags[tid as usize] & 1 != 0 && last_doc[tid as usize] != docid {
-                    posts[tid as usize].push(docid);
-                    last_doc[tid as usize] = docid;
-                }
-                if prev != NONE {
-                    let bid = q.bigrams.probe(prev, tid);
-                    if bid != NONE && blast[bid as usize] != docid {
-                        bposts[bid as usize].push(docid);
-                        blast[bid as usize] = docid;
-                    }
-                }
-            }
-            prev = tid;
-        }
+            j
+        };
+        scan_tokens_scalar(buf, i, line_end, q, &mut posts, &mut bposts, &mut last_doc, &mut blast, docid);
+        i = line_end + 1;
         docid += 1;
     }
     for v in posts.iter_mut().chain(bposts.iter_mut()) {
         v.shrink_to_fit();
     }
     ScanRes { posts, bposts, offs, ndocs: docid }
-}
-
-// --------------------------------------------------------------- varint ----
-#[inline(always)]
-fn put_varint(out: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-struct Arena {
-    chunks: Vec<Vec<u8>>, // per merge thread
-}
-struct LRef {
-    chunk: u32,
-    off: u32,
-    len: u32,
-}
-
-fn get_slice<'a>(a: &'a Arena, r: &LRef) -> &'a [u8] {
-    &a.chunks[r.chunk as usize][r.off as usize..][..r.len as usize]
-}
-
-/// Decode a delta-varint doc list into out (cleared first).
-#[inline(always)]
-fn decode_into(bytes: &[u8], out: &mut Vec<u32>) {
-    out.clear();
-    let mut v = 0u32;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let mut x = 0u32;
-        let mut sh = 0;
-        loop {
-            let b = bytes[i];
-            i += 1;
-            x |= ((b & 0x7f) as u32) << sh;
-            if b < 0x80 {
-                break;
-            }
-            sh += 7;
-        }
-        v += x;
-        out.push(v);
-    }
 }
 
 // ------------------------------------------------------- sorted set ops ----
@@ -572,6 +569,7 @@ fn write_result(out: &mut Vec<u8>, r: &[u32]) {
 
 // ---------------------------------------------------------------- main ----
 fn main() {
+    let t0 = std::time::Instant::now();
     let data = std::env::args().nth(1).unwrap_or_else(|| "/data".into());
     let outdir = std::env::args().nth(2).unwrap_or_else(|| "/out".into());
 
@@ -583,10 +581,12 @@ fn main() {
     let n_terms = q.n_terms;
     let n_bids = q.n_bids;
 
+    eprintln!("[t +{:6.3}] parse", t0.elapsed().as_secs_f64());
     // corpus
     let (mp, mlen) = map_file(&format!("{data}/docs.txt"), 64);
     let docs = Map(mp, mlen);
 
+    eprintln!("[t +{:6.3}] mmap", t0.elapsed().as_secs_f64());
     let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).min(16);
     // chunk starts aligned to line boundaries
     let mut bounds = Vec::with_capacity(nthreads + 1);
@@ -613,6 +613,7 @@ fn main() {
         }
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    eprintln!("[t +{:6.3}] scan", t0.elapsed().as_secs_f64());
     let nchunks = scans.len();
 
     // global doc offsets, in doc order (chunks are contiguous doc ranges)
@@ -632,23 +633,18 @@ fn main() {
         posts.push(s.posts);
         bposts.push(s.bposts);
     }
-    let mut varint: Vec<u8> = Vec::with_capacity(48 << 20);
-    let mut term_ref: Vec<LRef> = Vec::with_capacity(n_terms);
-    let mut scratch: Vec<u32> = Vec::new();
+    let total_postings: usize = posts.iter().flat_map(|c| c.iter()).map(|v| v.len()).sum();
+    let mut tarena: Vec<u32> = Vec::with_capacity(total_postings);
+    let mut term_ref: Vec<(u32, u32)> = Vec::with_capacity(n_terms);
     for tid in 0..n_terms {
-        scratch.clear();
+        let off = tarena.len() as u32;
         for c in posts.iter_mut() {
-            scratch.extend_from_slice(&c[tid]);
+            tarena.extend_from_slice(&c[tid]);
             c[tid] = Vec::new(); // free as we go
         }
-        let off = varint.len() as u32;
-        let mut prev = 0u32;
-        for &d in &scratch {
-            put_varint(&mut varint, d - prev);
-            prev = d;
-        }
-        term_ref.push(LRef { chunk: 0, off, len: varint.len() as u32 - off });
+        term_ref.push((off, tarena.len() as u32 - off));
     }
+    eprintln!("[t +{:6.3}] term merge", t0.elapsed().as_secs_f64());
     drop(posts);
     let mut barena: Vec<u32> = Vec::new();
     let mut big_ref: Vec<(u32, u32)> = Vec::with_capacity(n_bids); // (off, len)
@@ -660,11 +656,12 @@ fn main() {
         }
         big_ref.push((off, (barena.len() as u32) - off));
     }
+    eprintln!("[t +{:6.3}] bigram merge", t0.elapsed().as_secs_f64());
     drop(bposts);
 
-    let tarena = Arena { chunks: vec![varint] };
     let st = State { q: &q, docs: &docs, offs: &offs, tarena: &tarena, term_ref: &term_ref, barena: &barena, big_ref: &big_ref };
 
+    eprintln!("[t +{:6.3}] state", t0.elapsed().as_secs_f64());
     // Evaluate queries in parallel over contiguous ranges (order preserved).
     let nq = q.qs.len();
     let eth = nthreads.min(16);
@@ -683,6 +680,7 @@ fn main() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    eprintln!("[t +{:6.3}] eval (nq={})", t0.elapsed().as_secs_f64(), nq);
     std::fs::create_dir_all(&outdir).unwrap();
     let mut f = File::create(format!("{outdir}/results.txt")).unwrap();
     let mut all: Vec<u8> = Vec::with_capacity(2 << 20);
@@ -701,14 +699,18 @@ struct State<'a> {
     q: &'a Queries,
     docs: &'a Map,
     offs: &'a [u64],
-    tarena: &'a Arena,
-    term_ref: &'a [LRef],
+    tarena: &'a [u32],
+    term_ref: &'a [(u32, u32)],
     barena: &'a [u32],
     big_ref: &'a [(u32, u32)],
 }
 
 impl<'a> State<'a> {
     #[inline(always)]
+    fn tlist(&self, tid: u32) -> &'a [u32] {
+        let (off, len) = self.term_ref[tid as usize];
+        &self.tarena[off as usize..][..len as usize]
+    }
     fn blist(&self, bid: u32) -> &'a [u32] {
         let (off, len) = self.big_ref[bid as usize];
         &self.barena[off as usize..][..len as usize]
@@ -720,6 +722,10 @@ impl<'a> State<'a> {
             return NONE;
         }
         let h = unsafe { hash_tok(p, len) };
+        let b = ((h >> 32) as usize) & 32767;
+        if self.q.terms.bloom[b >> 6] >> (b & 63) & 1 == 0 {
+            return NONE;
+        }
         unsafe { self.q.terms.probe(p, len, h) }
     }
 }
@@ -733,36 +739,31 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
     for qi in lo..hi {
         match &st.q.qs[qi] {
             Q::Bool(bq) => {
-                decode_into(get_slice(st.tarena, &st.term_ref[bq.tids[0] as usize]), &mut a);
+                a.clear();
+                a.extend_from_slice(st.tlist(bq.tids[0]));
                 for k in 1..bq.n as usize {
-                    let lr = &st.term_ref[bq.tids[k] as usize];
+                    let l = st.tlist(bq.tids[k]);
                     match bq.ops[k - 1] {
                         0 => {
-                            if a.is_empty() || lr.len == 0 {
+                            if a.is_empty() || l.is_empty() {
                                 a.clear();
                                 continue;
                             }
-                            decode_into(get_slice(st.tarena, lr), &mut b);
-                            intersect_into(&a, &b, &mut c);
+                            intersect_into(&a, l, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         1 => {
-                            if lr.len == 0 {
+                            if l.is_empty() {
                                 continue;
                             }
-                            decode_into(get_slice(st.tarena, lr), &mut b);
-                            union_into(&a, &b, &mut c);
+                            union_into(&a, l, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         _ => {
-                            if a.is_empty() {
+                            if a.is_empty() || l.is_empty() {
                                 continue;
                             }
-                            if lr.len == 0 {
-                                continue;
-                            }
-                            decode_into(get_slice(st.tarena, lr), &mut b);
-                            diff_into(&a, &b, &mut c);
+                            diff_into(&a, l, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                     }
