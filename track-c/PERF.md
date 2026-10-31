@@ -448,3 +448,11 @@ Every step from the reference to your final version, each with the live-board ru
   cost S with no T win - intern L3 latency was already hidden. Reverted.
 ## Step 67: revert to step-61 v111 (best-known, 76.954)
 - Run: PENDING
+## Step 68: raw-byte hl hash + 384 granules
+- Escaped/long names (12.2% of records) hashed with FNV-1a over the
+  UNESCAPED value: a 4-cycle/byte serial multiply chain. CSV escaping is
+  canonical, so the raw field bytes are an injective key - hash those
+  word-wise (mum, ~5 cycles per 8B) and skip unescaping entirely.
+- 192 -> 384 granules: halves the work-stealing tail quantum.
+- Local: parity on 1 vCPU (issue-bound savings show at board scale).
+- Run: PENDING
