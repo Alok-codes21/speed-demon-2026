@@ -173,3 +173,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (1-CPU sandbox cannot measure thread-count effects; board is the measurement).
 - Board T_s/M/S/points: pending
 - Run: pending
+
+
+## Step 35 (v55 per-thread bitsets)
+- Change: the shared CB[256][2048] bitset table (6.6M atomic fetch_or, lines ping-ponging across 12 threads ~66x per name) is replaced by per-thread slices: 12 x NC x 16KB (~6MB, only ACTIVE categories), plain load-or, no atomics, OR-folded at output. The batch-16 prefetch/flush structure stays (hides L2 latency inside each slice). M ~9.7 -> ~11.5MB (the top-3 teams all run 11-12MB - this is likely why).
+- Rationale: the batch-16 prefetch win proved CB is the latency hotspot; batching hides latency but the shared lines still ping-pong 66x each. Private slices eliminate the RFO traffic entirely.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local 1-CPU sandbox shows +7% (12x slice-zeroing faults, no contention to remove - the win is invisible to it); board is the measurement.
+- Board T_s/M/S/points: pending
+- Run: pending
