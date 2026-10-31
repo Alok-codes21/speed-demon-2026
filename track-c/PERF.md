@@ -367,3 +367,11 @@ Every step from the reference to your final version, each with the live-board ru
   distinct ids counted in a private 16 KB (L1-resident) bitset per country.
 - Local: -8.6% vs step-53 code (1 vCPU); maxrss delta +12 MB (~22 MB board).
 - Run: PENDING
+
+## Step 59 result: intern + id streams - REVERTED
+- Board: T 0.0428 (no better than step-53), M 46.6 MB, S 294: points 68.91
+  (run-26c5887cd139). Second two-phase design to lose decisively on the
+  runner (step 56: 64.74) - the shared-bitset single pass stays.
+
+## Step 60: revert to step-53 code (best-known, 76.718)
+- Run: PENDING
