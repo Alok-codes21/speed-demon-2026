@@ -369,7 +369,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Phase 2 (after a barrier): countries dealt to threads by decreasing size;
   distinct ids counted in a private 16 KB (L1-resident) bitset per country.
 - Local: -8.6% vs step-53 code (1 vCPU); maxrss delta +12 MB (~22 MB board).
-- Run: PENDING
+- Run: run-91fae3b85a46. Board: T 0.03889, M 8.3 MB (THP off: the box
+  counts only the used pages, no 2 MB rounding), S 274, 77.652 points.
+  NEW BEST (+0.46 over 77.191). Kept as the tip.
 
 ## Step 59 result: intern + id streams - REVERTED
 - Board: T 0.0428 (no better than step-53), M 46.6 MB, S 294: points 68.91
@@ -491,7 +493,7 @@ Every step from the reference to your final version, each with the live-board ru
   S 257, 72.619 points. LOST. Reverted; the M blow-up needs isolation
   before any further pipeline attempt.
 ## Step 72: revert to step-61 v111 (best-known, 77.191)
-- Run: PENDING
+- Run: superseded before measurement (step-73 landed first).
 ## Step 73: pipeline + populate with THP off (v128)
 - Step-70 (ring+populate) read M 11.2 MB, step-71 (ring, no populate) read
   M 29.6 MB, v111 reads 9.9 MB - the deferred-touch ring destabilizes the
@@ -499,4 +501,6 @@ Every step from the reference to your final version, each with the live-board ru
   ring + populate, disables THP process-wide (PR_SET_THP_DISABLE) and drops
   the pool MADV_HUGEPAGE: with 4 KB pages the populate faults exactly the
   used set, no 2 MB rounding. populate now covers NT + R2C + used CB fully.
+- Run: PENDING
+## Step 74: PERF.md bookkeeping (steps 72-73 results); v128 unchanged
 - Run: PENDING
