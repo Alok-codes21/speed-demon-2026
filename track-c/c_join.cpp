@@ -11,7 +11,6 @@
 #include <string>
 #include <fcntl.h>
 #include <immintrin.h>
-#include <atomic>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -138,7 +137,6 @@ static inline const char *quoted_end(const char *s, const char *end,
 
 struct Worker {
   Stats stats[MAX_C];
-  int tid;
 };
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -157,34 +155,14 @@ struct Worker {
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  // Every record's three random reads (region table, name slot, bitset word)
-  // go through a 16-record software pipeline: prefetched when parsed, the
-  // country read + sums + intern retire 16 later, the mark 16 after that.
-  struct Pend {
-    uint64_t nh, id;
-    int64_t cents;
-    uint32_t slot, reg, name_len, note_len;
-  } pend[16];
-  struct Mk {
-    uint32_t c, bnid;
-  } mk[16];
-  uint64_t n = 0, last = ~0ULL;
-  auto adv = [&]() __attribute__((always_inline)) {
-    uint32_t k = n & 15;
-    if (n >= 32 && n - 32 < last) {
-      Mk &m2 = mk[k];
-      __atomic_fetch_or(&CB[m2.c][m2.bnid >> 6], 1ULL << (m2.bnid & 63), 0);
-    }
-    if (n >= 16 && n - 16 < last) {
-      Pend &o = pend[k];
-      uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;
-      Stats &st = stats[c = c == 255 ? UNMATCHED : c];
-      st.count++, st.id_sum += o.id, st.amount_sum += o.cents;
-      st.amount_min = o.cents < st.amount_min ? o.cents : st.amount_min;
-      st.amount_max = o.cents > st.amount_max ? o.cents : st.amount_max;
-      st.name_bytes += o.name_len, st.note_bytes += o.note_len;
-      mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
-      __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
+  uint32_t bnid[16], nb = 0, bc[16];
+  // flush n buffered bitsets: prefetch all lines, then set
+  auto bf = [&](uint32_t n) {
+    for (uint32_t j = 0; j < n; j++)
+      __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+    for (uint32_t j = 0; j < n; j++) {
+      uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], m = 1ULL << (bnid[j] & 63);
+      (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
     }
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
@@ -218,13 +196,20 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
         cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0'),
         p += 2, cents = neg ? -cents : cents,
         p += p < end ? 1 + (*p == '\r') : 0;
-      __builtin_prefetch(&R2C[reg < 1000000 ? reg : 0]);
-      adv(); // retire ring slot n & 15 before it is overwritten
-      pend[n++ & 15] = {nh, id, cents, slot, reg, name_len, note_len};
+      uint8_t c = (reg < 1000000) ? R2C[reg] : 255;
+      __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
+
+      // join and aggregate
+      Stats &st = stats[c = c == 255 ? UNMATCHED : c];
+      st.count++, st.id_sum += id, st.amount_sum += cents;
+      st.amount_min = cents < st.amount_min ? cents : st.amount_min;
+      st.amount_max = cents > st.amount_max ? cents : st.amount_max;
+      st.name_bytes += name_len, st.note_bytes += note_len;
+      bnid[nb] = name_len ? intern_name(nh, slot) : 0, bc[nb] = c;
+      ++nb == 16 && (bf(16), nb = 0);
     }
   }
-  for (last = n; n < last + 32; ++n)
-    adv();
+  bf(nb);
   return nullptr;
 }
 
@@ -266,8 +251,6 @@ int main(int argc, char **argv) {
 
   static Worker workers[12];
   pthread_t ths[12];
-  for (int i = 0; i < 12; i++)
-    workers[i].tid = i;
   for (int i = 0; i < 12; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   for (int i = 0; i < 12; i++)

@@ -485,4 +485,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Step-70's T win isolated from its M cost: keep the 16-record ring (region
   read, sums, intern, mark deferred; plain fetch_or marks), drop the
   MADV_POPULATE_WRITE pre-faulting that added 1.4 MB on the box.
+- Run: run-ffbad0d0b740. Board: T 0.037987 (pipeline T reproduces), but
+  M 29.6 MB (3x v111, locally identical maxrss - unexplained; suspect the
+  deferred-touch pattern interacting with the box's THP accounting),
+  S 257, 72.619 points. LOST. Reverted; the M blow-up needs isolation
+  before any further pipeline attempt.
+## Step 72: revert to step-61 v111 (best-known, 77.191)
 - Run: PENDING
