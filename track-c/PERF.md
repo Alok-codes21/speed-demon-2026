@@ -241,3 +241,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: c_join.cpp back to step-43 code (nth=12). Best stays run-f12e9567f984 (76.016).
 - Board T_s/M/S/points: pending (same code as step 43)
 - Run: pending
+
+## Step 46 (v72 granules 96 -> 192)
+- Change: granule count 96 -> 192 (gst[193]); halves the worst-case idle tail (~0.2ms -> ~0.1ms of 43ms). Everything else identical to step-43 code. Board is the measurement (1-vCPU sandbox cannot measure stealing).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending

@@ -153,7 +153,7 @@ static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
-static const char *gst[97];
+static const char *gst[193];
 static uint32_t gnext = 0;
 
 // field-width integer ending at term; consumes the terminator
@@ -169,7 +169,7 @@ void *parse_chunk(void *arg) {
   Stats *stats = w->stats;
   uint32_t bnid[16], nb = 0;
   uint8_t bc[16];
-  for (uint32_t g = __atomic_fetch_add(&gnext, 1, __ATOMIC_RELAXED); g < 96;
+  for (uint32_t g = __atomic_fetch_add(&gnext, 1, __ATOMIC_RELAXED); g < 192;
        g = __atomic_fetch_add(&gnext, 1, __ATOMIC_RELAXED)) {
     const char *p = gst[g], *end = gst[g + 1];
     while (p < end) {
@@ -258,10 +258,10 @@ int main(int argc, char **argv) {
   // Split into 96 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
   const int nth = 12;
-  gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[96] = fend;
+  gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[192] = fend;
   size_t total = fend - gst[0];
-  for (int i = 1; i < 96; i++) {
-    const char *ap = gst[0] + (i * total) / 96,
+  for (int i = 1; i < 192; i++) {
+    const char *ap = gst[0] + (i * total) / 192,
                *m = (const char *)memmem(ap, fend - ap, "\r\n", 2);
     gst[i] = m ? m + 2 : fend;
   }
