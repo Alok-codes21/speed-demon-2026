@@ -300,4 +300,28 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   reference; full sha256 f86973c2...80927 match; 1,152-case synthetic
   AVX2-vs-scalar differential (newline at every mod-32 position, tokens
   straddling block edges, trailing punctuation).
+- Run: run-b36305a504cc - PASS: T=0.748 s, M=115.7 MB, S=1252, K=10.55,
+  **51.18 pts**. T flat/up within noise; M UP +2.5 MB - SEG=32 and
+  MALLOC_ARENA_MAX=2 both failed to move board M (third dead M hypothesis:
+  it is not skip tables, not the arena count, not segment transients).
+  S grew +106 lines for the fused scan, itself worth about -0.13 pts.
+  Net -0.77 vs the v16 best, which still stands.
+
+## Step 17: stream pre-sizing + dead-code trim (v20, this push)
+
+- Root-cause for the stuck M: ~100k per-stream Vecs (75,747 term streams +
+  bigram streams; 80 B of Vec headers each) grow incrementally across 32
+  segment appends - every append reallocs and copies, and the freed old
+  versions are retained, fragmented, in the glibc arenas' touched pages.
+  That churn is both the missing ~30-45 MB of board M and real scan CPU.
+- Fix: after segment 0, reserve_exact(estimated final size) for every
+  stream buffer and skip table (postings are ~uniform across segments, so
+  final ~= seg-0 x SEG + 6% headroom). Overshoot is untouched pages -
+  free on the M axis; undershoot just grows normally once.
+- Local (1 vCPU, warm): scan+merge 2.0 -> 1.2 s, total run 3.0 -> 1.9 s.
+- Dead-code trim: unused tok_mask32 wrapper, leftover prefix-filter field
+  and builder, unused Map length field, duplicated attributes (-60 lines).
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match; synthetic differential
+  AVX2-vs-scalar 1,152 cases match.
 - Run: PENDING
