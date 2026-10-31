@@ -1,53 +1,10 @@
 #!/usr/bin/env python3
 """
-Track D (Traverse) — Python 3.13, standard library only.
-
-Python-side optimizations, guided by ideas in the supplied reference repository:
-- Bidirectional Dijkstra with a lower-bound termination condition.
-- Endpoint-sorted query processing while preserving original output order.
-- Self-loop filtering during CSR construction.
-- Duplicate-query caching and low-degree source/target shortcuts.
-- Compact forward/reverse CSR graphs and touched-node distance resets.
-- Local bindings in the shortest-path hot loop and buffered output.
-"""
-d_traverse.py  ·  Speed-Demon | Track-D  ·  Optimised Submission
-═══════════════════════════════════════════════════════════════════════════════
-Zero extra dependencies  –  pure Python 3.13 stdlib only.
-
-Optimisations over reference
-  ① ALGORITHM FIX  – expand from the heap whose MIN-KEY is smaller
-       (not the heap with fewer entries).  Correct Kaindl-Kainz criterion;
-       visits far fewer nodes on road-graph data.
-
-  ② TIGHTER TERMINATION  – check  hf_d + hb_d >= mu  at top of loop;
-       break as soon as the lower bound can no longer improve the best
-       known path, without waiting for the next pop.
-
-  ③ LOCAL-VARIABLE BINDING  – heappop / heappush  and every hot-path
-       name is bound to a local before the per-query loop.  Eliminates
-       LOAD_GLOBAL / LOAD_ATTR bytecodes inside the tight inner loop.
-
-  ④ INDEX LOOP  –  for j in range(a, b): v=col[j]; w=val[j]
-       avoids constructing a slice object + zip iterator on every edge
-       expansion.  ~10-15 % faster inner loop in CPython 3.13.
-
-  ⑤ FAST CSR BUILD  –  single counting pass with a bytearray/array
-       counter; pure-C array.array for column and value storage gives
-       compact memory and faster sequential access than a list-of-lists.
-
-  ⑥ FAST BULK LOAD  –  read the entire file in one syscall, split in C,
-       cast integers batch-wise; avoids Python-level readline overhead.
-
-  ⑦ BUFFERED OUTPUT  –  build result string with a single ''.join() and
-       write in one call; no per-line flush.
-═══════════════════════════════════════════════════════════════════════════════
-"""
 
 import os
 import sys
 from array import array
 from heapq import heappop, heappush
-from itertools import accumulate
 
 # ─── sentinel ────────────────────────────────────────────────────────────────
 INF = 1 << 62
