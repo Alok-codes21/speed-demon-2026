@@ -528,4 +528,27 @@ Every step from the reference to your final version, each with the live-board ru
   >25-byte path changed (internal only; interning semantics unchanged).
 - Run: PENDING
 ## Step 76: PERF.md bookkeeping (step-75 result); v132 unchanged
+- Run: run-8997dbdbc086. Board: T 0.03821, M 8.4 MB, S 281, 77.667 - NEW BEST
+  (+0.015 over 77.652; noise-band, but banked). v132's two board runs
+  (0.03834, 0.03821) both beat v128's (0.03889, 0.03907): the branch-free
+  hash gain is real on board hardware. Tip stays v132.
+
+## Step 77: aligned spare-page map (for real this time) + source golf (v135)
+- The v131a edit that was supposed to add the spare page silently did not
+  apply, so v132 shipped unconditional 8-byte hash loads over the plain file
+  mapping - safe only within the last page's zero-fill (<= ~8 B). This adds
+  the 2 MB-aligned reservation with a writable spare page after EOF, verified
+  by reading the source back. File pages are prewarmed by the harness and
+  MAP_PRIVATE, so M is unaffected. Golf: the length-mask table becomes a
+  branch-free LENM(k) = k > 7 ? ~0 : (1 << 8k) - 1 (the earlier shift
+  variant mishandled k == 0: 64 & 63 == 0 kept all bits; caught by the tiny
+  gate before any push), w2 mixes unconditionally (masked to zero for short
+  names - identical hash values), ring structs and stat updates compress.
+  253 -> 248 code lines. Two-pass tiled structural parsing (v133) and PGO
+  were built and measured this session: -3% local for +35 lines (net K
+  negative) and -5% local (training-slice skew) respectively; both dropped
+  without a board run.
+- Local: 130.1 ms vs 131.6 ms interleaved (wash). Gates: full d8088b1c...,
+  sample 9035fed3..., tiny/edge diffs clean, 3x parallel stress stable,
+  ASAN+UBSAN clean.
 - Run: PENDING

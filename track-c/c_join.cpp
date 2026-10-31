@@ -44,25 +44,22 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
 
 // Names hash over raw field bytes ("" pairs included - canonical). With the
 // spare page after EOF, all 8-byte loads are unconditional: no end guard.
-static const uint64_t LM[9] = {0,         0xFFULL,       0xFFFFULL,
-                               0xFFFFFFULL, 0xFFFFFFFFULL, 0xFFFFFFFFFFULL,
-                               0xFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFULL, ~0ULL};
-// <= 25 bytes: two (rarely three) masked words + a 128-bit multiply fold.
+// <= 25-byte names pack into three masked words; w2 masks to zero for short
+// names, so the mix is branch-free and the hash value is unchanged.
+#define LENM(k) ((k) > 7 ? ~0ULL : (1ULL << (8 * (k))) - 1)
 static inline uint64_t hs(const char *s, uint32_t len) {
-  uint64_t w0, w1;
-  memcpy(&w0, s, 8), memcpy(&w1, s + 8, 8);
-  w0 &= LM[std::min(len, 8u)], w1 &= LM[len > 8 ? std::min(len - 8, 8u) : 0];
-  uint64_t h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ len * 0xbf58476d1ce4e5b9ULL;
-  if (__builtin_expect(len > 16, 0)) {
-    uint64_t w2;
-    memcpy(&w2, s + 16, 8);
-    h ^= (w2 & LM[std::min(len - 16, 8u)]) * 0x517cc1b727220a95ULL;
-  }
+  uint64_t w0, w1, w2;
+  memcpy(&w0, s, 8), memcpy(&w1, s + 8, 8), memcpy(&w2, s + 16, 8);
+  w0 &= LENM(std::min(len, 8u)), w1 &= LENM(len > 8 ? std::min(len - 8, 8u) : 0),
+  w2 &= LENM(len > 16 ? std::min(len - 16, 8u) : 0);
+  uint64_t h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ w2 * 0x517cc1b727220a95ULL ^
+               len * 0xbf58476d1ce4e5b9ULL;
   __uint128_t r = (__uint128_t)h * 0x9e3779b97f4a7c15ULL;
   return ((uint64_t)r ^ (uint64_t)(r >> 64)) | (1ULL << 63);
 }
 
-// Over 25 bytes: word-wise multiply-mix over [s, e) with an overlapping tail.
+// Over 25 bytes or escaped: word-wise multiply-mix over [s, e) with an
+// overlapping tail read (raw length always exceeds 24 here, so e - 8 >= s).
 static uint64_t hl(const char *s, const char *e) {
   uint64_t h = ((uint64_t)(e - s)) * 0x9e3779b97f4a7c15ULL;
   for (; s + 8 <= e; s += 8) {
@@ -177,10 +174,8 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
     uint64_t nh, id;
     int64_t cents;
     uint32_t slot, reg, name_len, note_len;
-  } pend[16];
-  struct Mk {
-    uint32_t c, bnid;
-  } mk[16];
+  } pend[16]; // 16-record deferral ring
+  struct Mk { uint32_t c, bnid; } mk[16];
   uint64_t n = 0, last = ~0ULL;
   auto adv = [&]() __attribute__((always_inline)) {
     uint32_t k = n & 15;
@@ -193,8 +188,8 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;
       Stats &st = stats[c = c == 255 ? UNMATCHED : c];
       st.count++, st.id_sum += o.id, st.amount_sum += o.cents;
-      st.amount_min = o.cents < st.amount_min ? o.cents : st.amount_min;
-      st.amount_max = o.cents > st.amount_max ? o.cents : st.amount_max;
+      st.amount_min = std::min(st.amount_min, o.cents),
+      st.amount_max = std::max(st.amount_max, o.cents);
       st.name_bytes += o.name_len, st.note_bytes += o.note_len;
       mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
       __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
@@ -260,10 +255,12 @@ int main(int argc, char **argv) {
   CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1, pool = (char *)al;
   load_regions(data_dir + "/regions.csv");
   popbytes = (2 << 20) + (size_t)NC * BITS_W * 8; // NT + R2C + used CB
+  int rfd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st;
-  fstat(open((data_dir + "/records.csv").c_str(), O_RDONLY), &st);
-  const char *data = (const char *)mmap(
-      0, st.st_size, 1, 2, open((data_dir + "/records.csv").c_str(), O_RDONLY), 0);
+  fstat(rfd, &st);
+  char *res = (char *)mmap(0, st.st_size + (2 << 20) + 4096, 3, 0x22, -1, 0);
+  size_t ra = (size_t)(res + (2 << 20) - 1) & -(2 << 20);
+  const char *data = (const char *)mmap((void *)ra, st.st_size, 3, 0x12, rfd, 0);
   madvise((void *)data, st.st_size, 2),
       madvise((void *)data, st.st_size, 14), // SEQUENTIAL | HUGEPAGE
       fend = data + st.st_size;
