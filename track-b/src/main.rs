@@ -17,6 +17,8 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 
 const NONE: u32 = u32::MAX;
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------- mmap ----
 unsafe extern "C" {
@@ -139,11 +141,11 @@ unsafe fn tok_eq(p: *const u8, len: usize, term: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------- term table ----
-const EMPTY: u64 = u64::MAX;
+const EMPTY: u32 = u32::MAX;
 
 struct Terms {
     bloom: Vec<u64>,
-    slots: Vec<u64>, // (hash32 << 32) | tid ; EMPTY when free
+    slots: Vec<u32>, // (tag15 << 17) | tid ; EMPTY when free
     mask: usize,
     toff: Vec<u32>,
     tlen: Vec<u8>,
@@ -157,14 +159,13 @@ impl Terms {
     }
     fn insert(&mut self, w: &[u8], flag: u8) -> u32 {
         let h = unsafe { hash_tok(w.as_ptr(), w.len()) };
-        let tag = ((h >> 32) as u32) | 0; // high half as tag
+        let tag = ((h >> 48) as u32) & 0x7fff;
         let mut i = (h as usize) & self.mask;
         loop {
             let s = self.slots[i];
             if s == EMPTY {
                 let tid = self.toff.len() as u32;
-                let tag = if tag == u32::MAX { 0 } else { tag };
-                self.slots[i] = ((tag as u64) << 32) | tid as u64;
+                self.slots[i] = (tag << 17) | tid;
                 self.toff.push(self.arena.len() as u32);
                 self.tlen.push(w.len() as u8);
                 self.arena.extend_from_slice(w);
@@ -173,8 +174,8 @@ impl Terms {
                 self.bloom[b >> 6] |= 1u64 << (b & 63);
                 return tid;
             }
-            let tid = (s & 0xffff_ffff) as u32;
-            if (s >> 32) as u32 == tag
+            let tid = s & 0x1ffff;
+            if (s >> 17) == tag
                 && unsafe { tok_eq(w.as_ptr(), w.len(), self.term_bytes(tid)) }
             {
                 self.flags[tid as usize] |= flag;
@@ -190,15 +191,15 @@ impl Terms {
     /// Hot read-only probe; token bytes at p (8 readable bytes guaranteed).
     #[inline(always)]
     unsafe fn probe(&self, p: *const u8, len: usize, h: u64) -> u32 {
-        let tag = (h >> 32) as u32;
+        let tag = ((h >> 48) as u32) & 0x7fff;
         let mut i = (h as usize) & self.mask;
         loop {
             let s = self.slots[i];
             if s == EMPTY {
                 return NONE;
             }
-            let tid = (s & 0xffff_ffff) as u32;
-            if (s >> 32) as u32 == tag && tok_eq(p, len, self.term_bytes(tid)) {
+            let tid = s & 0x1ffff;
+            if (s >> 17) == tag && tok_eq(p, len, self.term_bytes(tid)) {
                 return tid;
             }
             i = (i + 1) & self.mask;
@@ -386,13 +387,7 @@ fn handle_token(
             return;
         }
         let p = buf.ptr(s);
-        if len >= 2 {
-            let k = ((*p | 0x20) as usize) << 8 | (*p.add(1) | 0x20) as usize;
-            if q.pfx[k >> 6] >> (k & 63) & 1 == 0 {
-                *prev = NONE;
-                return;
-            }
-        } else if !q.has_len1 {
+        if len < 2 && !q.has_len1 {
             *prev = NONE;
             return;
         }
@@ -421,12 +416,96 @@ fn handle_token(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan_tokens_scalar(
+// ------------------------------------------------------- AVX2 tokenizer ----
+/// Token byte classes: [a-zA-Z0-9]. 32 bytes -> 32-bit token mask.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn tok_mask32(p: *const u8) -> u32 {
+    use core::arch::x86_64::*;
+    let v = _mm256_loadu_si256(p as *const __m256i);
+    let low = _mm256_or_si256(v, _mm256_set1_epi8(0x20));
+    let bias = _mm256_set1_epi8(-128i8);
+    let lb = _mm256_xor_si256(low, bias);
+    let vb = _mm256_xor_si256(v, bias);
+    let alpha = _mm256_and_si256(
+        _mm256_cmpgt_epi8(lb, _mm256_set1_epi8((b'a' - 1 ^ 0x80) as i8)),
+        _mm256_cmpgt_epi8(_mm256_set1_epi8((b'z' ^ 0x80).wrapping_add(1) as i8), lb),
+    );
+    let digit = _mm256_and_si256(
+        _mm256_cmpgt_epi8(vb, _mm256_set1_epi8((b'0' - 1 ^ 0x80) as i8)),
+        _mm256_cmpgt_epi8(_mm256_set1_epi8((b'9' ^ 0x80).wrapping_add(1) as i8), vb),
+    );
+    _mm256_movemask_epi8(_mm256_or_si256(alpha, digit)) as u32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scan_tokens_avx2(
+    buf: &Map, start: usize, end: usize, q: &Queries,
+    log: &mut Vec<u64>, n_terms: usize, docid: u32, prev: &mut u32,
+) {
+    let mut i = start;
+    let mut ts = usize::MAX; // open token start (continues across 32B blocks)
+    while i + 32 <= end {
+        let m = tok_mask32(buf.ptr(i));
+        if m == 0 {
+            if ts != usize::MAX {
+                handle_token(buf, ts, i - ts, q, log, n_terms, docid, prev);
+                ts = usize::MAX;
+            }
+            i += 32;
+            continue;
+        }
+        let mut pos = 0usize;
+        if ts == usize::MAX {
+            pos = m.trailing_zeros() as usize;
+            ts = i + pos;
+        }
+        loop {
+            let rl = (m >> pos).trailing_ones() as usize;
+            if pos + rl == 32 {
+                i += 32; // token continues into next block
+                break;
+            }
+            handle_token(buf, ts, i + pos + rl - ts, q, log, n_terms, docid, prev);
+            ts = usize::MAX;
+            let sl = (!m >> (pos + rl)).trailing_ones() as usize;
+            if pos + rl + sl == 32 {
+                i += 32;
+                break;
+            }
+            pos += rl + sl;
+            ts = i + pos;
+        }
+    }
+    if ts != usize::MAX {
+        let mut j = i;
+        while j < end && is_tok(buf.b(j)) {
+            j += 1;
+        }
+        handle_token(buf, ts, j - ts, q, log, n_terms, docid, prev);
+        i = j;
+    }
+    while i < end {
+        if is_tok(buf.b(i)) {
+            let s0 = i;
+            i += 1;
+            while i < end && is_tok(buf.b(i)) {
+                i += 1;
+            }
+            handle_token(buf, s0, i - s0, q, log, n_terms, docid, prev);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn scan_tokens_scalar_with_prev(
     buf: &Map, start: usize, end: usize, q: &Queries,
     log: &mut Vec<u64>, n_terms: usize,
-    docid: u32,
-) -> u32 {
-    let mut prev = NONE;
+    docid: u32, prev: &mut u32,
+) {
     let mut i = start;
     while i < end {
         if is_tok(buf.b(i)) {
@@ -435,12 +514,11 @@ fn scan_tokens_scalar(
             while i < end && is_tok(buf.b(i)) {
                 i += 1;
             }
-            handle_token(buf, s, i - s, q, log, n_terms, docid, &mut prev);
+            handle_token(buf, s, i - s, q, log, n_terms, docid, prev);
         } else {
             i += 1;
         }
     }
-    prev
 }
 
 struct ScanRes {
@@ -468,7 +546,17 @@ fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes)
         offs.push(line_start as u32);
         // tokenize until the newline (a separator itself)
         let line_end = find_byte(buf, i, b'\n');
-        scan_tokens_scalar(buf, i, line_end, q, log, n_terms, docid);
+        let mut prev = NONE;
+        #[cfg(target_arch = "x86_64")]
+        if HAS_AVX2.load(std::sync::atomic::Ordering::Relaxed) {
+            unsafe {
+                scan_tokens_avx2(buf, i, line_end, q, log, n_terms, docid, &mut prev);
+            }
+            i = line_end + 1;
+            docid += 1;
+            continue;
+        }
+        scan_tokens_scalar_with_prev(buf, i, line_end, q, log, n_terms, docid, &mut prev);
         i = line_end + 1;
         docid += 1;
     }
@@ -782,6 +870,8 @@ fn write_result(out: &mut Vec<u8>, r: &[u32]) {
 // ---------------------------------------------------------------- main ----
 fn main() {
     let t0 = std::time::Instant::now();
+    #[cfg(target_arch = "x86_64")]
+    HAS_AVX2.store(is_x86_feature_detected!("avx2"), std::sync::atomic::Ordering::Relaxed);
     let data = std::env::args().nth(1).unwrap_or_else(|| "/data".into());
     let outdir = std::env::args().nth(2).unwrap_or_else(|| "/out".into());
 
