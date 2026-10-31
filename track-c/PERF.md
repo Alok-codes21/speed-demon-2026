@@ -177,20 +177,27 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 36 (v56 lean name hash; revert of step 35)
 - Change: revert step 35 back to the v39 pipeline, PLUS a leaner name hash: names are 94% <= 16B (p50=11, max=25), so hs now loads w2/w3 only when len > 16 and finishes with a single mum-style 128-bit multiply fold instead of the two-round finalizer. Same injective-packing risk class as before (validated collision-free on all 4 datasets).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (gated as v56/v57). Local -2% total work.
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: no dedicated run - the board queue coalesced it with the step-37 push 6 min later; the stacked change was measured by run-123387313db9 (step 37).
+- Run: (coalesced into run-123387313db9)
 
 
 ## Step 35 (v55 per-thread bitsets)
 - Change: the shared CB[256][2048] bitset table (6.6M atomic fetch_or, lines ping-ponging across 12 threads ~66x per name) is replaced by per-thread slices: 12 x NC x 16KB (~6MB, only ACTIVE categories), plain load-or, no atomics, OR-folded at output. The batch-16 prefetch/flush structure stays (hides L2 latency inside each slice). M ~9.7 -> ~11.5MB (the top-3 teams all run 11-12MB - this is likely why).
 - Rationale: the batch-16 prefetch win proved CB is the latency hotspot; batching hides latency but the shared lines still ping-pong 66x each. Private slices eliminate the RFO traffic entirely.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local 1-CPU sandbox shows +7% (12x slice-zeroing faults, no contention to remove - the win is invisible to it); board is the measurement.
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.043498 M=9846784 S=304 points=75.378496 - NEW BEST (+0.158 over run-d8c1a7b301f4's 75.220; T -3.9% vs 0.045239). Commit bad936b7.
+- Run: run-123387313db9
 
 
 ## Step 37 (v58 dynamic work-stealing granules)
 - Change: 12 static chunks -> 96 granules pulled from an atomic counter (relaxed fetch_add). Static chunks leave a join-tail when record hardness varies (escaped-quote density, multi-line notes); stealing bounds the tail at one granule (~0.5ms). Stacked on step-36 lean hash.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (1-CPU sandbox cannot measure stealing; board is the measurement).
+- Board T_s/M/S/points: T_s=0.043498 M=9846784 S=304 points=75.378496 - NEW BEST (+0.158 over run-d8c1a7b301f4's 75.220; T -3.9% vs 0.045239). Commit bad936b7.
+- Run: run-123387313db9
+
+
+## Step 38 (v62 fused intern+dedup table)
+- Change: the separate NT intern table (1MB) and CB category bitset (4MB) are replaced by ONE fused table: 2^17 entries x 40B = 5.24MB, entry = 8B hash + 32B (256-bit) category bitmap. One probed line serves both interning and dedup; the batch-16 CB prefetch machinery goes away (the entry line is already fetched by the intern probe). Distinct counts come from a barrier-synchronized parallel transpose of the table at the end. Board insight: every fast team (NickTrapp 11.8MB, CoD 12.6MB, Kirk 11.2MB) runs more memory than our 9.85MB - a fused table in that shape is the plausible reason. M ~9.85 -> ~10.1MB.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat vs v58 (1-CPU sandbox cannot measure the contention removal this targets; board is the measurement).
 - Board T_s/M/S/points: pending
 - Run: pending
