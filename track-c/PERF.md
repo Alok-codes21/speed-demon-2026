@@ -201,3 +201,8 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat vs v58 (1-CPU sandbox cannot measure the contention removal this targets; board is the measurement).
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 39 (revert to v58; step-38 fused table regressed on board)
+- Change: c_join.cpp back to v58 (step-37 code). Step-38's fused 40B-entry table scored T_s=0.047124 (+8.3%), M=10.4MB, S=310, points=74.207 (run-9a44bafe6c89): the 5.24MB table pushes probes to L3 and the inline mark loses the batch-16 prefetch coverage, outweighing the contention savings. Fused-table hypothesis dead at this entry size.
+- Board T_s/M/S/points: pending (same code as step 37, expected back in the 75.2-75.4 band)
+- Run: pending

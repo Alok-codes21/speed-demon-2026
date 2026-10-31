@@ -19,7 +19,7 @@
 
 static const uint32_t HASH_SIZE = 131072, HM = HASH_SIZE - 1;
 // country slots, 64-bit words per bitset
-static const uint32_t MAX_C = 256;
+static const uint32_t MAX_C = 256, BITS_W = HASH_SIZE / 64;
 static const char *fend; // end of the records.csv mapping
 
 struct Stats {
@@ -27,33 +27,25 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
+static uint64_t (*CB)[BITS_W];
 static uint8_t *R2C;
 // packed 3-letter code per slot; '_' for _UNMATCHED
 static uint32_t CK[MAX_C];
 static uint32_t NC = 0, UNMATCHED = 0;
 
 // slot 0 stays reserved: id 0 is the empty name
-// Fused intern + dedup table: 2^17 entries x 40B = 5.24MB. Entry = 8B hash
-// (0 = empty, real hashes have bit 63 set) + 32B bitmap of categories in
-// which this name was seen. One random access per record replaces the old
-// separate NT probe + CB bitset touch; entry 0 is reserved for empty names.
-static char *FT;
+static uint64_t *NT;
 
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
 // slot and no value is ever pending). A per-thread cache measured useless:
 // names have no temporal locality (2% hit rate).
-static inline void mark(uint64_t h, uint8_t c) {
+static inline uint32_t intern_name(uint64_t h) {
   for (uint32_t idx = h & HM;; idx = (idx + 1) & HM) {
-    char *e = FT + 40 * idx;
-    uint64_t k = __atomic_load_n((uint64_t *)e, __ATOMIC_ACQUIRE);
+    uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);
     if (k == 0)
-      k = __sync_val_compare_and_swap((uint64_t *)e, 0, h);
-    if (k == h || k == 0) { // k==0: the CAS above installed h
-      __atomic_fetch_or((uint64_t *)(e + 8 + ((c >> 6) << 3)),
-                        1ULL << (c & 63), __ATOMIC_RELAXED);
-      return;
-    }
+      k = __sync_val_compare_and_swap(&NT[idx], 0, h);
+    if (k == h || k == 0) return idx; // k==0: the CAS above installed h
   }
 }
 
@@ -161,10 +153,18 @@ quoted_end(const char *s, const char *end, uint32_t *esc) {
 }
 
 struct Worker {
-  const char *start, *end; Stats stats[MAX_C]; uint32_t cnt[MAX_C];
+  const char *start, *end; Stats stats[MAX_C];
 };
-static pthread_barrier_t bar;
-static Worker workers[12];
+
+// flush up to n buffered bitsets: prefetch all lines, then set
+static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
+  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+  for (uint32_t j = 0; j < n; j++) {
+    uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
+    if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
+      __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
+  }
+}
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -174,6 +174,7 @@ static uint32_t gnext = 0;
 void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   Stats *stats = w->stats;
+  uint32_t bnid[16], nb = 0; uint8_t bc[16];
   for (;;) {
     uint32_t g = __atomic_fetch_add(&gnext, 1, __ATOMIC_RELAXED);
     if (g >= 96) break;
@@ -194,7 +195,7 @@ void *parse_chunk(void *arg) {
     } else
       p++;
 
-    if (name_len) __builtin_prefetch(FT + 40 * (name_hash & HM));
+    if (name_len) __builtin_prefetch(&NT[name_hash & HM]);
     // note: only its unescaped byte length is needed
     uint32_t note_len = 0;
     if (*p == '"') {
@@ -208,6 +209,7 @@ void *parse_chunk(void *arg) {
     // region, amount
     uint32_t reg_id = 0; while (*p != ',') reg_id = reg_id * 10 + (*p++ - '0'); p++;
     uint8_t c = (reg_id < 1000000) ? R2C[reg_id] : 255;
+    if (name_len) __builtin_prefetch(&CB[c][(name_hash & HM) >> 6]);
     bool neg = (*p == '-'); p += neg;
     int64_t cents = 0; while (*p != '.') cents = cents * 10 + (*p++ - '0');
     cents = cents * 100 + (p[1] - '0') * 10 + (p[2] - '0');
@@ -223,25 +225,12 @@ void *parse_chunk(void *arg) {
     if (cents > s.amount_max)
       s.amount_max = cents;
     s.name_bytes += name_len; s.note_bytes += note_len;
-    if (name_len) mark(name_hash, c);
-    else {
-      __atomic_fetch_or((uint64_t *)(FT + 8 + ((c >> 6) << 3)),
-                        1ULL << (c & 63), __ATOMIC_RELAXED);
-    }
+    uint32_t nid = name_len ? intern_name(name_hash) : 0;
+    bnid[nb] = nid; bc[nb] = c;
+    if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
   }
-  // after every thread is done parsing, transpose a slice of the fused
-  // table into per-thread category distinct counts
-  pthread_barrier_wait(&bar);
-  uint32_t wi = (uint32_t)(w - workers), lo = wi * HASH_SIZE / 12,
-           hi = (wi + 1) * HASH_SIZE / 12;
-  for (uint32_t i = lo; i < hi; i++) {
-    char *e = FT + 40 * i + 8;
-    for (uint32_t wd = 0; wd < 4; wd++) {
-      uint64_t b = __atomic_load_n((uint64_t *)(e + 8 * wd), __ATOMIC_RELAXED);
-      while (b) { w->cnt[wd * 64 + (uint32_t)__builtin_ctzll(b)]++; b &= b - 1; }
-    }
-  }
+  bflush(bnid, bc, nb);
   return nullptr;
 }
 
@@ -259,9 +248,10 @@ int main(int argc, char **argv) {
   char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
   size_t al = ((size_t)big + (2 << 20) - 1) & ~((size_t)(2 << 20) - 1);
   madvise((void *)al, 6 << 20, MADV_HUGEPAGE);
-  FT = (char *)al;                        // 5.24 MB fused table
-  R2C = (uint8_t *)(al + (6 << 20)); // 1 MB
-  *(uint64_t *)FT = 1; // reserve entry 0 for empty names (bit 63 hashes never match 1)
+  NT = (uint64_t *)al;                     // 1 MB
+  R2C = (uint8_t *)(al + (1 << 20)); // 1 MB
+  CB = (uint64_t(*)[BITS_W])(al + (2 << 20));
+  NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st; fstat(fd, &st);
@@ -271,7 +261,6 @@ int main(int argc, char **argv) {
   // Split into 96 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
   const int nth = 12;
-  pthread_barrier_init(&bar, nullptr, nth);
   gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   gst[96] = fend;
   size_t total = fend - gst[0];
@@ -281,6 +270,7 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
+  static Worker workers[nth];
   pthread_t ths[nth];
   for (int i = 0; i < nth; i++) {
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
@@ -289,7 +279,7 @@ int main(int argc, char **argv) {
     pthread_join(ths[i], nullptr);
 
   // Merge the per-thread aggregates (empty threads merge as zeros).
-  Stats final_s[MAX_C]; uint32_t dcnt[MAX_C] = {};
+  Stats final_s[MAX_C];
   for (uint32_t i = 0; i < (uint32_t)(nth * NC); i++) {
       const Stats &ws = workers[i / NC].stats[i % NC];
       Stats &fs = final_s[i % NC];
@@ -297,7 +287,6 @@ int main(int argc, char **argv) {
       fs.amount_min = std::min(fs.amount_min, ws.amount_min);
       fs.amount_max = std::max(fs.amount_max, ws.amount_max);
       fs.name_bytes += ws.name_bytes; fs.note_bytes += ws.note_bytes;
-      dcnt[i % NC] += workers[i / NC].cnt[i % NC];
     }
 
   // Countries sort by their packed 3-byte key; '_' (UNMATCHED) is last.
@@ -311,7 +300,8 @@ int main(int argc, char **argv) {
     uint32_t c = order[oi];
     const Stats &g = final_s[c];
     if (g.count == 0) continue;
-    uint32_t d = dcnt[c];
+    uint32_t d = 0;
+    for (uint32_t i = 0; i < BITS_W; i++) d += __builtin_popcountll(CB[c][i]);
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
     fprintf(out, "%s %zu %zu ", nm, (size_t)g.count, (size_t)g.id_sum);
