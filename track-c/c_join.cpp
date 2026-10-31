@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 // table geometry: 2^17 name slots; 256 country slots of 2^17 bits
 static const uint32_t HM = 131071, MAX_C = 256, BITS_W = 2048;
@@ -28,7 +29,9 @@ static uint64_t (*CB)[BITS_W]; // per-country bitsets over name ids
 static uint8_t *R2C;           // region id -> country slot
 static uint32_t CK[MAX_C], NC = 0, UNMATCHED = 0; // packed codes; '_' unmatched
 static uint64_t *NT; // name hash table; slot 0 reserved (id 0 = empty name)
-static uint32_t gn; // granule counter
+static uint32_t gn;                // granule counter
+static uint32_t dcnt[MAX_C];       // distinct names per country
+static pthread_barrier_t bar;      // parse done -> popcount split
 
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
@@ -133,6 +136,7 @@ static inline const char *quoted_end(const char *s, const char *end,
 struct Worker {
   Stats stats[MAX_C];
 };
+static Worker workers[12];
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -195,6 +199,15 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
     }
   }
   bf(nb);
+  // After all parsing, each worker popcounts a slice of the country bitsets
+  // (the serial 4MB sweep would be ~1% of T); main waits at the same barrier.
+  pthread_barrier_wait(&bar);
+  for (uint32_t c = (uint32_t)((Worker *)arg - workers); c < NC; c += 12) {
+    uint32_t d = 0;
+    for (uint32_t i = 0; i < BITS_W; i++)
+      d += __builtin_popcountll(CB[c][i]);
+    dcnt[c] = d;
+  }
   return nullptr;
 }
 
@@ -234,10 +247,11 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
-  static Worker workers[12];
+  pthread_barrier_init(&bar, nullptr, 13);
   pthread_t ths[12];
   for (int i = 0; i < 12; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
+  pthread_barrier_wait(&bar); // all parsing done; popcounts run in parallel
   for (int i = 0; i < 12; i++)
     pthread_join(ths[i], nullptr);
 
@@ -260,12 +274,10 @@ int main(int argc, char **argv) {
   FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
   out || (exit(1), 0);
   for (uint32_t oi = 0; oi < NC; oi++) {
-    uint32_t c = order[oi], d = 0;
+    uint32_t c = order[oi], d = dcnt[c];
     const Stats &g = final_s[c];
     if (g.count == 0)
       continue;
-    for (uint32_t i = 0; i < BITS_W; i++)
-      d += __builtin_popcountll(CB[c][i]);
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     fprintf(out, "%s %lu %lu ", c == UNMATCHED ? "_UNMATCHED" : code, g.count,
             g.id_sum),
@@ -273,5 +285,5 @@ int main(int argc, char **argv) {
         pr_money(out, g.amount_max, ' ');
     fprintf(out, "%u %lu %lu\n", d, g.name_bytes, g.note_bytes);
   }
-  return fclose(out), 0;
+  fclose(out), _exit(0);
 }

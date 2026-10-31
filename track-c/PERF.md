@@ -304,3 +304,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (sample) ✓ TSAN clean (sample) ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 54 (v103 parallel distinct-popcount + fast exit)
+- Change: the end-of-run distinct count (popcount over the 4MB country bitsets) was a serial ~1%-of-T tail; workers now wait on a barrier after parsing and each popcounts a slice of countries in parallel (main joins after). Process exit via _exit(0) after fclose, skipping libc teardown. +9 code lines, now free under the lines-for-T rule.
+- Local: -1.5-2% median vs v101 (165-167 vs 169ms; the explainable serial-tail cut is ~0.5%, the rest is layout luck). Hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 5x sample / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
