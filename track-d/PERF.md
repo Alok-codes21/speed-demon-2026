@@ -1,4 +1,4 @@
-# Track D local candidate: heap64
+# Track D local candidate: edgepref
 
 Not submitted. No board run ID exists for this candidate.
 
@@ -7,12 +7,8 @@ Restore run-98555c37390f at b32d6e4796322cca86ae87ace49e5f1af74071ca passed ever
 
 Local byte-exact gates: full public seed-1 SHA256 a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e; sample a4c76ed030bc7e365db33191f6cf74708fba7f25eb48d64c8c4279f2e57046a0; tiny ecaca77d3221fe3928109da36480cfdb39f288f2e57ecbc61d3d7706d5cb4bd5, identical to reference.
 
-Single-core local median from 12 interleaved runs: 0.582868 s, baseline 0.626206 s, edgepref 0.595624 s. Canonical S=507 including Dockerfile. These are not official scoring hardware or 12-core timing.
-
-Additional gate: 100 randomized valid graphs, 3,000 queries, byte-equivalent integer answers vs Python Dijkstra. Includes zero edges, unreachable targets, parallel edges, max weights and distances over uint32.
+Single-core local median from 8 interleaved runs: 0.584345 s, baseline 0.615605 s. Not official scoring hardware or 12-core timing.
 
 Attribution: adapted from MIT-licensed manusingh090/speed-demon-2026-entry. Retain repository LICENSE and source attribution.
-
-Safe prefetch correction: avoid bounds-checking CSR offset when a node has no outgoing edges; use wrapping_add on the base pointer.
 
 Safe prefetch correction: avoid bounds-checking CSR offset when a node has no outgoing edges; use wrapping_add on the base pointer.
