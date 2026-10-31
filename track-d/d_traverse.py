@@ -166,6 +166,37 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
             res.append(-1)
             continue
 
+        # A very low-outdegree source (notably the injected heavy-edge
+        # sources) is cheaper to search forward from than to grow a large
+        # reverse frontier from the target.
+        if fp[s + 1] - fp[s] <= 2:
+            df[s] = 0
+            touched = [s]
+            heap = [s]
+            answer = -1
+            while heap:
+                entry = _pop(heap)
+                x = entry // n
+                u = entry - x * n
+                if x != df[u]:
+                    continue
+                if u == t:
+                    answer = x
+                    break
+                for j in range(fp[u], fp[u + 1]):
+                    v = fc[j]
+                    y = x + fw[j]
+                    if y < df[v]:
+                        if df[v] == I:
+                            touched.append(v)
+                        df[v] = y
+                        _psh(heap, y * n + v)
+            answer_cache[key] = answer
+            res.append(answer)
+            for v in touched:
+                df[v] = I
+            continue
+
         # ── initialise ───────────────────────────────────────────────────────
         df[s] = 0;  db[t] = 0
         hf = [s];   hb = [t]      # packed: 0*n+s, 0*n+t
