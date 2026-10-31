@@ -415,4 +415,22 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
   showed no T gain and cost code lines and memory.
 - Local gates: spec and sample byte-exact, full-data sha256
   f86973c2...80927 unchanged, synthetic edge suite passes, HWM flat.
+- Run: run-c505f0419d5d - PASS but REGRESSION: T=0.261 s, M=59.9 MB, S=703,
+  **67.33 pts**. The 16-byte key split's local scan win (~6% on the 1-core
+  dev box at 8 threads) did not carry to the 12-thread scoring box - on real
+  cores the 32-byte key array was already cache-resident, so the split only
+  added branch work; the tails array also cost ~1 MB and the change set
+  added ~41 code+comment lines. Wrong turn, reverted next. Note: the first
+  board run for this push (run-fc6983cc6b88, 67.87 pts) measured the
+  PERF.md-only intermediate commit - still v25 code - not v26.
+
+## Step 24: revert the key split, keep the growth guard (v27)
+
+- Back to the v21 term table (single 32-byte keys); kept the 75%-load
+  rehash guard from step 23 (a full open-addressing table is an infinite
+  probe loop on any unknown token - a timeout landmine for any small hidden
+  query set, ~13 lines of insurance) and the static 12 threads of v21.
+- Local gates: spec and sample byte-exact, full-data sha256
+  f86973c2...80927 unchanged, synthetic edge suite passes, HWM ~300 MB.
+- Expected: the v21 numbers (T~0.252, M~58.7, S 620 + ~14 guard lines).
 - Run: run-pending
