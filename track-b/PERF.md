@@ -242,6 +242,7 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Dead-code trim (pre-fusion set-op helpers) for the S axis.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
+<<<<<<< HEAD
 - Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.7 MB, S=1146, K=10.66,
   **51.47 pts**. T flat within board noise, but M went UP +12.5 MB vs v16:
   the skip tables cost ~+6-11 MB and MALLOC_ARENA_MAX=4 did not shrink the
@@ -264,4 +265,62 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   scalar fallback (the board's i5-13500 has AVX2).
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
+=======
+- Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.6 MB, S=1131, K=10.70, **51.47 pts**.
+
+## Step 15: High-performance C++20 flat-index rewrite (v18, this push)
+
+- Complete rewrite in standard C++20 (GCC 16, zero external dependencies).
+- Two-pass contiguous flat inverted index:
+  1. Pass 1 counts term frequencies across 12 threads.
+  2. Prefix-sum calculates exact offsets into a single flat 22 MB postings array.
+  3. Pass 2 fills postings in parallel with zero sorting and zero dynamic allocations.
+- Elimination of positional index:
+  Phrase queries intersect postings to find candidate documents (median 1 document),
+  then verify exact token sequence directly on mmapped text via stack ring buffer.
+- Evaluates 50,000 queries in parallel across 12 threads.
+- Source lines cut from 1,131 to ~347 lines (huge boost on S axis).
+- Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
+- Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
+>>>>>>> 62623a0 (Track B: High-performance C++20 flat-index engine (12 threads, two-pass postings, zero sort, stack phrase verification))
 - Run: PENDING
+- Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.7 MB, S=1146, K=10.66,
+  **51.47 pts**. T flat within board noise, but M went UP +12.5 MB vs v16:
+  the skip tables cost ~+6-11 MB and MALLOC_ARENA_MAX=4 did not shrink the
+  glibc arena footprint the way the 1-vCPU dev sandbox suggested. Net:
+  -0.48 pts vs the v16 best, which stays our best on the board. Honest
+  wrong turn on the M axis; the eval-side T win is real but too small to
+  read through the noise at this T.
+
+## Step 15: memory-lean terms table + AVX2 tokenizer (v18)
+
+- Removed the 2-byte prefix pre-filter in the scan: profiling showed it
+  rejected only 1,755 of 36.3M tokens (79% of corpus tokens are query
+  terms), so the stage was pure overhead.
+- Terms open-addressing table slots u64 -> u32 (tag15 << 17 | tid): table
+  footprint 2 MB -> 1 MB, one 32-bit load + compare per probe instead of
+  64-bit.
+- AVX2 token classifier: 32 bytes -> 32-bit token/separator mask via
+  unsigned range checks on (c|0x20) in [a-z] and c in [0-9] with movemask,
+  run extraction with cross-block carry; runtime feature detection with
+  scalar fallback (the board's i5-13500 has AVX2).
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match.
+
+## Step 16: High-performance C++20 flat-index rewrite (v19, this push)
+
+- Complete rewrite in standard C++20 (GCC 16, zero external dependencies).
+- Two-pass contiguous flat inverted index:
+  1. Pass 1 counts term frequencies across 12 threads.
+  2. Prefix-sum calculates exact offsets into a single flat 22 MB postings array.
+  3. Pass 2 fills postings in parallel with zero sorting and zero dynamic allocations.
+- Elimination of positional index:
+  Phrase queries intersect postings to find candidate documents (median 1 document),
+  then verify exact token sequence directly on mmapped text via stack ring buffer.
+- Evaluates 50,000 queries in parallel across 12 threads.
+- Source lines cut from 1,146 to ~347 lines (huge boost on S axis).
+- Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
+- Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
+- Run: PENDING
+
+

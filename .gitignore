@@ -1,5 +1,14 @@
 .out/
+out/
 data/
 specs/
+generators/
 __pycache__/
 *.pyc
+*.exe
+*.o
+*.obj
+check_*.py
+inspect_*.py
+count_*.py
+test_engine.*
