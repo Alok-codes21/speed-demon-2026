@@ -139,12 +139,19 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 28 (v46 bitset batch 32)
 - Change: v39 + bitset write batch 16 -> 32 (more MLP in bflush). Batch 8 was flat, 16 was the big win; 32 is the untested end of the ring.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: run never landed (board queue dropped or lost the commit-82f5421 run; >35 min overdue, later commits scored around it). Batch 8 was flat, batch 16 the win; batch 32 deprioritized.
+- Run: (none)
 
 
 ## Step 29 (fully-static link, step-23 code)
 - Change: Dockerfile only: -static-libstdc++ -static-libgcc -> -static (fully static binary, no ld-linux/libc/libm loading at exec). Code is step-23 (v39) byte-identical, so any board T delta is the loader/startup component of the exec-to-exit wall clock. Stacked on nothing else: clean attribution vs the 75.206 best.
 - Rationale: the harness timer measures fork+execve-to-exit wall; residual dynamic loading is an estimated 1-3ms of the 45ms total.
+- Board T_s/M/S/points: T_s=0.045029 M=9723904 S=296 points=75.144 - FLAT: inside the v39 noise band (74.93-75.21). Residual dynamic loading is negligible; fully-static link is dead. Dockerfile reverted to -static-libstdc++ -static-libgcc in step 30.
+- Run: run-7091ce0e3690
+
+
+## Step 30 (v51 batched intern probes)
+- Change: name interning joins the bitset batch: the parse loop now buffers name_hash (was: inline intern_name per record with a serial dependent probe chain); bflush prefetches all 16 first-probe NT slots, then runs the 16 independent intern probe chains back-to-back so their L2 latencies overlap, then prefetches CB lines with the REAL nid (the parse-time CB prefetch guessed h&HM, wrong for displaced entries) and sets bits. Same trick that won big on bitsets (step 21/22), applied to the 1MB intern table's ~4-probe chains. Dockerfile reverted to dynamic (step-29 static was flat).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local 1-CPU wall is latency-blind; board is the measurement.
 - Board T_s/M/S/points: pending
 - Run: pending
