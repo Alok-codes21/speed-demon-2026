@@ -368,4 +368,17 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Kept: bitmap threshold N/16 (net -1.6 MB by the posting/bitmap
   break-even), borrowed bitmap operands in eval (eval transient churn).
 - Expected M ~57-58 MB, T flat.
+- Run: run-0c4359b08f7a - PASS but still a regression: T=0.274 s, M=61.6 MB,
+  S=634, **67.03 pts**. The N/16 threshold costs both axes: the 196 demoted
+  terms add ~4 MB of scan-time bucket storage (the true peak phase), and
+  frequent terms evaluate slower as lists than as bitmaps. The break-even
+  arithmetic ignored bucket storage overhead.
+
+## Step 21: revert threshold to N/32, keep borrow, right-size hash slots (v24)
+
+- Bitmap threshold back to df > N/32 (v21 behaviour, the measured optimum).
+- Kept from v22: borrowed bitmap operands in eval.
+- Hash slot table sized to the actual term count (2x next pow2) instead of
+  queries.txt/8: 2 MB -> 1 MB.
+- Expected: M back to ~58 MB minus 1 MB, T back to ~0.25-0.26.
 - Run: run-pending
