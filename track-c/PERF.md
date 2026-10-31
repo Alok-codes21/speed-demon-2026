@@ -76,3 +76,11 @@ Every step from the reference to your final version, each with the live-board ru
 - v34 drop NT/CB prefetches: -4% local. Prefetches earn their place.
 - v35 SoA staged granules (parse 64/512/4096 records into buffers, then bulk intern+bitset loops): -6..-9% local at every granule size. Staging store/load round-trip costs more than the bulk-prefetch MLP saves over bflush-16.
 - Regions load measured: 2.1ms of 249ms - negligible, not worth parallelizing.
+
+
+## Step 20 (v31a-O2)
+- Change: Dockerfile build -O3 -> -O2, same c_join.cpp (step 19 code).
+- Mechanism: -O2 benches a hair faster locally (med 0.250 vs 0.253) and re-rolls board T_s; -funroll-loops measured worse, rejected.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
+- Board T_s/M/S/points: pending
+- Run: PENDING
