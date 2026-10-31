@@ -210,4 +210,20 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   contention is negligible.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
+- Run: run-91239ded024d - FAIL (Dockerfile check): a bad upload truncated the
+  Dockerfile to its runtime stage ("COPY --from must name an earlier stage").
+  Fixed by re-uploading the full three-stage file with the same ENV line;
+  no source change. Failed gate, no score - documented as a wrong turn of
+  the delivery flow, not of the design.
+
+## Step 14: skip tables + galloping probes in evaluation (v17, prepared)
+
+- Every stream records a skip entry every 32 docs (absolute docid + cursor
+  byte offset, +~6 MB). When one side of an AND/NOT is at least 24x longer
+  than the other, evaluation probes the long side per element (binary
+  search the skip table, decode at most one 32-entry block) instead of
+  merge-walking the whole long list; the first AND of a query decodes only
+  the short side and probes the long one.
+- Dev sandbox (1 vCPU): eval phase 0.95 -> 0.70 s.
+- Dead-code trim (pre-fusion set-op helpers) for the S axis.
 - Run: PENDING
