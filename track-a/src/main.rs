@@ -39,6 +39,7 @@ const PACK_MAX: u32 = 1 << 20;    // latencies below this pack into 20 bits
 const LABEL: usize = 21;          // "2026-10-30T18:00:00Z "
 const BLOCK: usize = 1 << 20;     // parse granularity
 const AHEAD: usize = 48;          // at most this many blocks past the watermark
+const STREAMS: usize = 4;         // interleaved parse streams per block
 const RUN_WORDS: usize = BLOCK / 40 + 16; // one word per shortest line fits
 const LAG: usize = 2;             // hours behind the watermark it is safe to finalize
 const NEVER: usize = 1000;        // fallback lag: nothing finalizes mid-scan
@@ -207,10 +208,10 @@ impl Dict {
             let mut a = (s.ptr as *const u64).read_unaligned();
             a = if n >= 8 { a } else { a & ((1u64 << (8 * n)) - 1) };
             let b = if n >= 8 { (s.ptr.add(n - 8) as *const u64).read_unaligned() } else { 0 };
-            let mut h = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            h = (h ^ a).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            h = (h ^ b).rotate_left(31).wrapping_mul(0x94D0_49BB_1331_11EB);
-            (h ^ (h >> 29)) as usize
+            // One multiply: the first word, the last word rotated, and the
+            // length already decorrelate the catalogue's shared prefixes.
+            let h = (a ^ b.rotate_left(31) ^ n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            (h >> 29) as usize
         }
     }
 
@@ -403,44 +404,39 @@ impl Engine {
 
     // Parse one block into per-hour run buffers and register them.
     fn parse<const SIMD: bool>(&self, b: usize) {
-        let log = self.log;
-        let mut p = unsafe { log.add(self.align(b)) };
-        let end = unsafe { log.add(self.align(b + 1)) };
-        let mut wp: [*mut u32; HOURS] = [std::ptr::null_mut(); HOURS];
-        let mut bp: [*mut u32; HOURS] = [std::ptr::null_mut(); HOURS];
-        let mut wide: Vec<(u32, u32)> = Vec::new(); // (latency, key | hour << 12... see below)
-        let mut wide_h: Vec<u32> = Vec::new();
-        while p < end {
-            unsafe {
-                // YYYY-MM-DDTHH: month low digit at 6, day at 8-9, hour at 11-12.
-                let day = (*p.add(8) - b'0') as usize * 10 + (*p.add(9) - b'0') as usize;
-                let hh = (*p.add(11) - b'0') as usize * 10 + (*p.add(12) - b'0') as usize;
-                let h = (if *p.add(6) == b'0' { day - 30 } else { day + 1 }) * 24 + hh - 18;
-
-                let (name, name_end) = scan_line::<SIMD>(p.add(28));
-                let id = self.dict.intern::<SIMD>(Name {
-                    ptr: name,
-                    len: (name_end as usize - name as usize) as u32,
-                });
-                let key = id | if *name_end.add(1) == b'5' { 0x800 } else { 0 };
-                let (latency, next) = take_latency(name_end.add(5));
-                p = next;
-
-                if latency >= PACK_MAX {
-                    wide.push((latency, key));
-                    wide_h.push(h as u32);
-                    continue;
-                }
-                let mut w = wp[h];
-                if w.is_null() {
-                    w = self.take_buf();
-                    wp[h] = w;
-                    bp[h] = w;
-                }
-                *w = (latency << 12) | key;
-                wp[h] = w.add(1);
+        let start = unsafe { self.log.add(self.align(b)) };
+        let end = unsafe { self.log.add(self.align(b + 1)) };
+        let mut scan = BlockScan {
+            engine: self,
+            wp: [std::ptr::null_mut(); HOURS],
+            bp: [std::ptr::null_mut(); HOURS],
+            wide: Vec::new(),
+            wide_h: Vec::new(),
+        };
+        // Four line-aligned streams parsed in round-robin: the dictionary
+        // probe of one line overlaps the next line's decode, hiding the
+        // load latency a single stream would serialize on.
+        let mut pos = [start; STREAMS];
+        let mut stop = [end; STREAMS];
+        for i in 1..STREAMS {
+            let mut c = unsafe { start.add((end as usize - start as usize) * i / STREAMS) };
+            while c < end && unsafe { *c.sub(1) } != b'\n' {
+                c = unsafe { c.add(1) };
+            }
+            pos[i] = c;
+            stop[i - 1] = c;
+        }
+        while pos.iter().zip(stop.iter()).all(|(p, s)| p < s) {
+            for i in 0..STREAMS {
+                pos[i] = unsafe { scan.line::<SIMD>(pos[i]) };
             }
         }
+        for i in 0..STREAMS {
+            while pos[i] < stop[i] {
+                pos[i] = unsafe { scan.line::<SIMD>(pos[i]) };
+            }
+        }
+        let BlockScan { wp, bp, wide, wide_h, .. } = scan;
         // Register runs in file order and advance the watermark.
         let mut r = self.mu.lock().unwrap();
         let mut last = -1i32;
@@ -619,6 +615,49 @@ impl Engine {
         });
         let r = self.mu.lock().unwrap();
         !r.bad
+    }
+}
+
+// Per-block scan state: the open run buffer per hour and the overflow list.
+struct BlockScan<'e> {
+    engine: &'e Engine,
+    wp: [*mut u32; HOURS],
+    bp: [*mut u32; HOURS],
+    wide: Vec<(u32, u32)>,
+    wide_h: Vec<u32>,
+}
+
+impl BlockScan<'_> {
+    // Parse the line at `p`, return the next line's start.
+    #[inline(always)]
+    unsafe fn line<const SIMD: bool>(&mut self, p: *const u8) -> *const u8 {
+        // YYYY-MM-DDTHH: month low digit at 6, day at 8-9, hour at 11-12.
+        let day = (*p.add(8) - b'0') as usize * 10 + (*p.add(9) - b'0') as usize;
+        let hh = (*p.add(11) - b'0') as usize * 10 + (*p.add(12) - b'0') as usize;
+        let h = (if *p.add(6) == b'0' { day - 30 } else { day + 1 }) * 24 + hh - 18;
+
+        let (name, name_end) = scan_line::<SIMD>(p.add(28));
+        let id = self.engine.dict.intern::<SIMD>(Name {
+            ptr: name,
+            len: (name_end as usize - name as usize) as u32,
+        });
+        let key = id | if *name_end.add(1) == b'5' { 0x800 } else { 0 };
+        let (latency, next) = take_latency(name_end.add(5));
+
+        if latency >= PACK_MAX {
+            self.wide.push((latency, key));
+            self.wide_h.push(h as u32);
+            return next;
+        }
+        let mut w = self.wp[h];
+        if w.is_null() {
+            w = self.engine.take_buf();
+            self.wp[h] = w;
+            self.bp[h] = w;
+        }
+        *w = (latency << 12) | key;
+        self.wp[h] = w.add(1);
+        next
     }
 }
 
