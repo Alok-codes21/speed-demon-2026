@@ -640,3 +640,6 @@ synthetic single-term suite: 0 matches instead of 144).
 
 - run-7e9e8b4b73bd (sibling-folder push re-ran track-b): T=0.2255 s,
   M=50.4 MB, 69.86 pts. Best unchanged (run-551200f87557, 70.03).
+
+- run-1801ed8410f4 (sibling-folder push re-ran track-b): T=0.2276 s,
+  M=50.6 MB, 69.74 pts. Best unchanged (run-551200f87557, 70.03).
