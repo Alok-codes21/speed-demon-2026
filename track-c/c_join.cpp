@@ -168,11 +168,17 @@ static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
+static const char *gst[97];
+static uint32_t gnext = 0;
+
 void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
-  const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
   uint32_t bnid[16], nb = 0; uint8_t bc[16];
+  for (;;) {
+    uint32_t g = __atomic_fetch_add(&gnext, 1, __ATOMIC_RELAXED);
+    if (g >= 96) break;
+    const char *p = gst[g], *end = gst[g + 1];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
     uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
@@ -223,6 +229,7 @@ void *parse_chunk(void *arg) {
     bnid[nb] = nid; bc[nb] = c;
     if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
+  }
   bflush(bnid, bc, nb);
   return nullptr;
 }
@@ -251,22 +258,21 @@ int main(int argc, char **argv) {
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   madvise((void *)data, st.st_size, MADV_SEQUENTIAL); madvise((void *)data, st.st_size, MADV_HUGEPAGE); fend = data + st.st_size;
 
-  // Split into 12 chunks at exact record boundaries.
+  // Split into 96 granules at exact record boundaries; workers pull granules
+  // from an atomic counter, so a slow granule cannot leave a tail idle.
   const int nth = 12;
-  const char *c_starts[nth + 1];
-  c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
-  c_starts[nth] = fend;
-  size_t total = fend - c_starts[0];
-  for (int i = 1; i < nth; i++) {
-    const char *ap = c_starts[0] + (i * total) / nth;
+  gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
+  gst[96] = fend;
+  size_t total = fend - gst[0];
+  for (int i = 1; i < 96; i++) {
+    const char *ap = gst[0] + (i * total) / 96;
     const char *m = (const char *)memmem(ap, fend - ap, "\r\n", 2);
-    c_starts[i] = m ? m + 2 : fend;
+    gst[i] = m ? m + 2 : fend;
   }
 
   static Worker workers[nth];
   pthread_t ths[nth];
   for (int i = 0; i < nth; i++) {
-    workers[i].start = c_starts[i]; workers[i].end = c_starts[i + 1];
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   }
   for (int i = 0; i < nth; i++)

@@ -187,3 +187,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local 1-CPU sandbox shows +7% (12x slice-zeroing faults, no contention to remove - the win is invisible to it); board is the measurement.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+
+## Step 37 (v58 dynamic work-stealing granules)
+- Change: 12 static chunks -> 96 granules pulled from an atomic counter (relaxed fetch_add). Static chunks leave a join-tail when record hardness varies (escaped-quote density, multi-line notes); stealing bounds the tail at one granule (~0.5ms). Stacked on step-36 lean hash.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (1-CPU sandbox cannot measure stealing; board is the measurement).
+- Board T_s/M/S/points: pending
+- Run: pending
