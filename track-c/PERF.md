@@ -263,12 +263,18 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
 - Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.042867 M=10182656 S=214 points=76.534933 - NEW BEST (+0.250 over run-1ffe9fde6560; S 248->214 confirmed; M up +0.3MB from the bits/stdc++.h iostream bloat, removed in step 48). Commit 6e7c910. RANK: #3 (past Kirk Mates 76.347).
+- Run: run-b98595b62acb
 
 ## Step 48 (v94b memory cut: drop bits/stdc++.h; pin hot-loop alignment)
 - Change: includes de-consolidated back to 10 individual headers (+4 code lines) - bits/stdc++.h pulls <iostream>, whose static-init pages cost +0.83MB RSS (measured: tiny-dataset maxrss 6.97 vs 6.14MB). parse_chunk marked __attribute__((aligned(64))) (0 lines): without it this exact source landed on an unlucky hot-loop layout at +2% T local; with it T is flat vs v72 (153.2 vs 152.9ms median, 16 interleaved reps).
 - M floor analysis (board ~9.9MB): tables 5.9MB (NT 1 + R2C 1 + CB ~3.9 across three 2MB huge pages) + container/runtime baseline ~3.5MB + stats arrays 0.26MB. This step removes the ~0.8MB libstdc++/iostream chunk -> expected board M ~9.0-9.1MB. 8.0MB is NOT reachable T-neutrally: remaining cuts are dense-id intern (measured dead for T), CB sparsification or dropping THP (TLB-miss T risk), and a libstdc++-free build (~0.2MB for +7 S lines, net wash). Each remaining 0.1-0.2MB costs more in T or S than the M term pays.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓ T flat vs v72 ✓ board S 218 (212 + Dockerfile 6).
+- Board T_s/M/S/points: pending
+- Run: pending
+
+## Step 49 (v95b branch-free second word in the name hash)
+- Change: hs() loads w1 unconditionally with the byte count clamped by cmov (len > 8 ? len - 8 : 0) instead of branching on len > 8 - name lengths straddle 8 often enough that the branch mispredicted; the extra L1 load is cheaper. Local: -4.4% median vs v94b (16 interleaved pairs).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓. Measured and rejected in the same round: SSE length-scan + SWAR digits for id/region/amount (+14% local - serial scan->convert chain loses to the simple digit loop on this box).
 - Board T_s/M/S/points: pending
 - Run: pending

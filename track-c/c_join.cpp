@@ -58,7 +58,7 @@ static inline uint64_t load8(const char *s, uint32_t n, const char *end) {
 // multiply fold gives a strong avalanche in one multiply (mum-style mixer).
 static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
   uint64_t w0 = load8(s, std::min(len, 8u), end),
-           w1 = len > 8 ? load8(s + 8, std::min(len - 8, 8u), end) : 0,
+           w1 = load8(s + 8, std::min(len > 8 ? len - 8 : 0, 8u), end),
            h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ len * 0xbf58476d1ce4e5b9ULL;
   if (__builtin_expect(len > 16, 0))
     h ^= load8(s + 16, std::min(len - 16, 8u), end) * 0x517cc1b727220a95ULL ^
