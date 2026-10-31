@@ -24,6 +24,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+
 //! Speed Demon 2026, Track B (Index), in Rust with no dependencies.
 //!
 //! 1. The queries are read first, and only their terms are looked for.
@@ -50,6 +51,9 @@ extern "C" {
 
 static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(12);
 const NONE: u32 = u32::MAX;
+const BUCKET: usize = 11; // terms per bucket of scan output: 2^11
+const GAP: u32 = 31; // a unit's 5-bit doc gap; GAP means the whole gap follows in the next unit
+const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
 
 /// The file, mapped over a spare zero page so loads of 32 bytes past any of
 /// its bytes stay inside the mapping.
@@ -442,65 +446,33 @@ fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, u32, *const u
     doc - first
 }
 
-#[inline(always)]
-fn put_varint(out: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-/// One term's postings as a growing delta-varint stream (~1.3 B/doc vs the
-/// 2 B/doc of the old u16-unit lists, and no retained per-thread lists).
 #[derive(Default)]
-struct Stream {
-    buf: Vec<u8>,
-    last: u32,
-    n: u32,
+struct Units {
+    chunks: Vec<Vec<u16>>,
+    prev: u32,
 }
 
-/// Append one term's partitioned runs (per scan thread, ascending) to its
-/// stream; adjacent duplicates (same doc) are dropped here.
-fn vlen(v: u32) -> usize {
-    (32 - (v | 1).leading_zeros() as usize + 6) / 7
+impl Units {
+    fn push(&mut self, x: u16) {
+        if self.chunks.last().map_or(true, |c| c.len() == c.capacity()) {
+            self.chunks.push(Vec::with_capacity(1 << 15));
+        }
+        self.chunks.last_mut().unwrap().push(x);
+    }
+
+    fn add(&mut self, offset: u32, doc: u32) {
+        let gap = doc - std::mem::replace(&mut self.prev, doc);
+        self.push((offset << 5 | gap.min(GAP)) as u16);
+        if gap >= GAP {
+            self.push(gap as u16);
+        }
+    }
 }
 
-fn encode_runs(st8: &mut Stream, key: usize, base: &[u32], part: &[u32]) {
-    let (a, b) = (base[key] as usize, base[key + 1] as usize);
-    if a == b {
-        return;
-    }
-    // Pass 1: exact byte count for this segment so the buffer grows with no
-    // amortized slack (peak RSS is what the board measures).
-    let mut need = 0usize;
-    {
-        let mut last = st8.last;
-        let mut prev_d = u32::MAX;
-        for &d in &part[a..b] {
-            if d == prev_d {
-                continue;
-            }
-            prev_d = d;
-            need += vlen(d.wrapping_sub(last));
-            last = d;
-        }
-    }
-    st8.buf.reserve_exact(need);
-    let mut r = st8.n;
-    let mut last = st8.last;
-    let mut prev_d = u32::MAX;
-    for &d in &part[a..b] {
-        if d == prev_d {
-            continue;
-        }
-        prev_d = d;
-        put_varint(&mut st8.buf, d.wrapping_sub(last));
-        last = d;
-        r += 1;
-    }
-    st8.n = r;
-    st8.last = last;
+struct Lists {
+    first: u32,
+    start: Vec<u32>,
+    post: Vec<u16>,
 }
 
 fn main() {
@@ -613,165 +585,79 @@ fn main() {
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
 
     let found = Mutex::new(vec![]);
-    // Segmented scan: the corpus is scanned in SEG sequential segments. Each
-    // segment's per-thread (term, doc) pair logs are partitioned by term
-    // (stable counting sort, threads in doc order = globally sorted without a
-    // sort pass) and parallel-encoded into per-term delta-varint streams, then
-    // the segment's logs and partition are released (capacity is reused).
-    const SEG: usize = 32;
-    let mut scut: Vec<usize> = (0..=SEG).map(|b| text.len() * b / SEG).collect();
-    for c in &mut scut[1..SEG] {
-        while *c < text.len() && text[*c - 1] != b'\n' {
-            *c += 1;
-        }
-    }
-    #[derive(Default)]
-    struct ScanState {
-        log: Vec<u64>,
-    }
-    let mut states: Vec<ScanState> = (0..threads).map(|_| ScanState::default()).collect();
-    let mut streams: Vec<Stream> = (0..nterms).map(|_| Stream::default()).collect();
-    // Per-thread row of nterms counts would cost threads x nterms x 4 B x 2
-    // (~7 MB) for the whole run; a single nterms-wide count + cursor pair is
-    // 0.6 MB, and the pass over the segment's small log is cheap.
-    let mut cnt: Vec<u32> = vec![0; nterms];
-    let mut base: Vec<u32> = vec![0; nterms + 1];
-    let mut part: Vec<u32> = Vec::new();
-    let (terms, info, anchored, spans, ids) = (&terms, &info, &anchored, &spans, &ids);
-    for seg in 0..SEG {
-        let (lo, hi) = (scut[seg], scut[seg + 1]);
-        let mut cut: Vec<usize> = (0..=threads).map(|t| lo + (hi - lo) * t / threads).collect();
-        for c in &mut cut[1..threads] {
-            while *c < hi && text[*c - 1] != b'\n' {
-                *c += 1;
+    let lists: Vec<Lists> = on_threads(|t| {
+        let (mut count, mut last, mut mine) = (vec![0u16; nterms], vec![0u16; nterms], vec![]);
+        let mut buckets: Vec<Units> = (0..=nterms >> BUCKET).map(|_| Units::default()).collect();
+        let first = firsts[t];
+        let mut pending = vec![(0usize, 0u64); nbits];
+        let flush = |(w, x): (usize, u64), b: usize| {
+            if x != 0 {
+                bits[b * words + w].fetch_or(x, Relaxed);
             }
-        }
-        let firsts: Vec<u32> = cut[..threads].iter().map(|&c| first_doc(c)).collect();
-        std::thread::scope(|scope| {
-            for (t, st) in states.iter_mut().enumerate() {
-                let (first, lo, hi) = (firsts[t], cut[t], cut[t + 1]);
-                let (bits, found) = (&bits, &found);
-                std::thread::Builder::new()
-                    .stack_size(256 << 10)
-                    .spawn_scoped(scope, move || {
-                        let mut mine = vec![];
-                        let mut pending = vec![(0usize, 0u64); nbits];
-                        let flush = |(w, x): (usize, u64), b: usize| {
-                            if x != 0 {
-                                bits[b * words + w].fetch_or(x, Relaxed);
-                            }
-                        };
-                        walk(&text[lo..hi], first, terms, |doc, id, s, len| {
-                            let i = id as usize;
-                            let ((role, from), (_, to)) = (info[i], info[i + 1]);
-                            if from != to {
-                                for &(_, q, j) in &anchored[from as usize..to as usize] {
-                                    let span = spans[q as usize];
-                                    let phrase = &ids[span.1 as usize..span.2 as usize];
-                                    if unsafe { around(terms, s, len, phrase, j as usize) } {
-                                        mine.push((q, doc));
-                                    }
-                                }
-                            }
-                            if role == NONE {
-                                return;
-                            }
-                            if role == 0 {
-                                st.log.push((i as u64) << 32 | (doc - first) as u64);
-                            } else {
-                                let (b, w) = ((role - 1) as usize, doc as usize / 64);
-                                if pending[b].0 != w {
-                                    flush(std::mem::replace(&mut pending[b], (w, 0)), b);
-                                }
-                                pending[b].1 |= 1 << (doc % 64);
-                            }
-                        });
-                        pending.into_iter().enumerate().for_each(|(b, p)| flush(p, b));
-                        found.lock().unwrap().extend(mine);
-                    })
-                    .unwrap();
+        };
+        let n = walk(&text[cut[t]..cut[t + 1]], first, &terms, |doc, id, s, len| {
+            let i = id as usize;
+            let ((role, from), (_, to)) = (info[i], info[i + 1]);
+            if from != to {
+                for &(_, q, j) in &anchored[from as usize..to as usize] {
+                    let span = spans[q as usize];
+                    let phrase = &ids[span.1 as usize..span.2 as usize];
+                    if unsafe { around(&terms, s, len, phrase, j as usize) } {
+                        mine.push((q, doc));
+                    }
+                }
+            }
+            let mark = (doc - first + 1) as u16;
+            if role == NONE || std::mem::replace(&mut last[i], mark) == mark {
+                return;
+            }
+            if role == 0 {
+                buckets[i >> BUCKET].add((i & ((1 << BUCKET) - 1)) as u32, doc - first);
+                count[i] += 1;
+            } else {
+                let (b, w) = ((role - 1) as usize, doc as usize / 64);
+                if pending[b].0 != w {
+                    flush(std::mem::replace(&mut pending[b], (w, 0)), b);
+                }
+                pending[b].1 |= 1 << (doc % 64);
             }
         });
-        // Partition the segment's logs: per-thread runs must stay in thread
-        // (doc) order within each term. Count per term per thread in one pass
-        // over the small logs, then lay out thread runs key-major.
-        for c in cnt.iter_mut() {
-            *c = 0;
-        }
-        for st2 in states.iter() {
-            for &e in &st2.log {
-                cnt[(e >> 32) as usize] += 1;
+        pending.into_iter().enumerate().for_each(|(b, p)| flush(p, b));
+        assert!(n < 1 << DOC_BITS, "too many documents per thread");
+        found.lock().unwrap().extend(mine);
+        let mut start = vec![0u32; nterms + 1];
+        (0..nterms).for_each(|i| start[i + 1] = start[i] + count[i] as u32);
+        drop((count, last));
+        let mut post = vec![0u16; start[nterms] as usize];
+        let mut cursor = start.clone();
+        for (b, units) in buckets.into_iter().enumerate() {
+            let (mut doc, mut term) = (0u32, NONE);
+            for x in units.chunks.into_iter().flatten() {
+                if term == NONE {
+                    term = (b << BUCKET) as u32 | (x >> 5) as u32;
+                    if x as u32 & GAP == GAP {
+                        continue;
+                    }
+                    doc += x as u32 & GAP;
+                } else {
+                    doc += x as u32;
+                }
+                let i = std::mem::replace(&mut term, NONE) as usize;
+                (post[cursor[i] as usize], cursor[i]) = (doc as u16, cursor[i] + 1);
             }
         }
-        let mut acc = 0u32;
-        for key in 0..nterms {
-            base[key] = acc;
-            acc += cnt[key];
-            cnt[key] = base[key];
-        }
-        base[nterms] = acc;
-        part.clear();
-        part.resize(acc as usize, 0u32);
-        for (t, st2) in states.iter().enumerate() {
-            let first = firsts[t];
-            for &e in &st2.log {
-                let key = (e >> 32) as usize;
-                let pos = cnt[key] as usize;
-                part[pos] = (e as u32) + first;
-                cnt[key] = pos as u32 + 1;
-            }
-        }
-        // parallel encode: each thread owns a term range of the streams.
-        let sz = nterms.div_ceil(threads);
-        let baser: &Vec<u32> = &base;
-        let part_ref: &Vec<u32> = &part;
-        let mut s_it = streams.chunks_mut(sz);
-        std::thread::scope(|scope| {
-            for m in 0..threads {
-                let tc = s_it.next().unwrap_or(&mut []);
-                let tbase = m * sz;
-                std::thread::Builder::new()
-                    .stack_size(256 << 10)
-                    .spawn_scoped(scope, move || {
-                        for (l, st8) in tc.iter_mut().enumerate() {
-                            encode_runs(st8, tbase + l, baser, part_ref);
-                        }
-                    })
-                    .unwrap();
-            }
-        });
-        for s2 in states.iter_mut() {
-            s2.log.clear();
-        }
-    }
-    // Hand the over-reserved slack back before eval.
-    for s in streams.iter_mut() {
-        s.buf.shrink_to_fit();
-    }
+        Lists { first, start, post }
+    });
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let mut found = found.into_inner().unwrap();
     found.sort_unstable();
     found.dedup();
 
-    // (no threshold raise: eval list buffers above 64 KB ride mmap and return)
+    unsafe { mallopt(-3, 64 << 20) };
     let list_of = |id: u32| {
-        let s = &streams[id as usize];
-        let mut v = Vec::with_capacity(s.n as usize);
-        let (mut d, mut i) = (0u32, 0usize);
-        while i < s.buf.len() {
-            let (mut x, mut shift) = (0u32, 0);
-            loop {
-                let b = s.buf[i];
-                i += 1;
-                x |= ((b & 0x7f) as u32) << shift;
-                if b < 0x80 {
-                    break;
-                }
-                shift += 7;
-            }
-            d = d.wrapping_add(x);
-            v.push(d);
-        }
+        let range = |l: &Lists| l.start[id as usize] as usize..l.start[id as usize + 1] as usize;
+        let mut v = Vec::with_capacity(lists.iter().map(|l| range(l).len()).sum());
+        lists.iter().for_each(|l| v.extend(l.post[range(l)].iter().map(|&d| l.first + d as u32)));
         v
     };
     let docs = |id: u32| match role[id as usize] {
