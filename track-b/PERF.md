@@ -152,4 +152,21 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   llvm-profdata merge, -Cprofile-use. Build-time training on generator
   output is explicitly allowed; /data is not mounted at build time.
 - No source changes vs v12.
+- Run: run-ea261a9dcfb7 - PASS: T=0.750 s, M=149.6 MB, S=906, K=10.66,
+  **51.08 pts** (rank 42/64 at the time). Wall 0.793 -> 0.750 s for a
+  Dockerfile-only change.
+
+## Step 11: streaming set-ops + SWAR line scan + prefix prefilter (v14, this push)
+
+- BOOL/PHRASE evaluation now fuses varint decoding into the set operation
+  (intersect/union/diff walk a forward cursor over the delta-varint stream
+  instead of decoding the whole list into a scratch vector first): one pass
+  over each list instead of two.
+- The per-line "skip id" and "find newline" byte loops are SWAR word scans
+  (8 bytes/step, haszero trick).
+- A 64 Kbit two-byte folded-prefix filter sits in front of the hash: most
+  non-query tokens are rejected without computing a hash at all.
+- Dev sandbox (1 vCPU): eval phase 0.95 -> 0.82 s.
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match.
 - Run: PENDING
