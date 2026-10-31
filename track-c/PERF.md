@@ -393,6 +393,21 @@ Every step from the reference to your final version, each with the live-board ru
   by 12 threads after the parse. Output identical (verified on all local
   datasets + sanitizers); M rises to ~54 MB by construction.
 - Purpose: measure what the shared-bitset fetch_or costs on the runner by
-  subtracting this run's T from step-61's. A diagnostic, not a candidate;
-  the tip reverts to step-61 code right after the read.
+  subtracting this run's T from step-61's. A diagnostic, not a candidate.
+- Run: run-e6a1c91b55ad. Board: T 0.050320, M 53.9 MB, S 259, 66.937 points.
+  READOUT: +10.3 ms SLOWER than step-61 with every locked RMW removed - the
+  shared-bitset fetch_or costs nothing (the shared 3.9 MB bitset is
+  L3-resident); 12 private copies = 47 MB thrash L3. Dedup coherence is not
+  the bottleneck (second confirmation after step 59).
+
+## Step 63: pread-per-granule input (no page faults in the parse loop)
+- The parse loop no longer touches the records.csv mapping: 768 granules
+  (record-aligned as before, boundaries still discovered off the mapping),
+  each pulled with one pread into a per-thread 512 KB buffer and parsed from
+  there. Granules larger than the buffer fall back to parsing the mapping.
+  Rationale: mmap parsing pays ~50K page faults on one shared VMA; the
+  leaders' memory profiles (11-13.5 MB) fit tables + small read buffers,
+  i.e. a pread design.
+- Local: +5% on 1 vCPU (the copy cost shows when nothing overlaps); maxrss
+  delta +6 MB anon. The board decides.
 - Run: PENDING
