@@ -649,3 +649,17 @@ Every step from the reference to your final version, each with the live-board ru
   country-slot insertion is the only new concurrency. Tip reverted to v140
   (step 84 revert); the win is being resubmitted as a single-threaded SWAR
   region load (no new concurrency) in step 85.
+
+## Step 85 - single-threaded SWAR regions.csv load (re-approach of step 84)
+
+- Same region-load win as step 84 with zero new concurrency: the SWAR
+  comma-find + branch-free digit decode runs once in main (v140's exact
+  thread model), instead of 12 racing slices with lock-free slot claiming.
+- The reservation + MAP_FIXED spare pages (same pattern as records.csv)
+  keep the 8-byte tail reads inside the mapping.
+- Expected: ~60-70% of step 84's intended saving (est. 4-5ms -> 1.5-2ms of
+  startup), with the whole 12-way-parallel race class eliminated by design.
+- Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
+  ASAN+UBSAN clean, TSAN clean (region load is single-threaded by
+  construction; the worker pool is byte-identical to v140).
+- Run: PENDING

@@ -92,15 +92,27 @@ static inline uint64_t num(const char *&p, char term) {
 
 void load_regions(const std::string &path) {
   struct stat st;
-  fstat(open(path.c_str(), O_RDONLY), &st);
-  const char *data = (const char *)mmap(0, st.st_size, 1, 2, open(path.c_str(), O_RDONLY), 0),
+  int fd = open(path.c_str(), O_RDONLY);
+  fstat(fd, &st);
+  // 2MB-aligned map inside a larger reservation: the spare anon pages after
+  // EOF keep the 8-byte SWAR tail reads inside the mapping (zero-filled).
+  char *gres = (char *)mmap(0, st.st_size + (2 << 20) + 4096, 3, 0x22, -1, 0);
+  size_t ga = (size_t)(gres + (2 << 20) - 1) & -(2 << 20);
+  const char *data = (const char *)mmap((void *)ga, st.st_size, 3, 0x12, fd, 0),
                *end = data + st.st_size,
                *p = (const char *)memchr(data, '\n', st.st_size) + 1; // header
   int16_t slot_of[1024]; // country code -> slot, by first appearance
   memset(slot_of, -1, sizeof(slot_of)), memset(R2C, 255, 1000000);
-  for (uint64_t rid; p < end && (rid = num(p, ','), true); p += 4) {
-    uint32_t w, key = (memcpy(&w, p, 4), __builtin_bswap32(w) >> 8),
-              h = (key * 0x9E3779B1u) >> 22;
+  uint32_t n;
+  for (; p < end; p += n + 5) { // rid(1..6 digits) ',' CCC '\n'
+    uint64_t x;
+    memcpy(&x, p, 8);
+    uint64_t c = x ^ 0x2C2C2C2C2C2C2C2CULL, // SWAR: first comma's index
+             m = (c - 0x0101010101010101ULL) & ~c & 0x8080808080808080ULL;
+    uint32_t rid, w;
+    n = (uint32_t)__builtin_ctzll(m) >> 3, rid = (uint32_t)DIGS(p, n);
+    memcpy(&w, p + n + 1, 4);
+    uint32_t key = __builtin_bswap32(w) >> 8, h = (key * 0x9E3779B1u) >> 22;
     while (slot_of[h] >= 0 && CK[slot_of[h]] != key)
       h = (h + 1) & 1023;
     slot_of[h] < 0 && (CK[slot_of[h] = (int16_t)NC++] = key, 0);
