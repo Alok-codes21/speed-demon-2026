@@ -77,9 +77,12 @@ static uint64_t hl(const char *s, const char *e) {
   return h | (1ULL << 63);
 }
 
-// field-width integer ending at term; consumes the terminator
+// field-width integer ending at term; consumes the terminator; two digits
+// per iteration halve the serial multiply chain
 static inline uint64_t num(const char *&p, char term) {
   uint64_t v = 0;
+  while (p[0] != term && p[1] != term)
+    v = v * 100 + (p[0] - '0') * 10 + (p[1] - '0'), p += 2;
   while (*p != term)
     v = v * 10 + (*p++ - '0');
   return p++, v;
@@ -151,9 +154,6 @@ struct Worker {
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
   uint32_t bnid[16], nb = 0, bc[16];
-  uint64_t ph = 0;
-  uint32_t ps = 0, pl = 0, pv = 0;
-  uint8_t pc = 0;
   // flush n buffered bitsets: prefetch all lines, then set
   auto bf = [&](uint32_t n) {
     for (uint32_t j = 0; j < n; j++)
@@ -189,15 +189,10 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_min = cents < st.amount_min ? cents : st.amount_min;
       st.amount_max = cents > st.amount_max ? cents : st.amount_max;
       st.name_bytes += name_len, st.note_bytes += note_len;
-      // deferred intern+bitset: complete the PREVIOUS record now; its NT and
-      // CB lines have had a full record of prefetch distance
-      if (__builtin_expect(pv, 1))
-        bnid[nb] = pl ? intern_name(ph, ps) : 0, bc[nb] = pc,
-        ++nb == 16 && (bf(16), nb = 0);
-      pv = 1, ph = nh, ps = slot, pl = name_len, pc = c;
+      bnid[nb] = name_len ? intern_name(nh, slot) : 0, bc[nb] = c;
+      ++nb == 16 && (bf(16), nb = 0);
     }
   }
-  pv && (bnid[nb] = pl ? intern_name(ph, ps) : 0, bc[nb] = pc, ++nb, 0);
   bf(nb);
   return nullptr;
 }

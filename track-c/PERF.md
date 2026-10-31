@@ -205,8 +205,8 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
 - Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.042288 M=9981952 S=224 points=76.620280 - T identical to step-49 (0.042288 vs 0.042281): the pipeline distance buys nothing, the random-access latency is already covered by the existing batch-16 prefetch + note-scan work, and the +6 S lines cost ~0.06 pts. Dead on the board; reverted in step-51. Commit 72d27fd.
+- Run: run-7542ff54b1f0
 
 ## Step 39 (revert to v58; step-38 fused table regressed on board)
 - Change: c_join.cpp back to v58 (step-37 code). Step-38's fused 40B-entry table scored T_s=0.047124 (+8.3%), M=10.4MB, S=310, points=74.207 (run-9a44bafe6c89): the 5.24MB table pushes probes to L3 and the inline mark loses the batch-16 prefetch coverage, outweighing the contention savings. Fused-table hypothesis dead at this entry size.
@@ -276,11 +276,17 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 49 (v95b branch-free second word in the name hash)
 - Change: hs() loads w1 unconditionally with the byte count clamped by cmov (len > 8 ? len - 8 : 0) instead of branching on len > 8 - name lengths straddle 8 often enough that the branch mispredicted; the extra L1 load is cheaper. Local: -4.4% median vs v94b (16 interleaved pairs).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓. Measured and rejected in the same round: SSE length-scan + SWAR digits for id/region/amount (+14% local - serial scan->convert chain loses to the simple digit loop on this box).
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.042281 M=9965568 S=218 points=76.717648 - the local -4.4% compressed to -1.4% T on the board as the regime model predicts, and it is still a NEW BEST. Commit cf44219.
+- Run: run-a2f020e15701
 
 ## Step 50 (v96 one-deep intern/bitset pipeline)
 - Change: intern_name + bitset RMW for record i execute at the start of record i+1's iteration, giving the NT/CB prefetches a full record of latency distance (the board regime is 12 threads against L3/DRAM; a 1-vCPU sandbox cannot measure it). Local flat (+1%, noise) vs v95b. Board is the judge; revert if it does not beat the best.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
+
+## Step 51 (v98 revert to v95b + two-digit-per-iteration num())
+- Change: tip reverts step-50 (pipeline dead, see above) back to step-49 code, plus one rider: num() consumes two digits per iteration with a v*100+10a+b fold while the next two bytes are both non-terminator, halving the serial multiply-accumulate chain on id/region/amount. Local flat vs v95b (157.8 vs 157.9ms median - rider class, board judges).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge) ✓ TSAN clean (sample) ✓ stress 3x sample hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
