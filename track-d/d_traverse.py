@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""
+"""Track D shortest paths: Python 3.13 standard library implementation.
 
+Uses compact forward/reverse CSR arrays, memory-mapped two-pass graph parsing,
+bidirectional Dijkstra, duplicate caching, and touched-node distance resets.
+"""
 import os
 import sys
 from array import array
