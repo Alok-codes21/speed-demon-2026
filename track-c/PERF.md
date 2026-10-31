@@ -316,3 +316,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 56 (v107 two-phase redesign: dedup via private streams, no shared tables)
+- Change: phase 1 parses and APPENDS each record's 64-bit pair-key (name_hash ^ mix(country)) to a thread-local 1KB-chunked stream per country - no intern table, no shared bitsets, NO ATOMICS in the record loop (one atomic bump per 127 records for pool chunks). After a barrier, countries are dealt to threads by decreasing size; each thread counts distinct keys per country in a private open-addressing set (capacity 1.5x, reset per country). Replaces the NT + CB shared-table design whose locked fetch_or on 90%-first-seen pairs was the suspected 12-thread bottleneck. Motivation (measured on full data): D = 2,980,424 distinct pairs / 3.32M records - pairs are 90% unique, so shared dedup buys nothing but coherence traffic.
+- Memory: chunk pool 27MB + R2C 1MB + phase-2 sets ~8MB vs NT+CB 5MB -> board M est. ~34-38MB (sanctioned: net K judges). Local (1 vCPU, NOT the board regime): -12% vs v101 (139.7 vs 158.9ms) - the locked-op removal is pure win even uncontended; the scaling win (if any) is board-only.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 6x sample / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
