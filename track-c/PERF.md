@@ -290,3 +290,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge) ✓ TSAN clean (sample) ✓ stress 3x sample hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 52 (v99 redesign: fused 64B hash+bitmap table + empty-name crash fix)
+- Change: the 8B-entry name table and the separate 4MB per-country bitset array merge into one table of 2^17 x 64B cache-line entries {hash, 256-bit country bitmap}: a record's intern probe and its (name, country) dedup RMW land on ONE line instead of two random lines. Distinct-per-country now comes from the dedup RMW return (a bit flipped 0->1 increments a thread-local counter), replacing the end-of-run popcount over 4MB of bitsets. Probes walk consecutive lines, which the streamer prefetcher covers.
+- Crash fix riding along: for an empty name the hash was computed on an UNINITIALIZED field pointer (QF's empty branch never sets s) - latent since the QF macro landed, masked by stack garbage on every board run, SEGV under ASAN. Empty names never intern, so the hash is now skipped for them. Output-identical (all hashes + diffs unchanged).
+- Cost: table 8MB vs 5MB -> board M ~13MB (+1.1 pts penalty). Bet: halved shared-line traffic on the 12-thread board beats it. Local 1-vCPU: +6.6% (169.9 vs 159.4ms median) - expected; the probe-line increase is pure local cost while the contention win is board-only. Judged by the board; reverts if it does not beat 76.5.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample, tiny) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
