@@ -11,6 +11,3 @@ panic = "abort"
 overflow-checks = false
 strip = true
 
-[[bin]]
-name = "gen"
-path = "src/gen.rs"
