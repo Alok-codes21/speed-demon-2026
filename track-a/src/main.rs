@@ -37,7 +37,7 @@ const SLOTS: usize = 8192;        // shared dictionary slots, power of two
 const MAX_NAMES: usize = 2048;    // endpoint ids must fit 12 bits with the flag
 const PACK_MAX: u32 = 1 << 20;    // latencies below this pack into 20 bits
 const LABEL: usize = 21;          // "2026-10-30T18:00:00Z "
-const BLOCK: usize = 1 << 20;     // parse granularity
+const BLOCK: usize = 256 << 10;   // parse granularity
 const AHEAD: usize = 48;          // at most this many blocks past the watermark
 const STREAMS: usize = 4;         // interleaved parse streams per block
 const RUN_WORDS: usize = BLOCK / 40 + 16; // one word per shortest line fits
@@ -55,7 +55,9 @@ extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn posix_fadvise(fd: i32, off: i64, len: i64, advice: i32) -> i32;
     fn prctl(opt: i32, a2: usize, a3: usize, a4: usize, a5: usize) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
+const MADV_DONTNEED: i32 = 4;
 
 // ------------------------------------------------------------- byte helpers
 
@@ -603,12 +605,22 @@ impl Engine {
 
     fn run<const SIMD: bool>(&self) -> bool {
         thread::scope(|s| {
-            for _ in 0..self.threads {
-                s.spawn(|| loop {
-                    match self.claim() {
-                        Claim::Parse(b) => self.parse::<SIMD>(b),
-                        Claim::Finalize(h) => self.finalize(h),
-                        Claim::Done => break,
+            for i in 0..self.threads {
+                s.spawn(move || {
+                    loop {
+                        match self.claim() {
+                            Claim::Parse(b) => self.parse::<SIMD>(b),
+                            Claim::Finalize(h) => self.finalize(h),
+                            Claim::Done => break,
+                        }
+                    }
+                    // Work is over: drop this thread's share of the input
+                    // mapping now, in parallel, so process exit has no
+                    // populated page table left to tear down.
+                    let slice = (self.size / self.threads + 4095) / 4096 * 4096;
+                    let from = (i * slice).min(self.size);
+                    unsafe {
+                        madvise(self.log.add(from) as *mut u8, slice.min(self.size - from), MADV_DONTNEED);
                     }
                 });
             }
