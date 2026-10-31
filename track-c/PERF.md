@@ -503,4 +503,23 @@ Every step from the reference to your final version, each with the live-board ru
   used set, no 2 MB rounding. populate now covers NT + R2C + used CB fully.
 - Run: PENDING
 ## Step 74: PERF.md bookkeeping (steps 72-73 results); v128 unchanged
+- Run: run-c9b5ca4840cb. Board: T 0.03907, M 8.5 MB, S 274, 77.539 - run-to-run
+  variance on unchanged v128; best stands at 77.652 (run-91fae3b85a46).
+
+## Step 75: branch-free name hash on a spare-paged map (v132)
+- Local ablation (1 vCPU, full seed 1) put the name hash at ~21% of runtime,
+  the intern probe ~14%, R2C/CB ~0 (ring prefetch hides both). Attacked the
+  hash: records.csv now maps with a 2MB-aligned spare zero page after EOF, so
+  the 8-byte word loads in hs need no end guard or branch; the length masks
+  come from a 9-entry table; >25-byte names get a word-wise multiply-mix loop
+  instead of a byte-serial FNV chain. Dead ends measured and dropped the same
+  session: a one-pass CLMUL separator scanner for the whole record (+17%
+  local - scanning every note byte costs more than the field scans it saves;
+  matches Cache Me's own note that their mask parser alone is slower than our
+  full pipeline) and an SSE comma-scan + DIGS id parse (+21% local - the
+  fold's latency chain loses to the branch predictor learning the id width).
+- Local: 217.7 ms vs 225.3 ms interleaved (-3.5%). Correctness: full seed 1
+  sha256 d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x parallel
+  stress hash-stable, ASAN+UBSAN clean on tiny+edge. Hash values for the
+  >25-byte path changed (internal only; interning semantics unchanged).
 - Run: PENDING

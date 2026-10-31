@@ -42,41 +42,38 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
       return idx;
 }
 
-// 8 bytes with the high (8 - n) bytes zeroed, never reading past end.
-static inline uint64_t load8(const char *s, uint32_t n, const char *end) {
-  uint64_t v = 0;
-  if (__builtin_expect(s + 8 <= end, 1))
-    memcpy(&v, s, 8);
-  else {
-    char tmp[8] = {};
-    memcpy(tmp, s, n);
-    memcpy(&v, tmp, 8);
+// Names hash over raw field bytes ("" pairs included - canonical). With the
+// spare page after EOF, all 8-byte loads are unconditional: no end guard.
+static const uint64_t LM[9] = {0,         0xFFULL,       0xFFFFULL,
+                               0xFFFFFFULL, 0xFFFFFFFFULL, 0xFFFFFFFFFFULL,
+                               0xFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFULL, ~0ULL};
+// <= 25 bytes: two (rarely three) masked words + a 128-bit multiply fold.
+static inline uint64_t hs(const char *s, uint32_t len) {
+  uint64_t w0, w1;
+  memcpy(&w0, s, 8), memcpy(&w1, s + 8, 8);
+  w0 &= LM[std::min(len, 8u)], w1 &= LM[len > 8 ? std::min(len - 8, 8u) : 0];
+  uint64_t h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ len * 0xbf58476d1ce4e5b9ULL;
+  if (__builtin_expect(len > 16, 0)) {
+    uint64_t w2;
+    memcpy(&w2, s + 16, 8);
+    h ^= (w2 & LM[std::min(len - 16, 8u)]) * 0x517cc1b727220a95ULL;
   }
-  return n < 8 ? v & ((1ULL << (8 * n)) - 1) : v;
-}
-
-// Fast path: a name of at most 25 bytes packs into four 64-bit words; 94% of
-// names are <= 16 bytes, so only w0/w1 are usually loaded. The 128-bit
-// multiply fold gives a strong avalanche in one multiply (mum-style mixer).
-static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
-  uint64_t w0 = load8(s, std::min(len, 8u), end),
-           w1 = load8(s + 8, std::min(len > 8 ? len - 8 : 0, 8u), end),
-           h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ len * 0xbf58476d1ce4e5b9ULL;
-  if (__builtin_expect(len > 16, 0))
-    h ^= load8(s + 16, std::min(len - 16, 8u), end) * 0x517cc1b727220a95ULL ^
-         (len > 24 ? (uint8_t)s[24] * 0x85ebca6bULL : 0);
   __uint128_t r = (__uint128_t)h * 0x9e3779b97f4a7c15ULL;
   return ((uint64_t)r ^ (uint64_t)(r >> 64)) | (1ULL << 63);
 }
 
-// Everything else (escaped or over 25 bytes): full-length FNV-1a over the
-// unescaped value, so distinct names are never merged by truncation and no
-// unescape buffer is needed. "" decodes to one quote. Rare on real data.
+// Over 25 bytes: word-wise multiply-mix over [s, e) with an overlapping tail.
 static uint64_t hl(const char *s, const char *e) {
-  uint64_t h = 1469598103934665603ULL;
-  while (s < e)
-    h = (h ^ (uint8_t)*s++) * 1099511628211ULL;
-  return h | (1ULL << 63);
+  uint64_t h = ((uint64_t)(e - s)) * 0x9e3779b97f4a7c15ULL;
+  for (; s + 8 <= e; s += 8) {
+    uint64_t w;
+    memcpy(&w, s, 8);
+    h = (h ^ w) * 0xbf58476d1ce4e5b9ULL;
+  }
+  uint64_t w;
+  memcpy(&w, e - 8, 8);
+  h = (h ^ w * 0x517cc1b727220a95ULL) * 0xbf58476d1ce4e5b9ULL;
+  return (h ^ h >> 32) | (1ULL << 63);
 }
 
 // 32-byte mask of byte c at p
@@ -215,7 +212,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       // empty names never intern; skip the hash (s is only set by QF)
       uint64_t nh = name_len
                         ? (esc | (name_len > 25) ? hl(s, e - 2)
-                                                 : hs(s, name_len, fend))
+                                                 : hs(s, name_len))
                         : 0;
       __builtin_prefetch(&NT[slot = nh & HM]);
       QF(note_len); // note: only its unescaped byte length is needed
