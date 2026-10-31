@@ -228,5 +228,11 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 43 (v69b record-tail + slot-hoist micro-cuts)
 - Change: line-ending skip as one guarded add (p += p < end ? 1 + (*p == '\r') : 0) replacing two conditional bumps; name slot = name_hash & HM hoisted and passed into intern_name (kills two re-ANDs per record); an AVX-512BW 64B find_quote variant measured +9% SLOWER on the shared vCPU (license downclock) and was dropped. Stacked on step-42 golf.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing -6.0% median / -6.7% min vs v68 (15 interleaved pairs, 1-vCPU sandbox).
+- Board T_s/M/S/points: T_s=0.043195 M=10080256 S=248 points=76.015784 - NEW BEST (+0.059 over run-ebe06f6d4f4d; T -1.4%, less than the local -6%: the win is partially latency-side). Commit 9545326.
+- Run: run-f12e9567f984
+
+## Step 44 (v71 thread count 12 -> 16)
+- Change: nth 12 -> 16 (granules stay 96, stealing balances). Step 34 showed 12 > 10, so the box has >= 12 SMT slots; if it has 16, T wins up to +25%; if it has exactly 12, mild oversubscription costs a few % on this run only (best-score unaffected). Board is the measurement (1-vCPU sandbox cannot measure thread scaling).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending

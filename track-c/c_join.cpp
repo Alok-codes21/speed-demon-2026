@@ -257,7 +257,7 @@ int main(int argc, char **argv) {
 
   // Split into 96 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
-  const int nth = 12;
+  const int nth = 16;
   gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[96] = fend;
   size_t total = fend - gst[0];
   for (int i = 1; i < 96; i++) {
