@@ -485,4 +485,47 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
   board measures, amortized Vec growth overshoots it) and the measured
   stream-vs-postings sizes (17 MB vs 21 MB) for any future whole-corpus
   varint encoding that keeps the single-pass scan.
+- Run: run-6cddbc473063 - PASS: T=0.2526 s, M=59.45 MB, S=666, **67.91 pts**
+  (same v27 code as the 68.25 best; M landed 4.5 MB high this roll). The
+  PERF-only commit between v28 and this revert got no run - the watcher
+  scored only the newest commit of the batch.
+
+## Step 27: Cache Me latest (branchless scan, 4-bit gap scatter, Cow eval) (v29, this push)
+
+Alok's standing rule: from any team with better points, take what they do
+better (public repos only). Cache Me's public entry advanced since step 18
+(commit 42b8fde7, board 69.70 best / 69.64 latest vs our 68.25), same
+architecture line we already run, so their delta is a direct upgrade:
+
+1. **Branchless scan callback**: every token does the same work, kept or
+   not by masks (store-and-maybe-advance unit writes, bit-or with a masked
+   (new & is_bitmap) shift). No per-token branches.
+2. **Terms renumbered by class** (bitmap / list / list+anchor / anchor /
+   phrase-only): frequent terms share cache lines, phrase-only terms carry
+   no state, unknown tokens map to one spare id with no branch.
+3. **32-way interleaved bucket streams** (term i goes to bucket i % 32):
+   gaps between a bucket's documents are tiny, so a 4-bit gap suffices and
+   the unit's term index gets 12 bits. The scatter writes one shared
+   per-term stretch (AtomicU16 stores), replacing the counting sort and
+   the 12 per-thread Lists.
+4. **Bitmap pending bits flush once per 64-doc block**, not per term per
+   word change - far fewer atomic RMWs.
+5. **Eval**: Cow-borrowed bitmaps (copied only on first write), branchless
+   merge AND/NOT for lists, early-out narrowing an empty list, std
+   fmt::Write output instead of the custom u64 printer.
+6. **prctl(41) actually disables THP**: our v21 line called prctl(38) =
+   PR_SET_NO_NEW_PRIVS by mistake, so the THP bloat fix never took effect;
+   41 = PR_SET_THP_DISABLE. Their board M is ~3 MB under ours - this is
+   likely a chunk of it.
+
+Kept from our line on top of their 42b8fde7: the MIT notice header, the
+75%-load hash-table growth guard (a full open-addressing table is an
+infinite probe on unknown tokens - with 1-term queries their sizing can
+overflow: keys=q vs slots~3q/8), and the \r strip. The guard sits at the
+TOP of insert() - a mid-insert placement recomputes nothing after the
+rehash and writes the new entry at the stale index (caught by the
+synthetic single-term suite: 0 matches instead of 144).
+- Local gates: spec, sample, synthetic edge suite byte-exact; full-data
+  sha256 f86973c2...80927 unchanged; scan 3.03 -> 1.61 s warm, 2.40 s
+  cold; exit HWM 304 MB (charged ~50 MB). S 666 -> ~645 counted.
 - Run: run-pending
