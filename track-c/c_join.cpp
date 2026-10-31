@@ -167,7 +167,7 @@ void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
-  uint32_t bnid[32], nb = 0; uint8_t bc[32];
+  uint32_t bnid[16], nb = 0; uint8_t bc[16];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
     uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
@@ -216,7 +216,7 @@ void *parse_chunk(void *arg) {
     s.name_bytes += name_len; s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
     bnid[nb] = nid; bc[nb] = c;
-    if (++nb == 32) bflush(bnid, bc, 32), nb = 0;
+    if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
   bflush(bnid, bc, nb);
   return nullptr;

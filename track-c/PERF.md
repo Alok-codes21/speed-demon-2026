@@ -132,12 +132,19 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 27 (revert to step-23 code)
 - Change: c_join.cpp back to v39 (step 23: batch-16 code + MADV_HUGEPAGE); steps 24-26 all board-measured regressions or flat-and-costly.
-- Board T_s/M/S/points: re-run of step-23 code (noise-band sample)
-- Run: pending
+- Board T_s/M/S/points: T_s=0.045282 M=10076160 S=296 points=74.929 - re-run of step-23 code, inside the historical 74.53-74.67..75.2 noise band
+- Run: run-bc313abcd332
 
 
 ## Step 28 (v46 bitset batch 32)
 - Change: v39 + bitset write batch 16 -> 32 (more MLP in bflush). Batch 8 was flat, 16 was the big win; 32 is the untested end of the ring.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
+
+
+## Step 29 (fully-static link, step-23 code)
+- Change: Dockerfile only: -static-libstdc++ -static-libgcc -> -static (fully static binary, no ld-linux/libc/libm loading at exec). Code is step-23 (v39) byte-identical, so any board T delta is the loader/startup component of the exec-to-exit wall clock. Stacked on nothing else: clean attribution vs the 75.206 best.
+- Rationale: the harness timer measures fork+execve-to-exit wall; residual dynamic loading is an estimated 1-3ms of the 45ms total.
 - Board T_s/M/S/points: pending
 - Run: pending
