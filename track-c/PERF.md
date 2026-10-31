@@ -204,5 +204,12 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 39 (revert to v58; step-38 fused table regressed on board)
 - Change: c_join.cpp back to v58 (step-37 code). Step-38's fused 40B-entry table scored T_s=0.047124 (+8.3%), M=10.4MB, S=310, points=74.207 (run-9a44bafe6c89): the 5.24MB table pushes probes to L3 and the inline mark loses the batch-16 prefetch coverage, outweighing the contention savings. Fused-table hypothesis dead at this entry size.
-- Board T_s/M/S/points: pending (same code as step 37, expected back in the 75.2-75.4 band)
+- Board T_s/M/S/points: T_s=0.0435 M=9.8MB S=304 points=75.389 - confirmed back in band, new best by noise (+0.011 over run-123387313db9). Commit 8da0865.
+- Run: run-7786ec817115
+
+
+## Step 40 (v64 write-intent prefetch on NT + CB)
+- Change: __builtin_prefetch(p) -> __builtin_prefetch(p, 1) (PREFETCHW) at the two prefetch sites whose lines are later written by atomics: the NT intern-slot prefetch (CAS may follow) and the bflush CB line prefetch (fetch_or follows). Fetching in exclusive state skips the S->M upgrade round-trip before each RFO. Invisible on a 1-CPU sandbox (no coherence traffic); board is the measurement.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat (0.1522 vs 0.1560, noise).
+- Board T_s/M/S/points: pending
 - Run: pending

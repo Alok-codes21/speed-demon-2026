@@ -158,7 +158,7 @@ struct Worker {
 
 // flush up to n buffered bitsets: prefetch all lines, then set
 static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
-  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6], 1);
   for (uint32_t j = 0; j < n; j++) {
     uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
     if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
@@ -195,7 +195,7 @@ void *parse_chunk(void *arg) {
     } else
       p++;
 
-    if (name_len) __builtin_prefetch(&NT[name_hash & HM]);
+    if (name_len) __builtin_prefetch(&NT[name_hash & HM], 1);
     // note: only its unescaped byte length is needed
     uint32_t note_len = 0;
     if (*p == '"') {
