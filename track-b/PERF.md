@@ -464,5 +464,25 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Local gates: spec worked example exact; tiny, sample and synthetic sets
   byte-exact; full-data sha256 f86973c2...80927 unchanged; scan 3.03 ->
   2.52 s; charged memory (HWM minus the 254 MB mmap'd text) ~51 -> ~48 MB.
-  Cost: ~117 more counted lines (S 666 -> ~783).
+  Cost: ~117 more counted lines (S 666 -> 783 by non-blank count).
+- Run: run-1cb18ce06683 - PASS but REGRESSION: T=0.638 s, M=54.31 MB,
+  S=756, **57.83 pts**. The local scan win did not carry to the 12-core
+  scoring box - on real cores the segmented scan's 32 barrier rounds and
+  serial partition phases dominate, landing right back in this engine
+  line's historical board band (0.64-0.75 s in steps 9-16), while the
+  whole-corpus single-pass scan with in-cache phrase verification runs
+  0.25 s. The M win shrank to -0.65 MB on the board (54.31 vs 54.96).
+  Same lesson as step 23 (k16), in reverse: LOCAL TIMING IS INDICATIVE
+  ONLY - board validation decides, in either direction. Reverted next.
+
+## Step 26: revert to v27 (this push)
+
+- v28's engine loses 2.5x on T on the scoring box for a 0.65 MB M win -
+  a 10-point net regression. Back to the step-24 code, byte-identical
+  (sha256 2466fe4d...). The growth guard, static 12 threads, bitmap
+  threshold N/32 and in-scan phrase verification stay as they were.
+- Kept from the v28 work: the exact-sizing insight (peak RSS is what the
+  board measures, amortized Vec growth overshoots it) and the measured
+  stream-vs-postings sizes (17 MB vs 21 MB) for any future whole-corpus
+  varint encoding that keeps the single-pass scan.
 - Run: run-pending
