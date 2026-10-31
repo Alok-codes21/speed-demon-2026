@@ -49,7 +49,7 @@ extern "C" {
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
 }
 
-const THREADS: usize = 12;
+static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(12);
 const NONE: u32 = u32::MAX;
 const BUCKET: usize = 11; // terms per bucket of scan output: 2^11
 const GAP: u32 = 31; // a unit's 5-bit doc gap; GAP means the whole gap follows in the next unit
@@ -71,8 +71,9 @@ fn map(path: &str) -> &'static [u8] {
 /// Runs f(t) on every thread and collects what each returns.
 fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let f = &f;
+    let threads = THREADS.load(Relaxed);
     std::thread::scope(|s| {
-        let hs: Vec<_> = (0..THREADS).map(|t| s.spawn(move || f(t))).collect();
+        let hs: Vec<_> = (0..threads).map(|t| s.spawn(move || f(t))).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     })
 }
@@ -505,9 +506,15 @@ fn main() {
         ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = !phrase);
     }
 
+    // At least 12 threads: DOC_BITS=15 caps a thread's share at 32,768 docs.
+    let threads = std::env::var("SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(12).max(12)
+    });
+    THREADS.store(threads, Relaxed);
     let text = map("/data/docs.txt");
-    let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
-    for c in &mut cut[1..THREADS] {
+    let threads = THREADS.load(Relaxed);
+    let mut cut: Vec<usize> = (0..=threads).map(|t| text.len() * t / threads).collect();
+    for c in &mut cut[1..threads] {
         while *c < text.len() && text[*c - 1] != b'\n' {
             *c += 1;
         }
@@ -518,7 +525,7 @@ fn main() {
     }
     let ndocs = if text.is_empty() { 0 } else { number(text, last_line) as usize + 1 };
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
-    let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
+    let firsts: Vec<u32> = cut[..threads].iter().map(|&c| first_doc(c)).collect();
 
     // The sample: documents per term in the first 1/32 of each share.
     let samples = on_threads(|t| {
