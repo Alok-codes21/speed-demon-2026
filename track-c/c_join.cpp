@@ -2,7 +2,8 @@
 //
 // mmap records.csv -> 12 threads parse disjoint granules at record boundaries
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
-// ids in a lock-free hash table; each country keeps a bitset over name ids.
+// ids in a lock-free hash table. DIAGNOSTIC step: per-thread private country
+// bitsets (no shared-bitset coherence in the hot loop), OR-merged at the end.
 
 #include <algorithm>
 #include <cstdint>
@@ -24,7 +25,7 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
-static uint64_t (*CB)[BITS_W]; // per-country bitsets over name ids
+static uint64_t (*CB)[BITS_W]; // per-thread private per-country bitsets
 static uint8_t *R2C;           // region id -> country slot
 static uint32_t CK[MAX_C], NC = 0, UNMATCHED = 0; // packed codes; '_' unmatched
 static uint64_t *NT; // name hash table; slot 0 reserved (id 0 = empty name)
@@ -138,6 +139,20 @@ static inline const char *quoted_end(const char *s, const char *end,
 struct Worker {
   Stats stats[MAX_C];
 };
+static Worker workers[12];
+static uint32_t dpart[12][MAX_C];
+// OR the 12 private copies of each country's bitset, counting set bits
+static void *merge_bits(void *a) {
+  uint32_t t = (uint32_t)(uintptr_t)a;
+  for (uint32_t c = 0; c < NC; c++)
+    for (uint32_t i = t * BITS_W / 12, hi = (t + 1) * BITS_W / 12; i < hi; i++) {
+      uint64_t x = 0;
+      for (uint32_t u = 0; u < 12; u++)
+        x |= CB[u * MAX_C + c][i];
+      dpart[t][c] += __builtin_popcountll(x);
+    }
+  return nullptr;
+}
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -155,14 +170,15 @@ struct Worker {
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
+  const uint32_t t0 = (uint32_t)((Worker *)arg - workers) * MAX_C;
   uint32_t bnid[16], nb = 0, bc[16];
   // flush n buffered bitsets: prefetch all lines, then set
   auto bf = [&](uint32_t n) {
     for (uint32_t j = 0; j < n; j++)
-      __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
+      __builtin_prefetch(&CB[t0 + bc[j]][bnid[j] >> 6]);
     for (uint32_t j = 0; j < n; j++) {
-      uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], m = 1ULL << (bnid[j] & 63);
-      (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
+      uint64_t *pw = &CB[t0 + bc[j]][bnid[j] >> 6], m = 1ULL << (bnid[j] & 63);
+      (*pw & m) || (*pw |= m, 0);
     }
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
@@ -197,7 +213,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
         p += 2, cents = neg ? -cents : cents,
         p += p < end ? 1 + (*p == '\r') : 0;
       uint8_t c = (reg < 1000000) ? R2C[reg] : 255;
-      __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
+      __builtin_prefetch(&CB[t0 + (c == 255 ? 0 : c)][slot >> 6]);
 
       // join and aggregate
       Stats &st = stats[c = c == 255 ? UNMATCHED : c];
@@ -224,9 +240,9 @@ int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data",
               out_dir = argc > 2 ? argv[2] : "/out";
   // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
-  char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
+  char *big = (char *)mmap(0, 52 << 20, 3, 0x22, -1, 0);
   size_t al = (size_t)(big + (2 << 20) - 1) & -(2 << 20);
-  madvise((void *)al, 6 << 20, 14); // MADV_HUGEPAGE
+  madvise((void *)al, 50 << 20, 14); // MADV_HUGEPAGE
   // NT 1MB, R2C 1MB, CB the rest; slot 0 reserved (real hashes set bit 63)
   NT = (uint64_t *)al, R2C = (uint8_t *)(al + (1 << 20)),
   CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1;
@@ -249,7 +265,6 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
-  static Worker workers[12];
   pthread_t ths[12];
   for (int i = 0; i < 12; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
@@ -266,6 +281,12 @@ int main(int argc, char **argv) {
     f.name_bytes += w.name_bytes, f.note_bytes += w.note_bytes;
   }
 
+  pthread_t mh[12];
+  for (uintptr_t i = 0; i < 12; i++)
+    pthread_create(&mh[i], nullptr, merge_bits, (void *)i);
+  for (int i = 0; i < 12; i++)
+    pthread_join(mh[i], nullptr);
+
   // Countries sort by their packed 3-byte key; '_' (UNMATCHED) is last.
   uint32_t order[MAX_C];
   std::iota(order, order + NC, 0u);
@@ -279,8 +300,8 @@ int main(int argc, char **argv) {
     const Stats &g = final_s[c];
     if (g.count == 0)
       continue;
-    for (uint32_t i = 0; i < BITS_W; i++)
-      d += __builtin_popcountll(CB[c][i]);
+    for (uint32_t t = 0; t < 12; t++)
+      d += dpart[t][c];
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     fprintf(out, "%s %lu %lu ", c == UNMATCHED ? "_UNMATCHED" : code, g.count,
             g.id_sum),

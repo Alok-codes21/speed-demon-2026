@@ -343,7 +343,7 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 57: revert to step-53 code (step-49 shape + empty-name guard)
 - Tip restored to the best-known code (board best 76.718, run-a2f020e15701).
-- Run: PENDING
+- No separate board run recorded (tip superseded within a poll cycle).
 
 ## Step 58: mask-parsed region + amount fields
 - Region/amount tail of each record parsed from one 32-byte AVX2 delimiter
@@ -374,10 +374,25 @@ Every step from the reference to your final version, each with the live-board ru
   runner (step 56: 64.74) - the shared-bitset single pass stays.
 
 ## Step 60: revert to step-53 code (best-known, 76.718)
-- Run: PENDING
+- No separate board run recorded (tip superseded within a poll cycle).
 
-## Step 61: S-golfed mask parse (region + amount)
+## Step 61 result: S-golfed mask parse - KEPT (new best 76.954)
 - Step-58's delimiter-mask parse re-expressed: MM2/DIGS as one-line macros,
-  the fast path as one &&-chain + comma-expression. Est. S ~231 (vs 255).
-  Local: -9.7% vs step-53 code (1 vCPU).
+  the fast path as one &&-chain + comma-expression. Local: -9.7% vs step-53
+  code (1 vCPU).
+- Run: run-6f4771acf833. Board: T 0.040012 (best throughput yet), M 10.1 MB,
+  S 240 (raw-file lines x ~0.79 heuristic held: 292 raw -> 240 board), K
+  34.5998, 76.954 points (+0.236 over the old best). New best-known code.
+- Ablation queued after local timing: a 96-byte full-record mask parse (all
+  fields from one window) timed level with this step on 1 vCPU, so it was
+  dropped before spending a board run.
+
+## Step 62: DIAGNOSTIC - per-thread private country bitsets
+- Step-61 code with the shared per-country bitsets replaced by 12 private
+  copies (plain load/or/store, no locked RMWs in the hot loop), OR-merged
+  by 12 threads after the parse. Output identical (verified on all local
+  datasets + sanitizers); M rises to ~54 MB by construction.
+- Purpose: measure what the shared-bitset fetch_or costs on the runner by
+  subtracting this run's T from step-61's. A diagnostic, not a candidate;
+  the tip reverts to step-61 code right after the read.
 - Run: PENDING
