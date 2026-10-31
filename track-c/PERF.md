@@ -600,4 +600,17 @@ Every step from the reference to your final version, each with the live-board ru
   improvement over step 80 with no verdict ambiguity.
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
   parallel stress stable, ASAN+UBSAN clean.
+- Run: S UNCHANGED at 282 (run-0e8e893d1ad8) - blank lines were never
+  counted; the +9 vs v135 is the RETIRE-macro text itself. Blank golf
+  abandoned; step 82 recovers the lines structurally instead. v138-family
+  T readings so far: 0.038305 / 0.038460 / 0.038352, a tight cluster at
+  the good end of v135's band (0.0378-0.0442); no regression.
+
+## Step 82 - v140: templated-lambda adv (S 282 -> ~275)
+- Same parse semantics as v138/v139; the ring drain's guarded body and the
+  main loop's unguarded body become ONE templated lambda adv<bool D> whose
+  drain-only checks compile out in the main-loop instantiation - the step
+  80 T win kept, the 9 macro lines recovered. hs short-name branch kept.
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
+  parallel stress stable, ASAN+UBSAN clean. Local timing parity with v139.
 - Run: PENDING

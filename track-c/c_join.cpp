@@ -3,6 +3,7 @@
 // mmap records.csv -> 12 threads parse disjoint granules at record boundaries
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
 // ids in a lock-free hash table; each country keeps a bitset over name ids.
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -15,18 +16,22 @@
 #include <sys/prctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
 // table geometry: 2^17 name slots; 256 country slots of 2^17 bits
 static const uint32_t HM = 131071, MAX_C = 256, BITS_W = 2048;
 static const char *fend, *gst[193]; // records.csv end; granule boundaries
+
 struct Stats {
   uint64_t count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0;
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
+
 static uint64_t (*CB)[BITS_W]; // per-country bitsets over name ids
 static uint8_t *R2C;           // region id -> country slot
 static uint32_t CK[MAX_C], NC = 0, UNMATCHED = 0; // packed codes; '_' unmatched
 static uint64_t *NT; // name hash table; slot 0 reserved (id 0 = empty name)
 static uint32_t gn; // granule counter
+
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
 // slot and no value is ever pending). k==0 below: our CAS installed h.
@@ -36,6 +41,7 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
     if ((k = k ? k : __sync_val_compare_and_swap(&NT[idx], 0, h)) == h || !k)
       return idx;
 }
+
 // Names hash over raw field bytes ("" pairs included - canonical). With the
 // spare page after EOF, all 8-byte loads are unconditional: no end guard.
 // <= 25-byte names pack into three masked words; w2 masks to zero for short
@@ -53,6 +59,7 @@ static inline uint64_t hs(const char *s, uint32_t len) {
   __uint128_t r = (__uint128_t)h * 0x9e3779b97f4a7c15ULL;
   return ((uint64_t)r ^ (uint64_t)(r >> 64)) | (1ULL << 63);
 }
+
 // Over 25 bytes or escaped: word-wise multiply-mix over [s, e) with an
 // overlapping tail read (raw length always exceeds 24 here, so e - 8 >= s).
 static uint64_t hl(const char *s, const char *e) {
@@ -67,10 +74,12 @@ static uint64_t hl(const char *s, const char *e) {
   h = (h ^ w * 0x517cc1b727220a95ULL) * 0xbf58476d1ce4e5b9ULL;
   return (h ^ h >> 32) | (1ULL << 63);
 }
+
 // 32-byte mask of byte c at p
 #define MM2(p, c) (_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(p)), _mm256_set1_epi8(c))))
 // branch-free conversion of n (1..8) known digit bytes; reads 8 bytes at s
 #define DIGS(s, n) ({uint64_t v_; memcpy(&v_, (s), 8); v_ <<= 64 - 8 * (n); v_ -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * (n))); v_ = v_ * 2561 >> 8, v_ = (v_ & 0x00FF00FF00FF00FFULL) * 6553601 >> 16; (uint32_t)((v_ & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);})
+
 // field-width integer ending at term; consumes the terminator
 static inline uint64_t num(const char *&p, char term) {
   uint64_t v = 0;
@@ -80,6 +89,7 @@ static inline uint64_t num(const char *&p, char term) {
 }
 
 // ---------------------------------------------------------------- regions.csv
+
 void load_regions(const std::string &path) {
   struct stat st;
   fstat(open(path.c_str(), O_RDONLY), &st);
@@ -100,6 +110,7 @@ void load_regions(const std::string &path) {
 }
 
 // -------------------------------------------------------------------- parsing
+
 // 32-byte quote mask; the constant hoists out of the loop
 #define MM(s) \
   _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s)), _mm256_set1_epi8('"')))
@@ -110,6 +121,7 @@ static inline const char *find_quote(const char *s, const char *end) {
       return s + __builtin_ctz(m);
   return (const char *)memchr(s, '"', end - s);
 }
+
 // End of the quoted field whose value starts at s: one past the comma after
 // the closing quote, or nullptr on malformed input. *esc counts "" pairs.
 static inline const char *quoted_end(const char *s, const char *end,
@@ -119,6 +131,7 @@ static inline const char *quoted_end(const char *s, const char *end,
     ++*esc, q = find_quote(q + 2, end);
   return q ? q + 2 : nullptr;
 }
+
 struct Worker {
   Stats stats[MAX_C];
   int tid;
@@ -126,6 +139,7 @@ struct Worker {
 static char *pool;      // 2MB-aligned base of NT/R2C/CB
 static size_t popbytes; // NT + CB bytes to pre-populate
 static uint32_t nready;
+
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
 // QF: parse one quoted-or-empty field at p into LEN, advancing p; sets s
@@ -163,24 +177,23 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   } pend[16]; // 16-record deferral ring
   struct Mk { uint32_t c, bnid; } mk[16];
   uint64_t n = 0, last = ~0ULL;
-#define RETIRE(k)                                                        \
-  {                                                                      \
-    Pend &o = pend[k];                                                   \
-    uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;                    \
-    Stats &st = stats[c = c == 255 ? UNMATCHED : c];                     \
-    st.count++, st.id_sum += o.id, st.amount_sum += o.cents,             \
-    st.name_bytes += o.name_len, st.note_bytes += o.note_len,            \
-    st.amount_min = std::min(st.amount_min, o.cents),                    \
-    st.amount_max = std::max(st.amount_max, o.cents);                    \
-    mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};             \
-    __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);                   \
-  }
-  auto adv = [&]() __attribute__((always_inline)) {
-    uint32_t k = n & 15; // main loop: ring is never draining (last = ~0)
-    if (n >= 32)
-      __atomic_fetch_or(&CB[mk[k].c][mk[k].bnid >> 6], 1ULL << (mk[k].bnid & 63), 0);
-    if (n >= 16)
-      RETIRE(k);
+  auto adv = [&]<bool D>() __attribute__((always_inline)) {
+    uint32_t k = n & 15; // D=false in the main loop: the drain guards vanish
+    if (n >= 32 && (D ? n - 32 < last : true)) {
+      Mk &m2 = mk[k];
+      __atomic_fetch_or(&CB[m2.c][m2.bnid >> 6], 1ULL << (m2.bnid & 63), 0);
+    }
+    if (n >= 16 && (D ? n - 16 < last : true)) {
+      Pend &o = pend[k];
+      uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;
+      Stats &st = stats[c = c == 255 ? UNMATCHED : c];
+      st.count++, st.id_sum += o.id, st.amount_sum += o.cents,
+      st.name_bytes += o.name_len, st.note_bytes += o.note_len,
+      st.amount_min = std::min(st.amount_min, o.cents),
+      st.amount_max = std::max(st.amount_max, o.cents);
+      mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
+      __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
+    }
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
@@ -214,25 +227,22 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
         p += 2, cents = neg ? -cents : cents,
         p += p < end ? 1 + (*p == '\r') : 0;
       __builtin_prefetch(&R2C[reg < 1000000 ? reg : 0]);
-      adv(); // retire ring slot n & 15 before it is overwritten
+      adv.operator()<false>(); // retire ring slot n & 15 before reuse
       pend[n++ & 15] = {nh, id, cents, slot, reg, name_len, note_len};
     }
   }
-  for (last = n; n < last + 32; ++n) {
-    uint32_t k = n & 15;
-    if (n - 32 < last)
-      __atomic_fetch_or(&CB[mk[k].c][mk[k].bnid >> 6], 1ULL << (mk[k].bnid & 63), 0);
-    if (n - 16 < last)
-      RETIRE(k);
-  }
+  for (last = n; n < last + 32; ++n)
+    adv.operator()<true>();
   return nullptr;
 }
 
 // -------------------------------------------------------------------- output
+
 static void pr_money(FILE *f, int64_t c, char sep) {
   c < 0 && (fputc('-', f), c = -c, 0);
   fprintf(f, "%zu.%02u%c", (size_t)(c / 100), (uint32_t)(c % 100), sep);
 }
+
 int main(int argc, char **argv) {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0); // 4KB pages: populate the used set exactly
   std::string data_dir = argc > 1 ? argv[1] : "/data",
