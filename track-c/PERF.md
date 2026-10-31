@@ -111,5 +111,13 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: v39 + swar_num() helper (regions.csv-proven pattern) replaces the scalar digit loops for record id, region id, and the amount integer part. Scalar tail kept for >8-digit fields and the end-of-file guard.
 - Rationale: digit mul-chains are ~30% of per-record latency. Local 1-CPU sandbox measures v42 ~4-5% slower, but that box now hides latency differently than the 12-thread runner; one clean board measurement settles it.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: T_s=0.047320 M=10719232 S=310 points=74.032 - REGRESSION (+5.5% T vs 0.0448). Fifth and final confirmation (first board-measured): scalar digit loops win on this runner; SWAR digit parse is dead. Reverted (step 25).
+- Run: run-38ad856d26af
+
+
+## Step 25 (v44 parallel regions load)
+- Change: revert the step-24 SWAR digit parse (board regression) back to the step-23 base, plus: the 12 worker threads now cooperatively load regions.csv in slices before parsing (shared CK under a spinlock, disjoint R2C writes, one barrier), replacing the serial ~2-4ms load_regions. UNMATCHED is now a fixed slot (255) set before spawn. Micro-golf: one-line CRLF skip, std::min/max.
+- Rationale: the serial regions load is ~5-8% of board runtime; parallelizing it across the already-spawned 12 threads should cut it to ~0.3ms.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (local 1-CPU sandbox cannot show the win; board is the measurement).
 - Board T_s/M/S/points: pending
 - Run: pending
