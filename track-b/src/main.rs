@@ -270,6 +270,8 @@ enum Q {
 }
 
 struct Queries {
+    pfx: Vec<u64>,
+    has_len1: bool,
     qs: Vec<Q>,
     phr_tids: Vec<u32>,
     phr_bids: Vec<u32>,
@@ -333,9 +335,39 @@ fn parse_queries(data: &[u8]) -> Queries {
     }
     let n_terms = terms.toff.len();
     let n_bids = bigrams.n;
-    Queries { qs, phr_tids, phr_bids, terms, bigrams, n_terms, n_bids }
+    // Two-byte folded-prefix filter: rejects most non-query tokens with one
+    // L1-resident bit test before any hashing happens.
+    let mut pfx = vec![0u64; 1024];
+    let mut has_len1 = false;
+    for tid in 0..n_terms as u32 {
+        let tb = terms.term_bytes(tid);
+        if tb.len() >= 2 {
+            let k = ((tb[0] | 0x20) as usize) << 8 | (tb[1] | 0x20) as usize;
+            pfx[k >> 6] |= 1u64 << (k & 63);
+        } else {
+            has_len1 = true;
+        }
+    }
+    Queries { qs, phr_tids, phr_bids, terms, bigrams, n_terms, n_bids, pfx, has_len1 }
 }
 
+
+/// SWAR memchr: first index >= i whose byte equals `byte`. The mapping has
+/// 64 bytes of zero padding past the end, so unaligned u64 reads are safe.
+#[inline(always)]
+fn find_byte(buf: &Map, mut i: usize, byte: u8) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let pat = ONES * byte as u64;
+    loop {
+        let w = unsafe { (buf.ptr(i) as *const u64).read_unaligned() } ^ pat;
+        let m = w.wrapping_sub(ONES) & !w & HIGHS;
+        if m != 0 {
+            return i + (m.trailing_zeros() >> 3) as usize;
+        }
+        i += 8;
+    }
+}
 
 // ---------------------------------------------------------- corpus scan ----
 #[inline(always)]
@@ -351,6 +383,16 @@ fn handle_token(
             return;
         }
         let p = buf.ptr(s);
+        if len >= 2 {
+            let k = ((*p | 0x20) as usize) << 8 | (*p.add(1) | 0x20) as usize;
+            if q.pfx[k >> 6] >> (k & 63) & 1 == 0 {
+                *prev = NONE;
+                return;
+            }
+        } else if !q.has_len1 {
+            *prev = NONE;
+            return;
+        }
         let h = hash_tok(p, len);
         let b = ((h >> 32) as usize) & 32767;
         if q.terms.bloom[b >> 6] >> (b & 63) & 1 == 0 {
@@ -418,28 +460,18 @@ fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes)
     // first line's doc id (ids are dense and ascending); peek, do not advance
     let mut docid: u32 = 0;
     {
-        let mut j = i;
-        while buf.b(j) != b'\t' {
+        let tab = find_byte(buf, i, b'\t');
+        for j in i..tab {
             docid = docid * 10 + (buf.b(j) - b'0') as u32;
-            j += 1;
         }
     }
     while i < end {
         let line_start = i;
         // skip id field + tab
-        while buf.b(i) != b'\t' {
-            i += 1;
-        }
-        i += 1;
+        i = find_byte(buf, i, b'\t') + 1;
         offs.push(line_start as u64);
         // tokenize until the newline (a separator itself)
-        let line_end = {
-            let mut j = i;
-            while buf.b(j) != b'\n' {
-                j += 1;
-            }
-            j
-        };
+        let line_end = find_byte(buf, i, b'\n');
         scan_tokens_scalar(buf, i, line_end, q, posts, bposts, last_doc, blast, docid);
         i = line_end + 1;
         docid += 1;
@@ -461,6 +493,47 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
 struct Stream {
     buf: Vec<u8>,
     last: u32,
+}
+
+/// Forward cursor over a delta-varint doc list.
+struct Cur<'a> {
+    b: &'a [u8],
+    i: usize,
+    v: u32,
+}
+impl<'a> Cur<'a> {
+    #[inline(always)]
+    fn new(b: &'a [u8]) -> Cur<'a> {
+        let mut c = Cur { b, i: 0, v: 0 };
+        c.adv();
+        c
+    }
+    #[inline(always)]
+    fn adv(&mut self) {
+        if self.i >= self.b.len() {
+            self.v = NONE;
+            return;
+        }
+        let mut x = 0u32;
+        let mut sh = 0;
+        loop {
+            let b = self.b[self.i];
+            self.i += 1;
+            x |= ((b & 0x7f) as u32) << sh;
+            if b < 0x80 {
+                break;
+            }
+            sh += 7;
+        }
+        self.v = self.v.wrapping_add(x);
+    }
+    /// Advance until the current value is >= x (or the list is exhausted).
+    #[inline(always)]
+    fn seek(&mut self, x: u32) {
+        while self.v < x {
+            self.adv();
+        }
+    }
 }
 
 /// Decode a delta-varint doc list into out (cleared first).
@@ -498,6 +571,54 @@ fn contains(hay: &[u32], x: u32) -> bool {
     }
     let hi = (lo + step).min(hay.len());
     hay[lo..hi].binary_search(&x).is_ok()
+}
+
+#[inline(always)]
+fn intersect_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
+    out.clear();
+    for &x in a {
+        cur.seek(x);
+        if cur.v == x {
+            out.push(x);
+        }
+    }
+}
+
+#[inline(always)]
+fn union_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve(a.len());
+    let mut i = 0usize;
+    while i < a.len() && cur.v != NONE {
+        let y = cur.v;
+        if a[i] < y {
+            out.push(a[i]);
+            i += 1;
+        } else if y < a[i] {
+            out.push(y);
+            cur.adv();
+        } else {
+            out.push(a[i]);
+            i += 1;
+            cur.adv();
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    while cur.v != NONE {
+        out.push(cur.v);
+        cur.adv();
+    }
+}
+
+#[inline(always)]
+fn diff_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
+    out.clear();
+    for &x in a {
+        cur.seek(x);
+        if cur.v != x {
+            out.push(x);
+        }
+    }
 }
 
 fn intersect_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
@@ -712,7 +833,6 @@ fn main() {
                 v.clear();
             }
         }
-        eprintln!("[t +{:6.3}] seg {}", t0.elapsed().as_secs_f64(), seg);
     }
     drop(states);
     offs.push(mlen as u64);
@@ -798,24 +918,21 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                                 a.clear();
                                 continue;
                             }
-                            decode_into(l, &mut b);
-                            intersect_into(&a, &b, &mut c);
+                            intersect_stream(&a, &mut Cur::new(l), &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         1 => {
                             if l.is_empty() {
                                 continue;
                             }
-                            decode_into(l, &mut b);
-                            union_into(&a, &b, &mut c);
+                            union_stream(&a, &mut Cur::new(l), &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         _ => {
                             if a.is_empty() || l.is_empty() {
                                 continue;
                             }
-                            decode_into(l, &mut b);
-                            diff_into(&a, &b, &mut c);
+                            diff_stream(&a, &mut Cur::new(l), &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                     }
@@ -838,8 +955,7 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                             ok = false;
                             break;
                         }
-                        decode_into(l, &mut b);
-                        intersect_into(&a, &b, &mut c);
+                        intersect_stream(&a, &mut Cur::new(l), &mut c);
                         std::mem::swap(&mut a, &mut c);
                         if a.is_empty() {
                             ok = false;
