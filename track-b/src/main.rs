@@ -358,7 +358,7 @@ fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u
     }
 }
 
-const BLOCK: usize = 1 << 23; // 8 MB streaming blocks
+const BLOCK: usize = 1 << 22; // 4 MB streaming blocks
 
 /// Streams [start, end) of docs.txt; both bounds sit right after an LF.
 fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usize) -> Post {
@@ -654,6 +654,35 @@ fn eval_queries(idx: &Index, qs: &[Query]) -> Vec<u8> {
     out
 }
 
+/// Worker count: the container may see the host's core count while the
+/// cgroup CPU quota allows far fewer, so read the quota when present.
+fn worker_threads() -> usize {
+    let host = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if let Ok(s) = fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        let mut it = s.split_whitespace();
+        if let (Some(q), Some(p)) = (it.next(), it.next()) {
+            if q != "max" {
+                if let (Ok(q), Ok(p)) = (q.parse::<u64>(), p.parse::<u64>()) {
+                    if q > 0 && p > 0 {
+                        return (((q + p - 1) / p) as usize).max(1).min(host).min(32);
+                    }
+                }
+            }
+        }
+    }
+    if let (Ok(q), Ok(p)) = (
+        fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+        fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    ) {
+        if let (Ok(q), Ok(p)) = (q.trim().parse::<i64>(), p.trim().parse::<u64>()) {
+            if q > 0 && p > 0 {
+                return (((q as u64 + p - 1) / p) as usize).max(1).min(host).min(32);
+            }
+        }
+    }
+    host.min(16)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(String::as_str).unwrap_or("/data");
@@ -667,7 +696,7 @@ fn main() {
     let n_terms = terms.len();
 
     let file_len = fs::metadata(&docs_path).expect("stat docs.txt").len() as usize;
-    let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let nthreads = worker_threads();
     let ranges = chunk_ranges(file_len, &docs_path, nthreads.max(1));
 
     let mut parts: Vec<Post> = Vec::with_capacity(ranges.len());
