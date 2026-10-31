@@ -420,4 +420,15 @@ Every step from the reference to your final version, each with the live-board ru
   (distinct counts come out 0; the run fails correctness on purpose). Its T
   decomposes the board budget into parse+stats vs dedup and decides where
   the remaining optimization effort goes. Local: -36% on 1 vCPU.
+- Run: run-848adcc243a7. Board: T 0.027575, M 9.5 MB, S 239 (correctness
+  failed by design). READOUT: parse+stats = 27.6 ms, dedup = 12.4 ms (31%).
+  Both phases scale ~3.2x from local 1 vCPU - the limiter is shared, not
+  lock contention in the bitset.
+
+## Step 65: DIAGNOSTIC - double-read probe (correct output)
+- Step-61 code, but every thread first touches every cache line of its
+  granule share before parsing (the file is read twice). Output identical.
+  T(step-65) - T(step-61) = the marginal cost of one full read: ~0 means
+  reads overlap compute freely (compute-bound); ~10 ms means the read path
+  is the floor and the leaders must be reading differently.
 - Run: PENDING
