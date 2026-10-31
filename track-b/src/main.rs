@@ -47,6 +47,7 @@ use std::sync::Mutex;
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn prctl(option: i32, ...) -> i32;
+    fn _exit(status: i32) -> !;
 }
 
 #[cfg(target_env = "gnu")]
@@ -128,9 +129,9 @@ fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 15 hash bits
-/// above id + 1 (0 if free), so a mismatch rarely loads a key and 4-byte slots
-/// halve the table's cache footprint. A token that is no term gets NONE.
+/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
+/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
+/// is no term gets the id one past the last term, so callers need no branch.
 struct Terms {
     slot: Vec<u32>,
     keys: Vec<__m256i>,
@@ -653,10 +654,14 @@ fn main() {
         s.iter_mut().zip(&scans).for_each(|(n, scan)| *n = scan.0[i]);
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
+    let all_buckets: Vec<Mutex<Vec<Units>>> = scans
+        .into_iter()
+        .map(|s| s.1)
+        .collect();
     // Written by every thread at its own positions; relaxed stores are plain stores.
     let post: Vec<AtomicU16> = unsafe { std::mem::transmute(vec![0u16; end as usize]) };
     on_threads(|t| {
-        let buckets = std::mem::take(&mut *scans[t].1.lock().unwrap());
+        let buckets = std::mem::take(&mut *all_buckets[t].lock().unwrap());
         let mut cursor = vec![0u32; lists.div_ceil(BUCKETS)];
         for (b, units) in buckets.into_iter().enumerate() {
             for (c, i) in cursor.iter_mut().zip((b..lists).step_by(BUCKETS)) {
@@ -678,7 +683,7 @@ fn main() {
             }
         }
     });
-    drop(scans);
+    drop(all_buckets);
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let mut found = found.into_inner().unwrap();
@@ -709,25 +714,40 @@ fn main() {
         let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
-            let set = if phrase {
+            if phrase {
                 let at = found.partition_point(|m| m.0 < q as u32);
-                Docs::List(
-                    found[at..]
-                        .iter()
-                        .take_while(|m| m.0 == q as u32)
-                        .map(|m| m.1)
-                        .collect(),
-                )
+                let matches = &found[at..];
+                let mut count = 0u64;
+                let mut sum = 0u64;
+                let mut first = [0u32; 10];
+                let mut nfirst = 0;
+                for m in matches.iter().take_while(|m| m.0 == q as u32) {
+                    count += 1;
+                    sum += m.1 as u64;
+                    if nfirst < 10 {
+                        first[nfirst] = m.1;
+                        nfirst += 1;
+                    }
+                }
+                push_u64(&mut out, count);
+                out.push(' ');
+                push_u64(&mut out, sum);
+                for &d in &first[..nfirst] {
+                    out.push(' ');
+                    push_u64(&mut out, d as u64);
+                }
+                out.push('\n');
             } else {
                 let cur = docs(tids[0]);
-                ops.iter()
+                let set = ops
+                    .iter()
                     .zip(&tids[1..])
                     .fold(cur, |cur, (&op, &id)| match &cur {
                         Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
                         _ => apply(cur, op, docs(id)),
-                    })
-            };
-            line(&mut out, &set);
+                    });
+                line(&mut out, &set);
+            }
         }
         *chunk.lock().unwrap() = out;
     });
@@ -736,4 +756,5 @@ fn main() {
         .map(|c| c.into_inner().unwrap())
         .collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
+    unsafe { _exit(0) };
 }
