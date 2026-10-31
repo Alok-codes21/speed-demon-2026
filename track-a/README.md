@@ -4,13 +4,11 @@ The task specification and exact output format are available in the [Track A spe
 
 ## Approach
 
-Implemented in Rust using only the standard library.
+Implemented in Rust using only the standard library (mmap/madvise/ftruncate via extern "C").
 
-The solution reads `requests.log`, parses each request, and groups records by UTC hour and endpoint. It tracks request counts, HTTP 5xx errors, and response latencies for each group.
+The log is mapped read-only behind one guard zero page and split into line-aligned ranges, one per worker thread. Each worker parses its range: the group hour comes straight from the fixed timestamp digits (the spec pins the 72-hour window), a single 64-byte SIMD probe locates the field separators, the endpoint is interned to a worker-local id through a small open-addressing table, and a 4-byte packed record (20-bit latency, 5xx flag, 11-bit local id) is appended to a per-hour chain of 16 KiB chunks carved from the worker's own anonymous mapping. Latencies of 2^20 us or more (about 1% of lines) overflow the packing and go to a per-hour side list.
 
-For each group, it sorts the latency values to calculate the p50, p95, and p99 nearest-rank percentiles. It calculates the error rate in parts per million and sorts the final groups by hour and endpoint before writing `summary.txt`.
-
-The implementation uses hash maps for endpoint interning and aggregation, and sorts the latency values within each group to calculate the percentiles.
+After a barrier, one worker merges the intern tables so that an endpoint's global id is its rank in unsigned byte order, which is exactly the output order. Workers then claim hours: an hour's records from every worker are counting-sorted by endpoint rank into one latency array, and nearest-rank p50/p95/p99 come from a full sort for small groups or three nested linear selections for large ones. The exact byte size of each hour's text follows from the digit widths, so after a prefix sum the output file is sized once and mapped shared, and every worker formats its hours straight into the file with no write serialization.
 
 ## Dependencies
 
@@ -18,13 +16,10 @@ No third-party Rust crates. Standard library only.
 
 ## Validation
 
-Passed the official local checker against the full generated dataset (seed 1, 3.1 million requests).
+Output matches the reference byte for byte (sha256) on the tiny, sample and full seed-1 datasets, at 1, 2, 3, 5 and 12 worker threads:
 
-- Output SHA-256: `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`
-- Local runtime: 5.83 seconds, including container startup.
-
-The leaderboard runtime may differ because it uses its own scoring environment.
+- full: `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`
 
 ## With another 24 hours
 
-I would profile memory usage and allocation patterns on the full dataset, investigate ways to reduce per-request and per-group allocations, and benchmark alternative aggregation and percentile strategies while checking every change against the reference output.
+Release parsed chunk pages back as hours complete to shave peak memory further, overlap input readahead with parsing, and trim the source line count.
