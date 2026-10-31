@@ -27,6 +27,7 @@ struct Stats {
   int64_t amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
+static uint64_t (*CB)[BITS_W];
 static uint8_t *R2C;
 // packed 3-letter code per slot; '_' for _UNMATCHED
 static uint32_t CK[MAX_C];
@@ -59,18 +60,23 @@ static inline uint64_t load8(const char *s, uint32_t n, const char *end) {
   return n < 8 ? v & ((1ULL << (8 * n)) - 1) : v;
 }
 
-// Fast path: a name of at most 25 bytes packs into four 64-bit words.
+// 128-bit multiply fold: strong avalanche in one multiply (mum-style mixer).
+static inline uint64_t hmul(uint64_t a, uint64_t b) {
+  __uint128_t r = (__uint128_t)a * b;
+  return (uint64_t)r ^ (uint64_t)(r >> 64);
+}
+
+// Fast path: a name of at most 25 bytes packs into four 64-bit words; 94% of
+// names are <= 16 bytes, so only w0/w1 are usually loaded.
 static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
   uint64_t w0 = load8(s, len < 8 ? len : 8, end);
   uint64_t w1 = len > 8 ? load8(s + 8, len - 8 < 8 ? len - 8 : 8, end) : 0;
-  uint64_t w2 = len > 16 ? load8(s + 16, len - 16 < 8 ? len - 16 : 8, end) : 0;
-  uint64_t w3 = len > 24 ? (uint8_t)s[24] : 0;
-  uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^ (w2 * 0x517cc1b727220a95ULL);
-  h ^= (w3 * 0x85ebca6bULL) ^ ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
-  h ^= h >> 32;
-  h *= 0xd6e8feb86659fd93ULL;
-  h ^= h >> 32;
-  return h | (1ULL << 63);
+  uint64_t h = w0 ^ (w1 * 0x9e3779b97f4a7c15ULL) ^ ((uint64_t)len * 0xbf58476d1ce4e5b9ULL);
+  if (__builtin_expect(len > 16, 0)) {
+    uint64_t w2 = load8(s + 16, len - 16 < 8 ? len - 16 : 8, end);
+    h ^= (w2 * 0x517cc1b727220a95ULL) ^ (len > 24 ? (uint64_t)(uint8_t)s[24] * 0x85ebca6bULL : 0);
+  }
+  return hmul(h, 0x9e3779b97f4a7c15ULL) | (1ULL << 63);
 }
 
 // Everything else (escaped or over 25 bytes): full-length FNV-1a over the
@@ -148,18 +154,15 @@ quoted_end(const char *s, const char *end, uint32_t *esc) {
 
 struct Worker {
   const char *start, *end; Stats stats[MAX_C];
-  uint64_t (*cb)[BITS_W]; // this thread's private per-category bitsets
 };
 
-// flush up to n buffered bitsets into the thread's PRIVATE table: prefetch
-// all lines, then set with plain load-or (no atomics, no cross-thread
-// ping-pong; the 12 slices merge by OR at output time).
-static inline void bflush(uint64_t (*cb)[BITS_W], uint32_t *bnid, uint8_t *bc,
-                          uint32_t n) {
-  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&cb[bc[j]][bnid[j] >> 6]);
+// flush up to n buffered bitsets: prefetch all lines, then set
+static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
+  for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
   for (uint32_t j = 0; j < n; j++) {
-    uint64_t *pw = &cb[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
-    if ((*pw & mask) == 0) *pw |= mask;
+    uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
+    if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
+      __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
   }
 }
 
@@ -169,7 +172,6 @@ void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
-  uint64_t(*cb)[BITS_W] = w->cb;
   uint32_t bnid[16], nb = 0; uint8_t bc[16];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
@@ -201,7 +203,7 @@ void *parse_chunk(void *arg) {
     // region, amount
     uint32_t reg_id = 0; while (*p != ',') reg_id = reg_id * 10 + (*p++ - '0'); p++;
     uint8_t c = (reg_id < 1000000) ? R2C[reg_id] : 255;
-    if (name_len) __builtin_prefetch(&cb[c][(name_hash & HM) >> 6]);
+    if (name_len) __builtin_prefetch(&CB[c][(name_hash & HM) >> 6]);
     bool neg = (*p == '-'); p += neg;
     int64_t cents = 0; while (*p != '.') cents = cents * 10 + (*p++ - '0');
     cents = cents * 100 + (p[1] - '0') * 10 + (p[2] - '0');
@@ -219,9 +221,9 @@ void *parse_chunk(void *arg) {
     s.name_bytes += name_len; s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
     bnid[nb] = nid; bc[nb] = c;
-    if (++nb == 16) bflush(cb, bnid, bc, 16), nb = 0;
+    if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
-  bflush(cb, bnid, bc, nb);
+  bflush(bnid, bc, nb);
   return nullptr;
 }
 
@@ -238,23 +240,19 @@ int main(int argc, char **argv) {
   // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
   char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
   size_t al = ((size_t)big + (2 << 20) - 1) & ~((size_t)(2 << 20) - 1);
-  madvise((void *)al, 2 << 20, MADV_HUGEPAGE);
+  madvise((void *)al, 6 << 20, MADV_HUGEPAGE);
   NT = (uint64_t *)al;                     // 1 MB
   R2C = (uint8_t *)(al + (1 << 20)); // 1 MB
+  CB = (uint64_t(*)[BITS_W])(al + (2 << 20));
   NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
-  // Per-thread per-category bitsets: 12 x NC x 16KB (~6MB), private to each
-  // worker so the hot set loop needs no atomics and lines never ping-pong.
-  const int nth = 12;
-  size_t pcb = (size_t)nth * NC * BITS_W * sizeof(uint64_t);
-  uint64_t *PTCB = (uint64_t *)mmap(0, pcb, 3, 0x22, -1, 0);
-  madvise(PTCB, pcb, MADV_HUGEPAGE);
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   madvise((void *)data, st.st_size, MADV_SEQUENTIAL); madvise((void *)data, st.st_size, MADV_HUGEPAGE); fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
+  const int nth = 12;
   const char *c_starts[nth + 1];
   c_starts[0] = (const char *)memchr(data, '\n', st.st_size) + 1;
   c_starts[nth] = fend;
@@ -269,7 +267,6 @@ int main(int argc, char **argv) {
   pthread_t ths[nth];
   for (int i = 0; i < nth; i++) {
     workers[i].start = c_starts[i]; workers[i].end = c_starts[i + 1];
-    workers[i].cb = (uint64_t(*)[BITS_W])(PTCB + (size_t)i * NC * BITS_W);
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   }
   for (int i = 0; i < nth; i++)
@@ -298,11 +295,7 @@ int main(int argc, char **argv) {
     const Stats &g = final_s[c];
     if (g.count == 0) continue;
     uint32_t d = 0;
-    for (uint32_t i = 0; i < BITS_W; i++) {
-      uint64_t w = 0;
-      for (int t = 0; t < nth; t++) w |= workers[t].cb[c][i];
-      d += __builtin_popcountll(w);
-    }
+    for (uint32_t i = 0; i < BITS_W; i++) d += __builtin_popcountll(CB[c][i]);
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
     fprintf(out, "%s %zu %zu ", nm, (size_t)g.count, (size_t)g.id_sum);

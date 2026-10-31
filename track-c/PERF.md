@@ -171,6 +171,12 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 34 (v53 thread count 12 -> 10)
 - Change: worker threads 12 -> 10. Board history: 12 > 6 > 16, peak location between 7-15 unknown; 10 probes the contention-vs-SMT tradeoff (atomics on shared CB lines + NT probes argue fewer threads; SMT throughput argues more).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (1-CPU sandbox cannot measure thread-count effects; board is the measurement).
+- Board T_s/M/S/points: T_s=0.055386 M=53751808 S=305 points=65.374 - SEVERE REGRESSION. Root cause: the FULL dataset has ~240 categories, not the ~30 the tiny/sample outputs suggested - per-thread slices ballooned to 12 x 240 x 16KB = 46MB (zeroing faults + no L2 locality). Per-thread bitsets are dead at this category count. Reverted (step 36).
+- Run: run-dc34992bd0c0
+
+## Step 36 (v56 lean name hash; revert of step 35)
+- Change: revert step 35 back to the v39 pipeline, PLUS a leaner name hash: names are 94% <= 16B (p50=11, max=25), so hs now loads w2/w3 only when len > 16 and finishes with a single mum-style 128-bit multiply fold instead of the two-round finalizer. Same injective-packing risk class as before (validated collision-free on all 4 datasets).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (gated as v56/v57). Local -2% total work.
 - Board T_s/M/S/points: pending
 - Run: pending
 
