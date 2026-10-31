@@ -35,7 +35,7 @@ extern "C" {
 const INF: u64 = u64::MAX;
 const BLOB: usize = 512; // nodes per locality blob
 const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
-const PAGE: usize = 512; // distances per page
+const PAGE: usize = 128; // distances per page
 
 /// A pointer the threads share; every use writes indices no other thread writes.
 #[derive(Clone, Copy)]
@@ -126,40 +126,32 @@ fn share(n: usize, t: usize, nt: usize) -> std::ops::Range<usize> {
 /// A 4-ary min-heap of (key, node): it only ever holds the live frontier, so
 /// it stays small, and four children share one cache line.
 #[derive(Default)]
-struct Heap(Vec<(u64, u32)>);
-
+struct Heap { small:Vec<u64>, big:std::collections::BinaryHeap<std::cmp::Reverse<(u64,u32)>>, bits:u32 }
 impl Heap {
-    fn push(&mut self, k: u64, u: u32) {
-        let h = &mut self.0;
-        let mut i = h.len();
-        h.push((k, u));
-        while i > 0 && h[(i - 1) / 4].0 > k {
-            h[i] = h[(i - 1) / 4];
-            i = (i - 1) / 4;
-        }
-        h[i] = (k, u);
-    }
-    /// The smallest entry (the heap must not be empty). The last entry sifts
-    /// down from the root, unchecked: every index read is below n.
-    fn pop(&mut self) -> (u64, u32) {
-        let x = self.0.pop().unwrap();
-        let Some(&top) = self.0.first() else { return x };
-        let (h, n, mut i) = (self.0.as_mut_ptr(), self.0.len(), 0);
-        unsafe {
-            while 4 * i + 1 < n {
-                let c = 4 * i + 1;
-                let m = (c + 1..n.min(c + 4)).fold(c, |m, j| if (*h.add(j)).0 < (*h.add(m)).0 { j } else { m });
-                if (*h.add(m)).0 >= x.0 {
-                    break;
-                }
-                (*h.add(i), i) = (*h.add(m), m);
-            }
-            *h.add(i) = x;
-        }
-        top
-    }
+ fn push(&mut self,k:u64,u:u32) {
+  if k > (u64::MAX >> self.bits) { self.big.push(std::cmp::Reverse((k,u))); return; }
+  let x=(k<<self.bits)|u as u64; let h=&mut self.small; let mut i=h.len();h.push(x);
+  while i>0 && h[(i-1)/4]>x {h[i]=h[(i-1)/4];i=(i-1)/4;}
+  h[i]=x;
+ }
+ fn len(&self)->usize {self.small.len()+self.big.len()}
+ fn peek(&self)->Option<u64> {self.small.first().map(|x|x>>self.bits).or_else(||self.big.peek().map(|x|x.0.0))}
+ fn pop(&mut self)->(u64,u32) {
+  if self.small.is_empty() {return self.big.pop().unwrap().0;}
+  let x=self.small.pop().unwrap();let top=self.small.first().copied().unwrap_or(x);
+  let (h,n,mut i)=(self.small.as_mut_ptr(),self.small.len(),0);
+  unsafe {
+   while 4*i+1<n {
+    let c=4*i+1;let m=(c+1..n.min(c+4)).fold(c,|m,j|if *h.add(j)<*h.add(m){j}else{m});
+    if *h.add(m)>=x {break;}
+    (*h.add(i),i)=(*h.add(m),m);
+   }
+   if n>0 {*h.add(i)=x;}
+  }
+  (top>>self.bits,(top&((1u64<<self.bits)-1)) as u32)
+ }
+ fn clear(&mut self) {self.small.clear();self.big.clear();}
 }
-
 /// Tentative distances in pages of 512, handed out on first touch and taken
 /// back after each query, so a thread's memory follows its largest search.
 struct Dist {
@@ -461,7 +453,7 @@ fn main() {
     // it can, so the best meeting seen is the answer.
     on_threads(nt, |_| {
         let mut dist = [Dist::new(n), Dist::new(n)];
-        let mut queue = [Heap::default(), Heap::default()];
+        let mut queue = [Heap {bits:hb,..Default::default()},Heap {bits:hb,..Default::default()}];
         loop {
             let q = next.fetch_add(1, Relaxed);
             let Some(&i) = order.get(q) else { return };
@@ -478,11 +470,11 @@ fn main() {
             queue[0].push(0, s);
             *dist[1].at(t) = 0;
             queue[1].push(0, t);
-            while let (Some(a), Some(b)) = (queue[0].0.first(), queue[1].0.first()) {
-                if a.0 + b.0 >= best {
+            while let (Some(a), Some(b)) = (queue[0].peek(), queue[1].peek()) {
+                if a + b >= best {
                     break;
                 }
-                let k = (queue[1].0.len() < queue[0].0.len()) as usize;
+                let k = (queue[1].len() < queue[0].len()) as usize;
                 let (go, ga, gh) = sides[k];
                 let (a, b) = dist.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
@@ -503,13 +495,14 @@ fn main() {
                             *slot = nd;
                             queue[k].push(nd, v);
                             prefetch(go.as_ptr().wrapping_add(v as usize));
+                            prefetch(ga.as_ptr().wrapping_add(unsafe{*go.get_unchecked(v as usize)} as usize));
                             best = best.min(nd.saturating_add(other[0].get(v)));
                         }
                     }
                 }
             }
             unsafe { *ansr.at(i) = best };
-            queue.iter_mut().for_each(|q| q.0.clear());
+            queue.iter_mut().for_each(|q| q.clear());
             dist.iter_mut().for_each(Dist::reset);
         }
     });
