@@ -485,6 +485,20 @@ fn main() {
         }
         spans.push((phrase, from, ids.len() as u32));
     }
+    {
+        let want = (terms.keys.len() * 2).next_power_of_two();
+        if want < terms.slot.len() {
+            let mut slot = vec![0u64; want];
+            let mask = want - 1;
+            for (id, k) in terms.keys.iter().enumerate() {
+                let h = unsafe { hash(*k) };
+                let mut i = h & mask;
+                while slot[i] != 0 { i = (i + 1) & mask; }
+                slot[i] = (h as u64 >> 32) << 32 | (id + 1) as u64;
+            }
+            terms.slot = slot;
+        }
+    }
     let nterms = terms.keys.len();
     let mut in_bool = vec![false; nterms];
     for &(phrase, from, to) in spans.iter().filter(|s| !s.0) {
@@ -537,7 +551,7 @@ fn main() {
     let mut nbits = 0usize;
     let mut role = vec![NONE; nterms + 1];
     for i in (0..nterms).filter(|&i| in_bool[i]) {
-        role[i] = if df[i] as usize * 16 > sampled { (nbits, nbits += 1).0 as u32 + 1 } else { 0 };
+        role[i] = if df[i] as usize * 32 > sampled { (nbits, nbits += 1).0 as u32 + 1 } else { 0 };
     }
 
     let mut anchored = vec![];
