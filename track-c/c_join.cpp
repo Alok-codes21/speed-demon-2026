@@ -17,7 +17,7 @@
 
 // table geometry: 2^17 name slots; 256 country slots of 2^17 bits
 static const uint32_t HM = 131071, MAX_C = 256, BITS_W = 2048;
-static const char *fend, *gst[385]; // records.csv end; granule boundaries
+static const char *fend, *gst[193]; // records.csv end; granule boundaries
 
 struct Stats {
   uint64_t count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0;
@@ -67,17 +67,13 @@ static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
   return ((uint64_t)r ^ (uint64_t)(r >> 64)) | (1ULL << 63);
 }
 
-// Everything else (escaped or over 25 bytes): hash the RAW field bytes.
-// CSV escaping is canonical (a quote is always ""), so equal names have
-// equal raw bytes - the raw slice is an injective key, no unescape needed.
-// Word-wise mum: ~5 cycles per 8 bytes vs FNV-1a's ~4 per byte.
+// Everything else (escaped or over 25 bytes): full-length FNV-1a over the
+// unescaped value, so distinct names are never merged by truncation and no
+// unescape buffer is needed. "" decodes to one quote. Rare on real data.
 static uint64_t hl(const char *s, const char *e) {
-  uint64_t h = (uint64_t)(e - s) * 0xbf58476d1ce4e5b9ULL, w;
-  for (; s < e; s += 8) {
-    w = load8(s, (uint32_t)(e - s > 8 ? 8 : e - s), e);
-    __uint128_t r = (__uint128_t)(w ^ h) * 0x9e3779b97f4a7c15ULL;
-    h = (uint64_t)r ^ (uint64_t)(r >> 64);
-  }
+  uint64_t h = 1469598103934665603ULL;
+  while (s < e)
+    h = (h ^ (uint8_t)*s++) * 1099511628211ULL;
   return h | (1ULL << 63);
 }
 
@@ -169,7 +165,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
     }
   };
-  for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 384;) {
+  for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
     while (p < end) {
       // skip a UTF-8 BOM before a record, then the id field
@@ -245,10 +241,10 @@ int main(int argc, char **argv) {
 
   // Split into 192 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
-  gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[384] = fend;
+  gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[192] = fend;
   size_t total = fend - gst[0];
-  for (int i = 1; i < 384; i++) {
-    const char *ap = gst[0] + (i * total) / 384,
+  for (int i = 1; i < 192; i++) {
+    const char *ap = gst[0] + (i * total) / 192,
                *m = (const char *)memmem(ap, fend - ap, "\r\n", 2);
     gst[i] = m ? m + 2 : fend;
   }

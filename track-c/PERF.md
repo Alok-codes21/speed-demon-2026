@@ -447,7 +447,8 @@ Every step from the reference to your final version, each with the live-board ru
   LOST vs 76.954: T parity within noise, so the +8 buffered slots of code
   cost S with no T win - intern L3 latency was already hidden. Reverted.
 ## Step 67: revert to step-61 v111 (best-known, 76.954)
-- Run: PENDING
+- Run: run-f88762e5ca4e. Board: T 0.040161, M 9.9 MB, S 240, 76.976 points.
+  Re-measured v111 a hair above its step-61 score; this is the current best.
 ## Step 68: raw-byte hl hash + 384 granules
 - Escaped/long names (12.2% of records) hashed with FNV-1a over the
   UNESCAPED value: a 4-cycle/byte serial multiply chain. CSV escaping is
@@ -455,4 +456,8 @@ Every step from the reference to your final version, each with the live-board ru
   word-wise (mum, ~5 cycles per 8B) and skip unescaping entirely.
 - 192 -> 384 granules: halves the work-stealing tail quantum.
 - Local: parity on 1 vCPU (issue-bound savings show at board scale).
+- Run: run-3f5f2684741a. Board: T 0.040682, M 10.0 MB, S 243, 76.779 points.
+  LOST: no T win (raw-byte hash issue savings don't show at board scale
+  either; the FNV chain was already overlapped) and +3 S lines. Reverted.
+## Step 69: revert to step-61 v111 (best-known, 76.976)
 - Run: PENDING
