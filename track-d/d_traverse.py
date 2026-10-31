@@ -197,6 +197,37 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
                 df[v] = I
             continue
 
+        # If the target has very few incoming edges, reverse Dijkstra
+        # is cheaper than maintaining two frontiers. This covers the
+        # benchmark's injected sink queries and other low-indegree targets.
+        if rp[t + 1] - rp[t] <= 2:
+            db[t] = 0
+            touched = [t]
+            heap = [t]
+            answer = -1
+            while heap:
+                entry = _pop(heap)
+                x = entry // n
+                u = entry - x * n
+                if x != db[u]:
+                    continue
+                if u == s:
+                    answer = x
+                    break
+                for j in range(rp[u], rp[u + 1]):
+                    v = rc[j]
+                    y = x + rw[j]
+                    if y < db[v]:
+                        if db[v] == I:
+                            touched.append(v)
+                        db[v] = y
+                        _psh(heap, y * n + v)
+            answer_cache[key] = answer
+            res.append(answer)
+            for v in touched:
+                db[v] = I
+            continue
+
         # ── initialise ───────────────────────────────────────────────────────
         df[s] = 0;  db[t] = 0
         hf = [s];   hb = [t]      # packed: 0*n+s, 0*n+t
