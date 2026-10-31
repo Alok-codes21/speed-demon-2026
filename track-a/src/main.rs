@@ -56,6 +56,7 @@ extern "C" {
     fn posix_fadvise(fd: i32, off: i64, len: i64, advice: i32) -> i32;
     fn prctl(opt: i32, a2: usize, a3: usize, a4: usize, a5: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 const MADV_DONTNEED: i32 = 4;
 
@@ -360,6 +361,9 @@ struct Out {
     writing: bool,
     file: File,
     off: i64,
+    ends: [i64; HOURS + 1],      // output offset after each hour
+    text_pool: Vec<Vec<u8>>,     // recycled per-hour text buffers
+    lat_pool: Vec<Vec<u32>>,     // recycled per-hour scatter buffers
 }
 
 struct Engine {
@@ -520,7 +524,12 @@ impl Engine {
             pos[id as usize] = total;
             total += count[id as usize] + count[id as usize + MAX_NAMES];
         }
-        let mut lat: Vec<u32> = Vec::with_capacity(total as usize);
+        let mut lat: Vec<u32> = {
+            let mut o = self.out.lock().unwrap();
+            o.lat_pool.pop().unwrap_or_default()
+        };
+        lat.clear();
+        lat.reserve(total as usize);
         #[allow(clippy::uninit_vec)]
         unsafe {
             lat.set_len(total as usize);
@@ -542,7 +551,12 @@ impl Engine {
         }
 
         let label = hour_label(h);
-        let mut text: Vec<u8> = Vec::with_capacity(1 << 16);
+        let mut text: Vec<u8> = {
+            let mut o = self.out.lock().unwrap();
+            o.text_pool.pop().unwrap_or_default()
+        };
+        text.clear();
+        text.reserve(1 << 16);
         let mut start = 0u32;
         for &id in &order {
             let idu = id as usize;
@@ -575,30 +589,51 @@ impl Engine {
             }
         }
 
+        lat.clear();
         {
             let mut r = self.mu.lock().unwrap();
             for &(buf, _) in &runs {
                 r.pool.push(buf);
             }
         }
+        self.out.lock().unwrap().lat_pool.push(lat);
 
         // Deposit the part; whoever finds the writer idle drains in order.
+        // The write runs WITHOUT the lock - while `writing` is set the writer
+        // owns the file position and the other threads only deposit into
+        // parts[], so no finalize ever blocks behind the kernel.
         let mut out = self.out.lock().unwrap();
+        let fd = out.file.as_raw_fd();
         out.parts[h] = Some(text);
         if out.writing {
             return;
         }
         out.writing = true;
-        while out.written < HOURS {
+        loop {
             let w = out.written;
-            let Some(part) = out.parts[w].take() else { break };
-            use std::io::Write;
-            out.file.write_all(&part).expect("write summary.txt");
-            unsafe {
-                posix_fadvise(out.file.as_raw_fd(), out.off, part.len() as i64, FADV_DONTNEED);
+            if w >= HOURS {
+                break;
             }
-            out.off += part.len() as i64;
-            out.written += 1;
+            let Some(part) = out.parts[w].take() else { break };
+            drop(out);
+            let mut done = 0;
+            while done < part.len() {
+                let n = unsafe { write(fd, part.as_ptr().add(done), part.len() - done) };
+                assert!(n > 0, "write summary.txt");
+                done += n as usize;
+            }
+            let mut o = self.out.lock().unwrap();
+            o.off += part.len() as i64;
+            o.ends[w + 1] = o.off;
+            o.written += 1;
+            if w >= 2 {
+                // Drop cached output pages two hours behind the frontier.
+                unsafe {
+                    posix_fadvise(fd, 0, o.ends[w - 1], FADV_DONTNEED);
+                }
+            }
+            o.text_pool.push(part);
+            out = o;
         }
         out.writing = false;
     }
@@ -643,10 +678,14 @@ impl BlockScan<'_> {
     // Parse the line at `p`, return the next line's start.
     #[inline(always)]
     unsafe fn line<const SIMD: bool>(&mut self, p: *const u8) -> *const u8 {
-        // YYYY-MM-DDTHH: month low digit at 6, day at 8-9, hour at 11-12.
-        let day = (*p.add(8) - b'0') as usize * 10 + (*p.add(9) - b'0') as usize;
-        let hh = (*p.add(11) - b'0') as usize * 10 + (*p.add(12) - b'0') as usize;
-        let h = (if *p.add(6) == b'0' { day - 30 } else { day + 1 }) * 24 + hh - 18;
+        // YYYY-MM-DDTHH: raw-ASCII hour index, branch-free. The day units
+        // digit (p[9]) plus the month parity (p[6]&1: 0 for October, 1 for
+        // November) times 24, plus the two hour digits; the constant folds
+        // every ASCII offset and the Oct-30-18:00 origin.
+        let h = (*p.add(9) as usize + (*p.add(6) & 1) as usize) * 24
+            + (*p.add(11) as usize) * 10
+            + *p.add(12) as usize
+            - 1698;
 
         let (name, name_end) = scan_line::<SIMD>(p.add(28));
         let id = self.engine.dict.intern::<SIMD>(Name {
@@ -749,6 +788,9 @@ fn main() {
                 writing: false,
                 file,
                 off: 0,
+                ends: [0; HOURS + 1],
+                text_pool: Vec::new(),
+                lat_pool: Vec::new(),
             }),
         };
         let ok = if simd {
