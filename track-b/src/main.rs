@@ -128,11 +128,11 @@ fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
-/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
-/// is no term gets the id one past the last term, so callers need no branch.
+/// Query terms to dense ids: open addressing, each slot the top 15 hash bits
+/// above id + 1 (0 if free), so a mismatch rarely loads a key and 4-byte slots
+/// halve the table's cache footprint. A token that is no term gets NONE.
 struct Terms {
-    slot: Vec<u64>,
+    slot: Vec<u32>,
     keys: Vec<__m256i>,
 }
 
@@ -143,8 +143,8 @@ impl Terms {
         loop {
             match self.slot[i] {
                 0 => return NONE,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => {
-                    return s as u32 - 1
+                s if s >> 17 == (h >> 49) as u32 && same(self.keys[(s & 0x1FFFF) as usize - 1], k) => {
+                    return (s & 0x1FFFF) - 1
                 }
                 _ => i = (i + 1) & mask,
             }
@@ -159,7 +159,7 @@ impl Terms {
         }
         self.keys = keys;
         for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+            *s = *s & !0x1FFFF | (new[(*s & 0x1FFFF) as usize - 1] + 1);
         }
     }
 
@@ -171,7 +171,7 @@ impl Terms {
                 let h = hash(k);
                 let mut i = h & (slot.len() - 1);
                 while slot[i] != 0 { i = (i + 1) & (slot.len() - 1); }
-                slot[i] = (h as u64 >> 32) << 32 | (id + 1) as u64;
+                slot[i] = ((h >> 49) as u32) << 17 | (id + 1) as u32;
             }
             self.slot = slot;
         }
@@ -180,13 +180,14 @@ impl Terms {
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
-                return s as u32 - 1;
+            if s >> 17 == (h >> 49) as u32 && same(self.keys[(s & 0x1FFFF) as usize - 1], k) {
+                return (s & 0x1FFFF) - 1;
             }
             i = (i + 1) & mask;
         }
+        assert!(self.keys.len() < 0x1FFFF);
         self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.slot[i] = ((h >> 49) as u32) << 17 | self.keys.len() as u32;
         self.keys.len() as u32 - 1
     }
 }
@@ -195,9 +196,7 @@ impl Terms {
 /// letter lies in 'a'..='z', and a digit lies in '0'..='9' as is), and LFs.
 unsafe fn classes(p: *const u8) -> (u64, u64) {
     let half = |q: *const u8| {
-        let (v, c) = (_mm256_loadu_si256(q.cast()), |b: u8| {
-            _mm256_set1_epi8(b as i8)
-        });
+        let (v, c) = (_mm256_loadu_si256(q.cast()), |b: u8| _mm256_set1_epi8(b as i8));
         let at_most = |x: __m256i, n: u8| _mm256_cmpeq_epi8(_mm256_subs_epu8(x, c(n)), c(0));
         let letter = _mm256_sub_epi8(_mm256_or_si256(v, c(0x20)), c(b'a'));
         let word = _mm256_or_si256(at_most(letter, 25), at_most(_mm256_sub_epi8(v, c(b'0')), 9));
@@ -213,11 +212,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// one class mask per 64-byte window; a token that runs into the window's end
 /// starts the next window. Each token's slot is prefetched and the token
 /// looked up LAG tokens later, so the misses overlap.
-unsafe fn tokens(
-    mut p: *const u8,
-    t: &Terms,
-    mut f: impl FnMut(u32, *const u8, usize),
-) -> *const u8 {
+unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [(_mm256_setzero_si256(), 0, p, 0); LAG];
     let mut look = |r: &(__m256i, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
@@ -328,9 +323,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             }
             Bits(a)
         }
-        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => {
-            (b.retain(|&d| has(&a, d)), List(b)).1
-        }
+        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => (b.retain(|&d| has(&a, d)), List(b)).1,
         (List(mut a), _, Bits(b)) if op == b'N' => (a.retain(|&d| !has(&b, d)), List(a)).1,
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
@@ -406,19 +399,10 @@ fn line(out: &mut String, docs: &Docs) {
         }
         Docs::Bits(b) => {
             // Bit k of a position adds 2^k for each set bit whose position has it.
-            const SEL: [u64; 6] = [
-                0xAAAA_AAAA_AAAA_AAAA,
-                0xCCCC_CCCC_CCCC_CCCC,
-                0xF0F0_F0F0_F0F0_F0F0,
-                0xFF00_FF00_FF00_FF00,
-                0xFFFF_0000_FFFF_0000,
-                0xFFFF_FFFF_0000_0000,
-            ];
+            const SEL: [u64; 6] = [0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F0F0_F0F0_F0F0, 0xFF00_FF00_FF00_FF00, 0xFFFF_0000_FFFF_0000, 0xFFFF_FFFF_0000_0000];
             for (w, &x) in b.iter().enumerate().filter(|(_, &x)| x != 0) {
                 let c = x.count_ones() as u64;
-                let within: u64 = (0..6)
-                    .map(|k| ((x & SEL[k]).count_ones() as u64) << k)
-                    .sum();
+                let within: u64 = (0..6).map(|k| ((x & SEL[k]).count_ones() as u64) << k).sum();
                 count += c;
                 sum += c * 64 * w as u64 + within;
                 let mut m = x;
@@ -449,12 +433,7 @@ fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, u32, *const u
             while *p != b'\t' {
                 p = p.add(1);
             }
-            p = tokens(
-                p,
-                t,
-                #[inline(always)]
-                |id, s, len| f(doc, id, s, len),
-            );
+            p = tokens(p, t, #[inline(always)] |id, s, len| f(doc, id, s, len));
         }
         doc += 1;
     }
@@ -515,10 +494,7 @@ fn main() {
 
     let qtext = map("/data/queries.txt");
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms {
-        slot: slots,
-        keys: Vec::with_capacity(qtext.len() / 16),
-    };
+    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
@@ -539,9 +515,7 @@ fn main() {
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
     for &(phrase, from, to) in spans.iter().filter(|s| !s.0) {
-        ids[from as usize..to as usize]
-            .iter()
-            .for_each(|&id| in_bool[id as usize] = !phrase);
+        ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = !phrase);
     }
 
     let text = map("/data/docs.txt");
@@ -555,11 +529,7 @@ fn main() {
     while last_line > 0 && text[last_line - 1] != b'\n' {
         last_line -= 1;
     }
-    let ndocs = if text.is_empty() {
-        0
-    } else {
-        number(text, last_line) as usize + 1
-    };
+    let ndocs = if text.is_empty() { 0 } else { number(text, last_line) as usize + 1 };
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
@@ -610,9 +580,7 @@ fn main() {
     anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
     anchored.sort_unstable();
     // Where the phrases of anchor a0 + k start in anchored.
-    let astart: Vec<usize> = (a0..=nkeep)
-        .map(|i| anchored.partition_point(|a| (a.0 as usize) < i))
-        .collect();
+    let astart: Vec<usize> = (a0..=nkeep).map(|i| anchored.partition_point(|a| (a.0 as usize) < i)).collect();
     let words = ndocs.div_ceil(64);
     // Zero pages from the kernel, written only where a bit is set.
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
@@ -682,9 +650,7 @@ fn main() {
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
         let s = &mut seg[i * THREADS..][..THREADS];
-        s.iter_mut()
-            .zip(&scans)
-            .for_each(|(n, scan)| *n = scan.0[i]);
+        s.iter_mut().zip(&scans).for_each(|(n, scan)| *n = scan.0[i]);
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
     // Written by every thread at its own positions; relaxed stores are plain stores.
@@ -694,11 +660,7 @@ fn main() {
         let mut cursor = vec![0u32; lists.div_ceil(BUCKETS)];
         for (b, units) in buckets.into_iter().enumerate() {
             for (c, i) in cursor.iter_mut().zip((b..lists).step_by(BUCKETS)) {
-                *c = start[i]
-                    + seg[i * THREADS..][..t]
-                        .iter()
-                        .map(|&n| n as u32)
-                        .sum::<u32>();
+                *c = start[i] + seg[i * THREADS..][..t].iter().map(|&n| n as u32).sum::<u32>();
             }
             let (mut doc, mut term) = (0u32, NONE);
             for x in units.chunks.into_iter().flatten() {
@@ -739,19 +701,14 @@ fn main() {
             Docs::List(v)
         }
     };
-    let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64))
-        .map(|_| Mutex::default())
-        .collect();
+    let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     on_threads(|_| loop {
         let k = next.fetch_add(1, Relaxed);
         let Some(chunk) = chunks.get(k) else { return };
         let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
-            let (tids, ops) = (
-                &ids[from as usize..to as usize],
-                &ops[from as usize..to as usize],
-            );
+            let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
             let set = if phrase {
                 let at = found.partition_point(|m| m.0 < q as u32);
                 Docs::List(
