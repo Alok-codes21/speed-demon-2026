@@ -344,3 +344,11 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 57: revert to step-53 code (step-49 shape + empty-name guard)
 - Tip restored to the best-known code (board best 76.718, run-a2f020e15701).
 - Run: PENDING
+
+## Step 58: mask-parsed region + amount fields
+- Region/amount tail of each record parsed from one 32-byte AVX2 delimiter
+  window: comma/newline masks + branch-free SWAR digit conversion replace two
+  scalar byte loops; scalar fallback for long fields and the file tail. An
+  id-field variant measured slower locally and was dropped (ablation: id mask
+  +5%, SWAR id +10%, region/amount mask -4.4% vs step-53 code on 1 vCPU).
+- Run: PENDING

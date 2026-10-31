@@ -77,6 +77,23 @@ static uint64_t hl(const char *s, const char *e) {
   return h | (1ULL << 63);
 }
 
+
+// 32-byte mask of byte c at s
+static inline uint32_t mmch(const char *s, char c) {
+  return _mm256_movemask_epi8(_mm256_cmpeq_epi8(
+      _mm256_loadu_si256((const __m256i *)s), _mm256_set1_epi8(c)));
+}
+
+// branch-free conversion of n (1..8) known digit bytes; reads 8 bytes at s
+static inline uint64_t digs(const char *s, uint32_t n) {
+  uint64_t v;
+  memcpy(&v, s, 8);
+  v <<= 64 - 8 * n;
+  v -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * n));
+  v = v * 2561 >> 8, v = (v & 0x00FF00FF00FF00FFULL) * 6553601 >> 16;
+  return (uint32_t)((v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);
+}
+
 // field-width integer ending at term; consumes the terminator
 static inline uint64_t num(const char *&p, char term) {
   uint64_t v = 0;
@@ -176,13 +193,37 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
                         : 0;
       __builtin_prefetch(&NT[slot = nh & HM]);
       QF(note_len); // note: only its unescaped byte length is needed
-      uint32_t reg = num(p, ',');
+      uint32_t reg;
+      int64_t cents;
+      bool fast = false;
+      if (__builtin_expect(p + 32 <= end, 1)) {
+        uint32_t mc = mmch(p, ','), mn = mmch(p, '\n');
+        if (__builtin_expect(mc && mn, 1)) {
+          uint32_t c3 = __builtin_ctz(mc);          // region width
+          uint32_t nl = __builtin_ctz(mn);          // record end
+          uint32_t ae = nl - (p[nl - 1] == '\r');   // one past fraction
+          uint32_t a0 = c3 + 1 + (p[c3 + 1] == '-'); // amount int start
+          if (__builtin_expect(c3 - 1 < 8 && nl >= a0 + 4 &&
+                                   p[ae - 3] == '.' && ae - 3 - a0 - 1 < 8, 1)) {
+            reg = digs(p, c3);
+            int64_t neg = p[c3 + 1] == '-';
+            cents = digs(p + a0, ae - 3 - a0) * 100 + (p[ae - 2] - '0') * 10 +
+                    (p[ae - 1] - '0');
+            cents = neg ? -cents : cents;
+            p += nl + 1;
+            fast = true;
+          }
+        }
+      }
+      if (__builtin_expect(!fast, 0)) { // long fields or file tail: scalar
+        reg = num(p, ',');
+        int64_t neg = *p == '-';
+        cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2, cents = neg ? -cents : cents; // two fraction digits consumed
+        p += p < end ? 1 + (*p == '\r') : 0;  // "\r\n" or "\n", bare at eof
+      }
       uint8_t c = (reg < 1000000) ? R2C[reg] : 255;
       __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
-      int64_t neg = *p == '-';
-      int64_t cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0');
-      p += 2, cents = neg ? -cents : cents; // two fraction digits consumed
-      p += p < end ? 1 + (*p == '\r') : 0;  // "\r\n" or "\n", bare at eof
 
       // join and aggregate
       Stats &st = stats[c = c == 255 ? UNMATCHED : c];
