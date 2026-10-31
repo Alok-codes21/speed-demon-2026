@@ -122,18 +122,33 @@ fn same(a: __m256i, b: __m256i) -> bool {
 /// Query terms to dense ids: open addressing, each slot the top 32 hash bits
 /// above id + 1 (0 if free), so a mismatch rarely loads a key.
 struct Terms {
+    // Keys split into 16-byte halves: the hot compare array stays cache-dense;
+    // tails matter only for the few terms longer than 16 bytes.
     slot: Vec<u64>,
-    keys: Vec<__m256i>,
+    keys: Vec<u128>,
+    tails: Vec<u128>,
 }
 
 impl Terms {
     fn find(&self, k: __m256i, h: usize) -> u32 {
         let mask = self.slot.len() - 1;
+        let lo: u128 = unsafe { std::mem::transmute(_mm256_castsi256_si128(k)) };
+        let hi: u128 = unsafe { std::mem::transmute(_mm256_extracti128_si256(k, 1)) };
+        let long = hi != 0;
         let mut i = h & mask;
         loop {
             match self.slot[i] {
                 0 => return NONE,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
+                s if s >> 32 == h as u64 >> 32 => {
+                    let id = (s & 0x7FFF_FFFF) as u32 - 1;
+                    if ((s >> 31) & 1 != 0) == long
+                        && unsafe { *self.keys.get_unchecked(id as usize) } == lo
+                        && (!long || unsafe { *self.tails.get_unchecked(id as usize) } == hi)
+                    {
+                        return id;
+                    }
+                    i = (i + 1) & mask;
+                }
                 _ => i = (i + 1) & mask,
             }
         }
@@ -142,28 +157,54 @@ impl Terms {
     /// Term i becomes new[i].
     fn renumber(&mut self, new: &[u32]) {
         let mut keys = self.keys.clone();
-        for (&n, &k) in new.iter().zip(&self.keys) {
+        let mut tails = self.tails.clone();
+        for (&n, (&k, &t)) in new.iter().zip(self.keys.iter().zip(&self.tails)) {
             keys[n as usize] = k;
+            tails[n as usize] = t;
         }
         self.keys = keys;
+        self.tails = tails;
         for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+            let longbit = *s & (1u64 << 31);
+            *s = *s >> 32 << 32 | longbit | (new[(*s & 0x7FFF_FFFF) as u32 as usize - 1] + 1) as u64;
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
+        // Keep at least a quarter of the slots free, or a full table's probe
+        // loop would never end on an unknown token.
+        if (self.keys.len() + 1) * 4 > self.slot.len() * 3 {
+            let mut slot = vec![0; (self.slot.len() * 2).max(16)];
+            for (id, (&lo, &hi)) in self.keys.iter().zip(&self.tails).enumerate() {
+                let k = unsafe { _mm256_set_m128i(std::mem::transmute(hi), std::mem::transmute(lo)) };
+                let h = unsafe { hash(k) };
+                let mut i = h & (slot.len() - 1);
+                while slot[i] != 0 { i = (i + 1) & (slot.len() - 1); }
+                slot[i] = (h as u64 >> 32) << 32 | ((hi != 0) as u64) << 31 | (id + 1) as u64;
+            }
+            self.slot = slot;
+        }
         let k = unsafe { key(term.as_ptr(), term.len()) };
+        let lo: u128 = unsafe { std::mem::transmute(_mm256_castsi256_si128(k)) };
+        let hi: u128 = unsafe { std::mem::transmute(_mm256_extracti128_si256(k, 1)) };
+        let long = hi != 0;
         let (h, mask) = (hash(k), self.slot.len() - 1);
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
-                return s as u32 - 1;
+            let id = (s & 0x7FFF_FFFF) as u32 - 1;
+            if s >> 32 == h as u64 >> 32
+                && ((s >> 31) & 1 != 0) == long
+                && self.keys[id as usize] == lo
+                && (!long || self.tails[id as usize] == hi)
+            {
+                return id;
             }
             i = (i + 1) & mask;
         }
-        self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.keys.push(lo);
+        self.tails.push(hi);
+        self.slot[i] = (h as u64 >> 32) << 32 | (long as u64) << 31 | self.keys.len() as u64;
         self.keys.len() as u32 - 1
     }
 }
@@ -238,7 +279,11 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
 unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
     let is = |p: *const u8, q: *const u8, id: u32| {
         let n = q.offset_from(p) as usize;
-        n <= 32 && same(key(p, n), terms.keys[id as usize])
+        if n > 32 { return false; }
+        let lo: __m128i = unsafe { std::mem::transmute(*terms.keys.get_unchecked(id as usize)) };
+        let hi: __m128i = unsafe { std::mem::transmute(*terms.tails.get_unchecked(id as usize)) };
+        let full = _mm256_set_m128i(hi, lo);
+        same(key(p, n), full)
     };
     let mut q = s;
     for &id in phrase[..j].iter().rev() {
@@ -470,7 +515,7 @@ fn main() {
     }
     let qtext = map("/data/queries.txt");
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
+    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16), tails: Vec::with_capacity(qtext.len() / 16) };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let mut q = q;
@@ -491,11 +536,13 @@ fn main() {
         if want < terms.slot.len() {
             let mut slot = vec![0u64; want];
             let mask = want - 1;
-            for (id, k) in terms.keys.iter().enumerate() {
-                let h = unsafe { hash(*k) };
+            for (id, (&lo, &hi)) in terms.keys.iter().zip(&terms.tails).enumerate() {
+                let long = hi != 0;
+                let k = unsafe { _mm256_set_m128i(std::mem::transmute(hi), std::mem::transmute(lo)) };
+                let h = unsafe { hash(k) };
                 let mut i = h & mask;
                 while slot[i] != 0 { i = (i + 1) & mask; }
-                slot[i] = (h as u64 >> 32) << 32 | (id + 1) as u64;
+                slot[i] = (h as u64 >> 32) << 32 | (long as u64) << 31 | (id + 1) as u64;
             }
             terms.slot = slot;
         }
@@ -507,9 +554,7 @@ fn main() {
     }
 
     // At least 12 threads: DOC_BITS=15 caps a thread's share at 32,768 docs.
-    let threads = std::env::var("SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(12).max(12)
-    });
+    let threads = 12usize;
     THREADS.store(threads, Relaxed);
     let text = map("/data/docs.txt");
     let threads = THREADS.load(Relaxed);
