@@ -314,6 +314,7 @@ struct Post {
     docs: Vec<Vec<u32>>,
     ents: Vec<Vec<u32>>,
     ovf: Vec<(u32, u64)>,
+    max_doc: u32,
 }
 
 /// Advances past separators, then folds one token into `tb`; returns the
@@ -481,6 +482,9 @@ fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u
             i += 1;
         }
         i += 1;
+        if id > post.max_doc {
+            post.max_doc = id;
+        }
         let text_start = i;
         while i < n && data[i] != b'\n' {
             i += 1;
@@ -544,6 +548,7 @@ fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usi
         docs: (0..n_terms).map(|_| Vec::new()).collect(),
         ents: (0..n_terms).map(|_| Vec::new()).collect(),
         ovf: Vec::new(),
+        max_doc: 0,
     };
     let mut recent = vec![(u32::MAX, 0u32); RECENT];
     let f = fs::File::open(path).expect("open docs.txt");
@@ -626,10 +631,19 @@ fn chunk_ranges(file_len: usize, path: &str, nthreads: usize) -> Vec<(usize, usi
     ranges
 }
 
-// Merged index: flat arenas with per-term spans.
+// Merged index: flat arenas with per-term spans. Terms with at least
+// MAP_MIN documents store a bitmap instead of a doc-id list: one bit per
+// doc, so BOOL merges over hot terms become word operations and memory
+// drops from 4 B/doc to 1 bit/doc.
+const MAP_MIN: u32 = 8192;
+
 struct Index {
     docs: Vec<u32>,
     d_spans: Vec<(u32, u32)>,
+    maps: Vec<u64>,
+    m_spans: Vec<(u32, u32)>,
+    #[allow(dead_code)]
+    map_words: u32, // words per bitmap (0 disables bitmaps)
     ents: Vec<u32>, // packed (doc << POS_SHIFT) | pos
     e_spans: Vec<(u32, u32)>,
     ovf: Vec<u64>, // (doc << 32) | pos for pos >= POS_LIMIT
@@ -643,6 +657,11 @@ impl Index {
         &self.docs[off as usize..(off + len) as usize]
     }
     #[inline(always)]
+    fn map(&self, tid: u32) -> &[u64] {
+        let (off, len) = self.m_spans[tid as usize];
+        &self.maps[off as usize..(off + len) as usize]
+    }
+    #[inline(always)]
     fn ents(&self, tid: u32) -> &[u32] {
         let (off, len) = self.e_spans[tid as usize];
         &self.ents[off as usize..(off + len) as usize]
@@ -654,10 +673,12 @@ impl Index {
     }
 }
 
-fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
+fn build_index(parts: &mut Vec<Post>, n_terms: usize, n_docs: u32) -> Index {
     let mut d_spans = vec![(0u32, 0u32); n_terms];
     let mut e_spans = vec![(0u32, 0u32); n_terms];
     let mut o_spans = vec![(0u32, 0u32); n_terms];
+    let mut m_spans = vec![(0u32, 0u32); n_terms];
+    let map_words = if n_docs > 0 { n_docs.div_ceil(64) } else { 0 };
     let d_total: usize = parts.iter().map(|p| p.docs.iter().map(Vec::len).sum::<usize>()).sum();
     let e_total: usize = parts.iter().map(|p| p.ents.iter().map(Vec::len).sum::<usize>()).sum();
     let o_total: usize = parts.iter().map(|p| p.ovf.len()).sum();
@@ -669,23 +690,43 @@ fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
     }
     // Exact spans first (prefix sums over per-thread lengths), then a single
     // copy pass; per-thread vecs are freed as they are taken.
+    let mut maps: Vec<u64> = Vec::new();
     {
         let mut d_off = 0u32;
         let mut e_off = 0u32;
+        let mut m_off = 0u32;
         for tid in 0..n_terms {
-            d_spans[tid].0 = d_off;
             e_spans[tid].0 = e_off;
+            let mut dn = 0u32;
             for p in parts.iter() {
-                d_off += p.docs[tid].len() as u32;
+                dn += p.docs[tid].len() as u32;
                 e_off += p.ents[tid].len() as u32;
             }
-            d_spans[tid].1 = d_off - d_spans[tid].0;
             e_spans[tid].1 = e_off - e_spans[tid].0;
+            if dn >= MAP_MIN && map_words > 0 {
+                m_spans[tid] = (m_off, map_words);
+                m_off += map_words;
+            } else {
+                d_spans[tid] = (d_off, dn);
+                d_off += dn;
+            }
         }
+        maps.resize(m_off as usize, 0);
     }
     for tid in 0..n_terms {
+        if m_spans[tid].1 > 0 {
+            let base = m_spans[tid].0 as usize;
+            for p in parts.iter_mut() {
+                for &d in &std::mem::take(&mut p.docs[tid]) {
+                    maps[base + (d >> 6) as usize] |= 1u64 << (d & 63);
+                }
+            }
+        } else {
+            for p in parts.iter_mut() {
+                docs.extend_from_slice(&std::mem::take(&mut p.docs[tid]));
+            }
+        }
         for p in parts.iter_mut() {
-            docs.extend_from_slice(&std::mem::take(&mut p.docs[tid]));
             ents.extend_from_slice(&std::mem::take(&mut p.ents[tid]));
         }
     }
@@ -722,7 +763,7 @@ fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
         }
         eprintln!("STATS docs_entries={} ({} MB)", d_total, d_total * 4 / 1_000_000);
     }
-    Index { docs, d_spans, ents, e_spans, ovf, o_spans }
+    Index { docs, d_spans, maps, m_spans, map_words, ents, e_spans, ovf, o_spans }
 }
 
 // Boolean merges over sorted doc-id slices.
@@ -783,6 +824,137 @@ fn difference(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
 }
 
 // Evaluation.
+
+/// BOOL accumulator: a sorted doc-id list, or a bitmap over all docs for
+/// hot terms (one bit per doc).
+enum Acc {
+    List(Vec<u32>),
+    Map(Vec<u64>),
+}
+
+impl Acc {
+    fn of(idx: &Index, t: u32) -> Acc {
+        if idx.m_spans[t as usize].1 > 0 {
+            Acc::Map(idx.map(t).to_vec())
+        } else {
+            Acc::List(idx.docs(t).to_vec())
+        }
+    }
+    /// OP_AND / OP_OR / OP_NOT with term t, left-to-right semantics.
+    fn apply(&mut self, idx: &Index, op: u8, t: u32) {
+        let tmap = idx.m_spans[t as usize].1 > 0;
+        match op {
+            OP_AND => match self {
+                Acc::Map(m) => {
+                    if tmap {
+                        for (a, &b) in m.iter_mut().zip(idx.map(t)) {
+                            *a &= b;
+                        }
+                    } else {
+                        let l = idx.docs(t);
+                        let mut out: Vec<u32> = Vec::with_capacity(l.len().min(1 << 16));
+                        for &d in l {
+                            if (m[(d >> 6) as usize] >> (d & 63)) & 1 == 1 {
+                                out.push(d);
+                            }
+                        }
+                        *self = Acc::List(out);
+                    }
+                }
+                Acc::List(l) => {
+                    if tmap {
+                        let m = idx.map(t);
+                        let mut out: Vec<u32> = Vec::with_capacity(l.len());
+                        for &d in l.iter() {
+                            if (m[(d >> 6) as usize] >> (d & 63)) & 1 == 1 {
+                                out.push(d);
+                            }
+                        }
+                        *self = Acc::List(out);
+                    } else {
+                        let mut tmp = Vec::new();
+                        intersect(l, idx.docs(t), &mut tmp);
+                        *l = tmp;
+                    }
+                }
+            },
+            OP_OR => match self {
+                Acc::Map(m) => {
+                    if tmap {
+                        for (a, &b) in m.iter_mut().zip(idx.map(t)) {
+                            *a |= b;
+                        }
+                    } else {
+                        for &d in idx.docs(t) {
+                            m[(d >> 6) as usize] |= 1u64 << (d & 63);
+                        }
+                    }
+                }
+                Acc::List(l) => {
+                    if tmap {
+                        let mut m = idx.map(t).to_vec();
+                        for &d in l.iter() {
+                            m[(d >> 6) as usize] |= 1u64 << (d & 63);
+                        }
+                        *self = Acc::Map(m);
+                    } else {
+                        let mut tmp = Vec::new();
+                        union(l, idx.docs(t), &mut tmp);
+                        *l = tmp;
+                    }
+                }
+            },
+            _ => match self {
+                // OP_NOT: self - term
+                Acc::Map(m) => {
+                    if tmap {
+                        for (a, &b) in m.iter_mut().zip(idx.map(t)) {
+                            *a &= !b;
+                        }
+                    } else {
+                        for &d in idx.docs(t) {
+                            m[(d >> 6) as usize] &= !(1u64 << (d & 63));
+                        }
+                    }
+                }
+                Acc::List(l) => {
+                    if tmap {
+                        let m = idx.map(t);
+                        let mut out: Vec<u32> = Vec::with_capacity(l.len());
+                        for &d in l.iter() {
+                            if (m[(d >> 6) as usize] >> (d & 63)) & 1 == 0 {
+                                out.push(d);
+                            }
+                        }
+                        *self = Acc::List(out);
+                    } else {
+                        let mut tmp = Vec::new();
+                        difference(l, idx.docs(t), &mut tmp);
+                        *l = tmp;
+                    }
+                }
+            },
+        }
+    }
+    fn to_list(&self) -> Vec<u32> {
+        match self {
+            Acc::List(l) => l.clone(),
+            Acc::Map(m) => {
+                let mut out = Vec::new();
+                for (wi, &w) in m.iter().enumerate() {
+                    let mut w = w;
+                    while w != 0 {
+                        let b = w.trailing_zeros();
+                        out.push((wi as u32) << 6 | b);
+                        w &= w - 1;
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
 fn write_u64(out: &mut Vec<u8>, mut v: u64) {
     let mut b = [0u8; 20];
     let mut i = 20;
@@ -834,24 +1006,18 @@ fn phrase_hit(idx: &Index, terms: &[u32], order: &[usize], a: usize, d: u32, p: 
 
 fn eval_queries(idx: &Index, qs: &[Query]) -> Vec<u8> {
     let mut out = Vec::with_capacity(qs.len() * 30);
-    let mut cur: Vec<u32> = Vec::new();
-    let mut tmp: Vec<u32> = Vec::new();
     let mut matched: Vec<u32> = Vec::new();
     for q in qs {
         match q {
             Query::Bool { terms, ops } => {
-                cur.clear();
-                cur.extend_from_slice(idx.docs(terms[0]));
+                let mut acc = Acc::of(idx, terms[0]);
                 for (op, &t) in ops.iter().zip(&terms[1..]) {
-                    let d = idx.docs(t);
-                    match *op {
-                        OP_AND => intersect(&cur, d, &mut tmp),
-                        OP_OR => union(&cur, d, &mut tmp),
-                        _ => difference(&cur, d, &mut tmp),
-                    }
-                    std::mem::swap(&mut cur, &mut tmp);
+                    acc.apply(idx, *op, t);
                 }
-                emit(&mut out, &cur);
+                match &acc {
+                    Acc::List(l) => emit(&mut out, l),
+                    Acc::Map(_) => emit(&mut out, &acc.to_list()),
+                }
             }
             Query::Phrase { terms } => {
                 matched.clear();
@@ -947,7 +1113,8 @@ fn main() {
     });
 
     let t_scan = t0.elapsed();
-    let index = build_index(&mut parts, n_terms);
+    let n_docs = parts.iter().map(|p| p.max_doc).max().unwrap_or(0) + 1;
+    let index = build_index(&mut parts, n_terms, n_docs);
     drop(parts);
     let t_merge = t0.elapsed();
 
