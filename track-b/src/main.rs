@@ -1,3 +1,30 @@
+// This file incorporates code from the Cache Me team's Speed Demon 2026
+// entry (https://github.com/manusingh090/speed-demon-2026-entry, track-b),
+// used under the MIT License:
+//
+// MIT License
+//
+// Copyright (c) 2026 Hackathon Raptors CIC
+// Copyright (c) 2026 the contributors of this repository
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 //! Speed Demon 2026, Track B (Index), in Rust with no dependencies.
 //!
 //! 1. The queries are read first, and only their terms are looked for.
@@ -257,12 +284,19 @@ fn has(bits: &[u64], d: u32) -> bool {
     bits[d as usize / 64] >> (d % 64) & 1 != 0
 }
 
+/// A term's documents as read-only operand: postings built per query, or a
+/// borrow of the shared bitmap (no per-query copy).
+enum TermDocs<'a> {
+    List(Vec<u32>),
+    Bits(&'a [u64]),
+}
+
 /// cur op term, strictly left to right; a list OR a bitmap becomes a bitmap.
-fn apply(cur: Docs, op: u8, term: Docs) -> Docs {
+fn apply(cur: Docs, op: u8, term: TermDocs) -> Docs {
     use Docs::*;
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
-        (Bits(mut a), _, Bits(b)) => {
+        (Bits(mut a), _, TermDocs::Bits(b)) => {
             for (x, y) in a.iter_mut().zip(b) {
                 *x = match op {
                     b'A' => *x & y,
@@ -272,15 +306,23 @@ fn apply(cur: Docs, op: u8, term: Docs) -> Docs {
             }
             Bits(a)
         }
-        (Bits(a), b'A', List(b)) | (List(b), b'A', Bits(a)) => List(b.into_iter().filter(|&d| has(&a, d)).collect()),
-        (List(a), _, Bits(b)) if op == b'N' => List(a.into_iter().filter(|&d| !has(&b, d)).collect()),
-        (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
+        (Bits(a), b'A', TermDocs::List(b)) => List(b.into_iter().filter(|&d| has(&a, d)).collect()),
+        (List(b), b'A', TermDocs::Bits(a)) => List(b.into_iter().filter(|&d| has(a, d)).collect()),
+        (List(a), _, TermDocs::Bits(b)) if op == b'N' => List(a.into_iter().filter(|&d| !has(b, d)).collect()),
+        (Bits(mut a), _, TermDocs::List(b)) => {
             for (w, m) in b.into_iter().map(bit) {
                 a[w] = if op == b'O' { a[w] | m } else { a[w] & !m };
             }
             Bits(a)
         }
-        (List(a), b'O', List(b)) => {
+        (List(b), _, TermDocs::Bits(a)) => {
+            let mut a = a.to_vec();
+            for (w, m) in b.into_iter().map(bit) {
+                a[w] = if op == b'O' { a[w] | m } else { a[w] & !m };
+            }
+            Bits(a)
+        }
+        (List(a), b'O', TermDocs::List(b)) => {
             let (mut v, mut i, mut j) = (Vec::with_capacity(a.len() + b.len()), 0, 0);
             while i < a.len() && j < b.len() {
                 let (x, y) = (a[i], b[j]);
@@ -291,7 +333,7 @@ fn apply(cur: Docs, op: u8, term: Docs) -> Docs {
             v.extend_from_slice(&b[j..]);
             List(v)
         }
-        (List(mut a), _, List(b)) => {
+        (List(mut a), _, TermDocs::List(b)) => {
             let (mut j, search) = (0, a.len() * 16 < b.len());
             a.retain(|&d| {
                 if search {
@@ -400,7 +442,7 @@ struct Units {
 impl Units {
     fn push(&mut self, x: u16) {
         if self.chunks.last().map_or(true, |c| c.len() == c.capacity()) {
-            self.chunks.push(Vec::with_capacity(1 << 15));
+            self.chunks.push(Vec::with_capacity(1 << 13));
         }
         self.chunks.last_mut().unwrap().push(x);
     }
@@ -495,7 +537,7 @@ fn main() {
     let mut nbits = 0usize;
     let mut role = vec![NONE; nterms + 1];
     for i in (0..nterms).filter(|&i| in_bool[i]) {
-        role[i] = if df[i] as usize * 32 > sampled { (nbits, nbits += 1).0 as u32 + 1 } else { 0 };
+        role[i] = if df[i] as usize * 16 > sampled { (nbits, nbits += 1).0 as u32 + 1 } else { 0 };
     }
 
     let mut anchored = vec![];
@@ -581,14 +623,19 @@ fn main() {
     found.dedup();
 
     unsafe { mallopt(-3, 64 << 20) };
+    let list_of = |id: u32| {
+        let range = |l: &Lists| l.start[id as usize] as usize..l.start[id as usize + 1] as usize;
+        let mut v = Vec::with_capacity(lists.iter().map(|l| range(l).len()).sum());
+        lists.iter().for_each(|l| v.extend(l.post[range(l)].iter().map(|&d| l.first + d as u32)));
+        v
+    };
     let docs = |id: u32| match role[id as usize] {
-        0 => {
-            let range = |l: &Lists| l.start[id as usize] as usize..l.start[id as usize + 1] as usize;
-            let mut v = Vec::with_capacity(lists.iter().map(|l| range(l).len()).sum());
-            lists.iter().for_each(|l| v.extend(l.post[range(l)].iter().map(|&d| l.first + d as u32)));
-            Docs::List(v)
-        }
+        0 => Docs::List(list_of(id)),
         b => Docs::Bits(bits[(b - 1) as usize * words..b as usize * words].to_vec()),
+    };
+    let term_docs = |id: u32| match role[id as usize] {
+        0 => TermDocs::List(list_of(id)),
+        b => TermDocs::Bits(&bits[(b - 1) as usize * words..b as usize * words]),
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
@@ -616,7 +663,7 @@ fn main() {
             } else {
                 let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
                 let cur = docs(tids[0]);
-                let set = ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| apply(cur, op, docs(id)));
+                let set = ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| apply(cur, op, term_docs(id)));
                 format_docs(&mut out, &set);
             }
         }
