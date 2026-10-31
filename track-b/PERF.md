@@ -528,4 +528,9 @@ synthetic single-term suite: 0 matches instead of 144).
 - Local gates: spec, sample, synthetic edge suite byte-exact; full-data
   sha256 f86973c2...80927 unchanged; scan 3.03 -> 1.61 s warm, 2.40 s
   cold; exit HWM 304 MB (charged ~50 MB). S 666 -> ~645 counted.
-- Run: run-pending
+- Run: run-fe8181c1fbf8 - PASS: T=0.2446 s, M=51.1 MB, S=628, K=25.31,
+  **69.11 pts** - NEW BEST (+0.86 over 68.25). M and S both beat the
+  adopted code's own board numbers (51.8 MB, 611); T landed 5% above
+  their 0.2322, inside same-code noise. Cache Me's own follow-up commit
+  (de8c9c2d) regressed them to 68.90 - the adoption picked the right
+  commit. Rank 10 -> 9.
