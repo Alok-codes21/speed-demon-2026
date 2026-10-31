@@ -30,7 +30,7 @@ use std::thread;
 const HOURS: usize = 72;
 const SLOTS: usize = 4096;        // interner slots per worker, power of two
 const MAX_NAMES: usize = 2048;    // endpoint ids must fit 11 bits
-const CHUNK_WORDS: usize = 4096;  // one 16 KiB chunk: 2 header words + records
+const CHUNK_WORDS: usize = 1024;  // one 4 KiB chunk: 2 header words + records
 const CHUNK_CAP: usize = CHUNK_WORDS - 2;
 const ID_MASK: u32 = 0x7ff;
 const ERR_BIT: u32 = 0x800;
@@ -42,7 +42,6 @@ const PROT_WRITE: i32 = 2;
 const MAP_SHARED: i32 = 0x01;
 const MAP_PRIVATE: i32 = 0x02;
 const MAP_FIXED: i32 = 0x10;
-const MAP_POPULATE: i32 = 0x8000;
 const MAP_ANON: i32 = 0x20;
 const MADV_DONTNEED: i32 = 4;
 const PR_SET_THP_DISABLE: i32 = 41;
@@ -228,6 +227,7 @@ struct Parser {
     next_chunk: usize,
     heads: [u32; HOURS],     // chunk index + 1, 0 when the hour is empty
     hour_of_chunk: Vec<u8>,  // owning hour per carved chunk
+    released_upto: usize,    // chunks before this are back with the kernel
     wide: [Vec<u32>; HOURS], // (latency, key) pairs that overflow the packing
 }
 
@@ -245,6 +245,7 @@ impl Parser {
             next_chunk: 0,
             heads: [0; HOURS],
             hour_of_chunk: Vec::new(),
+            released_upto: 0,
             wide: std::array::from_fn(|_| Vec::new()),
         }
     }
@@ -293,6 +294,26 @@ impl Parser {
     #[target_feature(enable = "avx2")]
     unsafe fn run_avx2(&mut self, p: *const u8, end: *const u8) {
         self.run::<true>(p, end)
+    }
+
+    // Chunks are carved roughly in arrival (and so roughly hour) order: the
+    // carved prefix whose hours have all been copied out can go back to the
+    // kernel in one batched call per 64 chunks.
+    fn release_prefix(&mut self, finished: &[std::sync::atomic::AtomicBool]) {
+        let mut c = self.released_upto;
+        while c < self.next_chunk && finished[self.hour_of_chunk[c] as usize].load(Ordering::Acquire) {
+            c += 1;
+        }
+        if c - self.released_upto >= 64 {
+            unsafe {
+                madvise(
+                    self.arena.add(self.released_upto * CHUNK_WORDS) as *mut u8,
+                    (c - self.released_upto) * CHUNK_WORDS * 4,
+                    MADV_DONTNEED,
+                );
+            }
+            self.released_upto = c;
+        }
     }
 
     // Visit every record of hour h as (global rank, 5xx flag, latency).
@@ -454,7 +475,6 @@ fn main() {
     cut[nt] = size;
 
     let log_addr = log as usize;
-    let input_fd = input.as_raw_fd();
     let parsers: Vec<Share<Parser>> = (0..nt).map(|t| Share(std::cell::UnsafeCell::new(Parser::new(cut[t + 1] - cut[t])))).collect();
     let ranks: Vec<Share<Vec<u32>>> = (0..nt).map(|_| Share(std::cell::UnsafeCell::new(Vec::new()))).collect();
     let gnames = Share(std::cell::UnsafeCell::new(Vec::<Name>::new()));
@@ -463,6 +483,8 @@ fn main() {
     let text = AtomicUsize::new(0);
     let claim = AtomicUsize::new(0);
     let claim_text = AtomicUsize::new(0);
+    let finished: Vec<std::sync::atomic::AtomicBool> = (0..HOURS).map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
+    let releasing = std::sync::atomic::AtomicBool::new(false);
     let bar = Barrier::new(nt);
     let simd = std::arch::is_x86_feature_detected!("avx2");
 
@@ -476,25 +498,12 @@ fn main() {
             let text = &text;
             let claim = &claim;
             let claim_text = &claim_text;
+            let finished = &finished;
+            let releasing = &releasing;
             let bar = &bar;
             let cut = &cut;
             s.spawn(move || {
                 let log = log_addr as *const u8;
-                // Prefault this worker's share of the log in parallel, instead
-                // of 5k soft faults dribbling in while it parses.
-                unsafe {
-                    let base = cut[t] & !4095usize;
-                    if cut[t + 1] > base {
-                        mmap(
-                            log.add(base) as *mut u8,
-                            cut[t + 1] - base,
-                            PROT_READ,
-                            MAP_PRIVATE | MAP_FIXED | MAP_POPULATE,
-                            input_fd,
-                            base as i64,
-                        );
-                    }
-                }
                 let me = unsafe { &mut *parsers[t].get() };
                 let (p0, p1) = unsafe { (log.add(cut[t]), log.add(cut[t + 1])) };
                 if simd {
@@ -572,19 +581,12 @@ fn main() {
                         });
                     }
 
-                    // The hour's records are all copied out; give the chunk
-                    // pages back so peak memory tracks live data, not history.
-                    for psc in parsers.iter() {
-                        let ps = unsafe { &mut *psc.get() };
-                        let mut ci = ps.heads[h] as usize;
-                        while ci != 0 {
-                            let base = (ci - 1) * CHUNK_WORDS;
-                            unsafe {
-                madvise(ps.arena.add(base) as *mut u8, CHUNK_WORDS * 4, MADV_DONTNEED);
-                                ci = *ps.arena.add(base) as usize;
-                            }
+                    finished[h].store(true, Ordering::Release);
+                    if !releasing.swap(true, Ordering::AcqRel) {
+                        for psc in parsers.iter() {
+                            unsafe { (*psc.get()).release_prefix(&finished) };
                         }
-                        ps.heads[h] = 0;
+                        releasing.store(false, Ordering::Release);
                     }
 
                     let mut size = 0u64;
@@ -613,6 +615,11 @@ fn main() {
                     }
                 }
                 bar.wait();
+
+                // Records are fully digested; return every arena page at once.
+                unsafe {
+                    madvise(me.arena as *mut u8, me.next_chunk * CHUNK_WORDS * 4, MADV_DONTNEED);
+                }
 
                 // One worker turns sizes into offsets and maps the output file.
                 if t == 0 {
