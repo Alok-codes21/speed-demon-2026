@@ -163,5 +163,10 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 32 (v52 intern+bitset tables 2^17 -> 2^18)
 - Change: HASH_SIZE 131072 -> 262144 (load 0.77 -> 0.38, avg successful-lookup probes ~2.7 -> ~1.4). Table memory grows NT 1->2MB, CB 4->8MB; anon mapping 8->16MB, THP region 6->12MB; M peak expected ~9.7 -> ~13MB (-0.6 M-pts), so it needs >=6% T win to net positive. Motivation: intern+bitset are ~19% of runtime and all top-3 teams run 11-12MB tables.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: T_s=0.043660 M=15147008 S=296 points=73.555 - REGRESSION (-1.65). The probe-load reduction is a real T win (-2.7%) but CB doubling to 8MB drove M 9.7 -> 15.1MB (-2.0 M-pts vs +0.3 T-pts). Table growth is a dead end: the M cost per probe saved is prohibitive. Reverted to v39 (step 33).
+- Run: run-fdedf8cae223
+
+## Step 33 (revert to step-23 code)
+- Change: c_join.cpp back to v39 (step 23); step-32 2^18 tables were a net regression.
 - Board T_s/M/S/points: pending
 - Run: pending
