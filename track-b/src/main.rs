@@ -26,7 +26,6 @@
 // SOFTWARE.
 
 //! Speed Demon 2026, Track B (Index), in Rust with no dependencies.
-//!
 //! 1. The queries are read first, and only their terms are looked for.
 //! 2. Each thread samples the start of its share of docs.txt, counting the
 //!    documents that hold each term: a BOOL term in over 1/32 of them is kept
@@ -56,8 +55,7 @@ const BUCKETS: usize = 32; // scan output streams per thread; term i goes to buc
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
 const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
 
-/// The file, mapped over a spare zero page so loads of 32 bytes past any of
-/// its bytes stay inside the mapping.
+/// The file, mapped over a spare zero page so 32-byte loads past its end stay in the mapping.
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
     let len = file.metadata().unwrap().len() as usize;
@@ -94,8 +92,7 @@ static WORD: [bool; 256] = {
     t
 };
 
-/// The key of the token of len (at most 32) bytes at p: its bytes lowercased
-/// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
+/// The key of the token of len (at most 32) bytes at p: its bytes lowercased (OR 0x20) and zero padded.
 unsafe fn key(p: *const u8, len: usize) -> __m256i {
     static KEEP: [u8; 64] = {
         let (mut k, mut i) = ([0; 64], 0);
@@ -119,11 +116,12 @@ fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
-/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
-/// is no term gets the id one past the last term, so callers need no branch.
+/// Query terms to dense ids: open addressing, each slot the top 15 hash bits
+/// above id + 1 (0 if free), so a mismatch rarely loads a key and 4-byte slots
+/// halve the table's cache footprint. A token that is no term gets the id one
+/// past the last term, so callers need no branch.
 struct Terms {
-    slot: Vec<u64>,
+    slot: Vec<u32>,
     keys: Vec<__m256i>,
 }
 
@@ -134,7 +132,7 @@ impl Terms {
         loop {
             match self.slot[i] {
                 0 => return self.keys.len() as u32,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
+                s if s >> 17 == (h >> 49) as u32 && same(self.keys[(s & 0x1FFFF) as usize - 1], k) => return (s & 0x1FFFF) - 1,
                 _ => i = (i + 1) & mask,
             }
         }
@@ -148,20 +146,19 @@ impl Terms {
         }
         self.keys = keys;
         for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+            *s = *s & !0x1FFFF | (new[(*s & 0x1FFFF) as usize - 1] + 1);
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        // Keep at least a quarter of the slots free, or a full table's probe
-        // loop would never end on an unknown token.
+        // Keep a quarter of the slots free, or a full table's probe loop never ends.
         if (self.keys.len() + 1) * 4 > self.slot.len() * 3 {
             let mut slot = vec![0; (self.slot.len() * 2).max(16)];
             for (id, &k) in self.keys.iter().enumerate() {
                 let h = hash(k);
                 let mut i = h & (slot.len() - 1);
                 while slot[i] != 0 { i = (i + 1) & (slot.len() - 1); }
-                slot[i] = (h as u64 >> 32) << 32 | (id + 1) as u64;
+                slot[i] = ((h >> 49) as u32) << 17 | (id + 1) as u32;
             }
             self.slot = slot;
         }
@@ -170,13 +167,14 @@ impl Terms {
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
-                return s as u32 - 1;
+            if s >> 17 == (h >> 49) as u32 && same(self.keys[(s & 0x1FFFF) as usize - 1], k) {
+                return (s & 0x1FFFF) - 1;
             }
             i = (i + 1) & mask;
         }
+        assert!(self.keys.len() < 0x1FFFF);
         self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.slot[i] = ((h >> 49) as u32) << 17 | self.keys.len() as u32;
         self.keys.len() as u32 - 1
     }
 }
@@ -196,11 +194,10 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-/// Calls f(id, start, len) for each token of the document text from p on that
-/// is a term, and returns where the next line starts. Token bounds come from
-/// one class mask per 64-byte window; a token that runs into the window's end
-/// starts the next window. Each token's slot is prefetched and the token
-/// looked up LAG tokens later, so the misses overlap.
+/// Calls f(id, start, len) for each term token of the document text from p on;
+/// returns where the next line starts. Token bounds come from one class mask
+/// per 64-byte window; a token that runs into the window's end starts the next
+/// window. Each token's slot is prefetched and looked up LAG tokens later.
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [(_mm256_setzero_si256(), 0, p, 0); LAG];
@@ -341,8 +338,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             });
             List(a)
         }
-        // Otherwise a merge without branches: x stays when it is in b (AND)
-        // or below b's next document (NOT), and a's rest stays for NOT.
+        // Otherwise a branchless merge: x stays when it is in b (AND) or below b's next document (NOT); a's rest stays for NOT.
         (List(mut a), _, List(b)) => {
             let (mut i, mut j, mut k) = (0, 0, 0);
             while i < a.len() && j < b.len() {
@@ -403,10 +399,9 @@ fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, u32, *const u
     doc - first
 }
 
-/// Scan output for a bucket of terms, in 64 KB chunks so that only the last
-/// one is ever part empty. A unit is a term's index in the bucket (i / BUCKETS)
-/// above the gap since the bucket's previous document; a thread meets its
-/// documents in order, so the gaps are small.
+/// Scan output for a bucket of terms, in 64 KB chunks so only the last is ever
+/// part empty. A unit is a term's bucket index (i / BUCKETS) above the gap since
+/// the bucket's previous document; threads meet documents in order, so gaps are small.
 #[derive(Default)]
 struct Units {
     chunks: Vec<Vec<u16>>,
@@ -416,8 +411,7 @@ struct Units {
 }
 
 impl Units {
-    /// Writes x at the next place, but moves past it only if keep, so a token
-    /// that adds nothing costs a store and no branch.
+    /// Writes x at the next place, but moves past it only if keep: a token that adds nothing costs a store and no branch.
     fn put(&mut self, x: u16, keep: bool) {
         if self.at == self.end {
             self.grow();
@@ -460,8 +454,7 @@ fn main() {
     let qtext = map("/data/queries.txt");
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
     let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
-    // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
-    // ops[i] joins ids[i] and ids[i + 1].
+    // Queries, flat: query q's terms are ids[span.1..span.2]; for BOOL, ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let q = q.strip_suffix(b"\r").unwrap_or(q);
@@ -551,21 +544,18 @@ fn main() {
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
     let found = Mutex::new(vec![]); // (query, document) phrase matches
     let scans: Vec<(Vec<u16>, Mutex<Vec<Units>>)> = on_threads(|t| {
-        // Per term (and one id for every token that needs nothing): documents
-        // in this share, and the last one's offset + 1.
+        // Per term (plus one id for tokens that need nothing): documents in this share, and the last one's offset + 1.
         let (mut count, mut last, mut mine) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
         let first = firsts[t];
-        // Each bitmap term's bits for the current 64 documents (one more word
-        // takes the bits of every other term), ORed in when the block ends.
+        // Each bitmap term's bits for the current 64 documents (one more word takes every other term's), ORed in when the block ends.
         let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
             for (b, x) in pending[..nbits].iter_mut().enumerate().filter(|(_, x)| **x != 0) {
                 bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
             }
         };
-        // Every token does the same work, kept or not by masks, so whether a
-        // term is new to the document, a list or a bitmap costs no branch.
+        // Every token does the same work, kept or not by masks, so new-to-document, list or bitmap costs no branch.
         let n = walk(&text[cut[t]..cut[t + 1]], first, &terms, #[inline(always)] |doc, id, s, len| {
             let i = (id as usize).min(nkeep);
             if i.wrapping_sub(a0) < nkeep - a0 {
@@ -595,10 +585,10 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    // Each term's postings lie in one stretch, thread by thread: the segment
-    // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
-    // stretches go bucket by bucket, so a bucket's scatter writes one region,
-    // and frequency ranks dealt round-robin keep the regions small.
+    // Each term's postings lie in one stretch, thread by thread: thread t's
+    // segment holds seg[i * THREADS + t] offsets from firsts[t]. The stretches
+    // go bucket by bucket so a scatter writes one region, and frequency ranks
+    // dealt round-robin keep the regions small.
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
         let s = &mut seg[i * THREADS..][..THREADS];
@@ -637,8 +627,7 @@ fn main() {
     found.sort_unstable();
     found.dedup();
 
-    // Answers, 64 queries at a time on every thread. Large lists come and go
-    // here, so they now reuse heap memory instead of a fresh mapping each.
+    // Answers, 64 queries at a time per thread. Large lists come and go here, so they reuse heap memory instead of a fresh mapping.
     unsafe { mallopt(-3, 64 << 20) };
     let docs = |id: u32| match id as usize {
         i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
