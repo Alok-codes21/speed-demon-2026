@@ -93,3 +93,14 @@ B ~= 71.6; rank 6 guseinov (76.52) B ~= 72.3.
   B=71.5 -> 76.35 (~rank 8); B=72.8 -> 76.81 (rank 7-8). Now 75.84, rank 11.
 - Risk: board-only unknowns are M (pair postings volume) and the S penalty
   (~-0.55 pts already in the estimates above). Fire when Alok says go.
+
+## v36 fix 02:28 IST (replaces the earlier v36 file)
+- Fuzzing (800 randomized differential cases vs v34, on-spec format with
+  punctuation and >32-byte compound tokens) exposed a skip-bridging hole:
+  tokens() drops tokens over 32 bytes without a callback, and sequence-based
+  pair detection would bridge across them (false phrase matches possible on
+  holdout-style data). Fixed: a pair now fires only when no word byte lies
+  between the two tokens (gap scan over WORD classes; punctuation runs like
+  ", " stay adjacent, matching the reference semantics).
+- Re-gated after the fix: sample byte-exact, full sha exact, 14 suites clean,
+  800/800 fuzz clean. Local wall 1.32 s (scan 1.04 s) vs v34 2.63-2.90 s.

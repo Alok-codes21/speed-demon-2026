@@ -669,7 +669,7 @@ fn main() {
         // Per term (and one id for every token that needs nothing): documents
         // in this share, and the last one's offset + 1.
         let (mut count, mut last, mut mine) = (vec![0u16; npost], vec![0u16; npost], vec![]);
-        let (mut prev, mut at_doc) = (NONE, u32::MAX);
+        let (mut prev, mut at_doc, mut prev_end) = (NONE, u32::MAX, 0usize);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
         let first = firsts[t];
         let (mut pending, mut block) = (vec![0u64; nbits], first as usize / 64);
@@ -718,7 +718,13 @@ fn main() {
                         }
                     }
                 }
-                if prev != NONE && starts_pair[prev as usize] {
+                // Adjacent means no word byte between the tokens (a token over
+                // 32 bytes is skipped without a callback and must not bridge a
+                // pair; punctuation runs like ", " are fine).
+                if prev != NONE
+                    && starts_pair[prev as usize]
+                    && (prev_end..s as usize).all(|i| !WORD[unsafe { *(i as *const u8) } as usize])
+                {
                     let ents = &pair_ent[pair_at[prev as usize] as usize..pair_at[prev as usize + 1] as usize];
                     if let Ok(k) = ents.binary_search_by_key(&id, |e| e.0) {
                         let p = ents[k].1 as usize;
@@ -730,7 +736,7 @@ fn main() {
                         }
                     }
                 }
-                prev = id;
+                (prev, prev_end) = (id, s as usize + len);
             },
         );
         flush(&mut pending, block);
