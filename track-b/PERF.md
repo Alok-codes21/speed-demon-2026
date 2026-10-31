@@ -624,3 +624,11 @@ synthetic single-term suite: 0 matches instead of 144).
   local timing still favours the 4-byte slots, so one more re-roll decides.
   (S barely reacts to comment or formatting diets: 663 -> 666 here. Diet
   experiments closed; T and re-rolls are the levers.)
+
+## Step 33: re-roll log (no code change)
+
+- run-4b7362ba7c9c (step-32 PERF push, v33 code): T=0.2288 s, M=50.8 MB,
+  S=666, **69.67 pts - new best**.
+- run-d83358f3724f (sibling-folder push re-ran track-b at head): T=0.2281 s
+  (fastest yet) but M spiked to 57.1 MB, 69.19 pts. MALLOC_ARENA_MAX=1 is
+  the standing candidate if the M spike repeats.
