@@ -1,6 +1,7 @@
-// Adapted from the MIT-licensed Track D implementation by the contributors of
-// manusingh090/speed-demon-2026-entry. See the upstream repository for its
-// optimization notes and retain the upstream MIT copyright notice.
+// Adapted from the MIT-licensed Track D implementation in
+// manusingh090/speed-demon-2026-entry.
+// Copyright (c) 2026 the contributors of manusingh090/speed-demon-2026-entry.
+// The upstream MIT license terms are retained in the repository LICENSE.
 
 //! Speed Demon 2026, Track D (Traverse), in Rust with no dependencies.
 //!
