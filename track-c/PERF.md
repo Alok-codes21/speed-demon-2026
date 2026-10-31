@@ -88,4 +88,5 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 21 (revert to -O3)
 - Change: Dockerfile build back to -O3 (step-20 -O2 scored 74.662 < 74.671). c_join.cpp unchanged since step 17.
-- Run: PENDING
+- Board T_s/M/S/points: T_s=0.046240 M=10100736 S=311 points=74.530 (same code/config as best run-a47c62b1a994; run noise band 74.53-74.67)
+- Run: run-a00fc5d08e9c
