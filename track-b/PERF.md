@@ -395,4 +395,24 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
   (DOC_BITS=15 caps a share at 32,768 docs; the floor preserves the current
   doc ceiling). SD_THREADS overrides for local testing.
 - Verified byte-exact at 8 and 12 threads locally (spec/sample/full hash).
+- Run: run-767a523c5724 - PASS: T=0.250 s, M=59.3 MB, S=662, **68.04 pts**
+  vs v21's 68.23. T moved 0.2519 -> 0.2504, inside the +/-4% same-code noise
+  band, so the runner's cpuset exposes no more than 12 CPUs; the probe cost
+  +42 code lines and +0.6 MB. Reverted in the next step.
+
+## Step 23: 16-byte term keys, hash-table growth guard, static 12 threads (v26)
+
+- Term keys split: a u128 (16 B) hot compare array plus a u128 tail for the
+  few terms longer than 16 B; a long bit in the slot word routes the tail
+  compare. The hot array is half the size and twice as cache-dense. Local
+  scan ~6% faster at 8 threads (1.38-1.40 s vs 1.50-1.55 s), M-neutral.
+- Growth guard in Terms::insert: rehash-double at 75% load. The table is
+  sized from the queries.txt length, so a small query file could fill every
+  slot - and a full open-addressing table makes find() probe forever on any
+  unknown token. Found with a synthetic single-term test: the scan hung;
+  with the guard it completes. No effect on the full data (58% load).
+- Reverted v25's dynamic thread count to the static 12 of v21: the probe
+  showed no T gain and cost code lines and memory.
+- Local gates: spec and sample byte-exact, full-data sha256
+  f86973c2...80927 unchanged, synthetic edge suite passes, HWM flat.
 - Run: run-pending
