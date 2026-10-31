@@ -57,39 +57,6 @@ INF = 1 << 62
 # §1  CSR construction
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_csr(U, V, W, n):
-    """
-    Build Compressed Sparse Row adjacency from edge arrays.
-    Returns (ptr, col, val):
-      ptr  – list[int] length n+1, row pointers
-      col  – array('i') column indices, sorted by source node
-      val  – array('q') edge weights,  aligned with col
-    """
-    # degree count  (one extra slot so accumulate gives prefix sums)
-    cnt = [0] * (n + 1)
-    for u, v in zip(U, V):
-        if u != v:
-            cnt[u + 1] += 1
-    ptr = list(accumulate(cnt))   # O(n)
-
-    # scatter edges into CSR order
-    pos = ptr[:]                  # mutable copy of row starts
-    m = ptr[-1]
-    col = array("i", [0]) * m
-    val = array("q", [0]) * m
-    for u, v, w in zip(U, V, W):
-        if u == v:
-            continue
-        p = pos[u]; pos[u] = p + 1
-        col[p] = v
-        val[p] = w
-    return ptr, col, val
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# §2  Graph loading
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _load_fast(path):
     import mmap
     with open(path, "rb") as f:
@@ -121,8 +88,8 @@ def _load_fast(path):
             fp[v + 1] = fp[v] + outdeg[v]
             rp[v + 1] = rp[v] + indeg[v]
         del outdeg, indeg
-        fc, fw = array("I", [0]) * fp[n], array("Q", [0]) * fp[n]
-        rc, rw = array("I", [0]) * rp[n], array("Q", [0]) * rp[n]
+        fc, fw = array("I", [0]) * fp[n], array("I", [0]) * fp[n]
+        rc, rw = array("I", [0]) * rp[n], array("I", [0]) * rp[n]
         fp_pos, rp_pos = fp[:-1], rp[:-1]
         i = 0
         number(); number()
@@ -168,12 +135,10 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
     df = array('Q', [I]) * n
     db = array('Q', [I]) * n
 
-    query_order = sorted(range(0, len(q_raw), 2),
-                         key=lambda k: (int(q_raw[k]), int(q_raw[k + 1])))
     res = [None] * (len(q_raw) // 2)
     answer_cache = {}
 
-    for k in query_order:
+    for k in range(0, len(q_raw), 2):
         out_idx = k // 2
         s, t = int(q_raw[k]), int(q_raw[k + 1])
 
