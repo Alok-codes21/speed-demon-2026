@@ -119,5 +119,12 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: revert the step-24 SWAR digit parse (board regression) back to the step-23 base, plus: the 12 worker threads now cooperatively load regions.csv in slices before parsing (shared CK under a spinlock, disjoint R2C writes, one barrier), replacing the serial ~2-4ms load_regions. UNMATCHED is now a fixed slot (255) set before spawn. Micro-golf: one-line CRLF skip, std::min/max.
 - Rationale: the serial regions load is ~5-8% of board runtime; parallelizing it across the already-spawned 12 threads should cut it to ~0.3ms.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (local 1-CPU sandbox cannot show the win; board is the measurement).
+- Board T_s/M/S/points: T_s=0.073589 M=11624448 S=308 points=69.222 - SEVERE REGRESSION (+64% T). Diagnosis: every one of the 1M regions rows took the spinlock (I locked probe+insert per row instead of new codes only); 12 threads ping-ponged one cache line ~1M times = ~29ms serialized. Local 1-CPU sandbox could not show contention. Fixed in step 26.
+- Run: run-eda08bfaf59d
+
+
+## Step 26 (v45 parallel regions, lock-free read path)
+- Change: step-25 code with the regions code-table probe split: lock-free atomic read path (codes repeat ~4000x each, so nearly all rows never lock) and a spinlocked insert path with re-probe for new codes only. Release/acquire ordering on slot_of publishes CK. TSAN-clean, all-atomic CK/slot_of access.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending

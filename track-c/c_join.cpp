@@ -108,12 +108,22 @@ void load_regions(const Worker *w) {
     }
     while (zm == 0 && p[n] != ',') rid = rid * 10 + (p[n++] - '0'); // tail
     uint32_t w2, key = (memcpy(&w2, p + n + 1, 4), __builtin_bswap32(w2) >> 8);
+    // lock-free read path (codes repeat ~4000x each); lock only on a new code
     uint32_t h = (key * 0x9E3779B1u) >> 22;
-    while (__sync_lock_test_and_set(&ck_lock, 1)) {}
-    while (slot_of[h] >= 0 && CK[slot_of[h]] != key) h = (h + 1) & 1023;
-    if (slot_of[h] < 0) CK[slot_of[h] = (int16_t)NC++] = key;
-    int16_t sl = slot_of[h];
-    __sync_lock_release(&ck_lock);
+    int16_t sl;
+    while ((sl = __atomic_load_n(&slot_of[h], __ATOMIC_ACQUIRE)) >= 0 &&
+           __atomic_load_n(&CK[sl], __ATOMIC_RELAXED) != key)
+      h = (h + 1) & 1023;
+    if (sl < 0) {
+      while (__sync_lock_test_and_set(&ck_lock, 1)) {}
+      while ((sl = __atomic_load_n(&slot_of[h], __ATOMIC_RELAXED)) >= 0 &&
+             __atomic_load_n(&CK[sl], __ATOMIC_RELAXED) != key)
+        h = (h + 1) & 1023;
+      if (sl < 0)
+        __atomic_store_n(&CK[sl = (int16_t)NC++], key, __ATOMIC_RELAXED),
+        __atomic_store_n(&slot_of[h], sl, __ATOMIC_RELEASE);
+      __sync_lock_release(&ck_lock);
+    }
     if (rid < 1000000) R2C[rid] = (uint8_t)sl;
     p += n + 5;
   }
