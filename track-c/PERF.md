@@ -705,4 +705,21 @@ Every step from the reference to your final version, each with the live-board ru
   by the process-wide disable).
 - Local: peak RSS delta +0.25MB; full/sample sha256 match, tiny/edge diffs
   clean, stress x3, ASAN+UBSAN clean, TSAN clean.
+- Run: run-0695f990813a - LOST, reverted. T=0.038142 (no gain vs banked
+  0.038028), but M jumped 8.4 -> 10.9 MB: with the tables densely touched the
+  2MB pages charge full-granularity RSS the 4KB populate-exact trick avoids.
+  Points 76.327 vs banked 77.884. Reverted in step 89.
+
+## Step 89 - revert to the banked-best v135 code (base for structural work)
+
+- Restores the exact banked-best source byte-for-byte (commit 01a4dec3,
+  banked run-95947d8b1a47: T=0.038028, M=8.39MB, S=273, 77.884 pts, rank 6).
+- Steps 85-88 (SWAR regions load, SWAR id, CB check-then-set, THP) were each
+  clean but flat-to-negative on the board (T readings 0.038971 / 0.039311 /
+  0.040016 / 0.038142 vs banked 0.038028, all inside or near the +/-16%
+  same-code noise band, none banking); the micro-opt series is closed and the
+  proven code base is restored before structural work.
+- Local: full seed-1 sha256 d8088b1c...f0f536 verified byte-exact after the
+  revert.
 - Run: PENDING
+
