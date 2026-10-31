@@ -215,15 +215,31 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   Fixed by re-uploading the full three-stage file with the same ENV line;
   no source change. Failed gate, no score - documented as a wrong turn of
   the delivery flow, not of the design.
+- Run: run-9c3c475b7046 - PASS: T=0.722 s, M=113.2 MB, S=1146, K=10.94,
+  **51.94 pts** (rank 41/64 at the time). This run measured the v16 code on
+  the pre-arena-cap Dockerfile, so the -27 MB is attributable to the
+  pair-log rewrite alone (Vec headers + doubling slack gone). The
+  MALLOC_ARENA_MAX=4 commit drew no board run of its own (no source delta
+  beyond the Dockerfile/PERF.md), so it rides with the next push.
 
-## Step 14: skip tables + galloping probes in evaluation (v17, prepared)
+## Step 14: skip-probe eval + scan-side trims (v17, this push)
 
 - Every stream records a skip entry every 32 docs (absolute docid + cursor
   byte offset, +~6 MB). When one side of an AND/NOT is at least 24x longer
   than the other, evaluation probes the long side per element (binary
   search the skip table, decode at most one 32-entry block) instead of
   merge-walking the whole long list; the first AND of a query decodes only
-  the short side and probes the long one.
-- Dev sandbox (1 vCPU): eval phase 0.95 -> 0.70 s.
+  the short side and probes the long one. Dev sandbox (1 vCPU): eval phase
+  0.95 -> 0.70 s.
+- Scan profiling (36.3M tokens on full) showed 79% of tokens are query
+  terms, so the per-doc dedup arrays (last_doc/blast, 4.5 MB persistent,
+  two random accesses per hit) moved OUT of the scan: the partition runs
+  are ascending, so adjacent-duplicate docids are dropped during stream
+  encode instead. Log volume grows ~36% (transient); scan hot loop sheds
+  two dependent loads per hit.
+- Bigram probing is gated by a first-term bitset (a term that never starts
+  a query bigram skips the pair-table walk).
 - Dead-code trim (pre-fusion set-op helpers) for the S axis.
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match.
 - Run: PENDING
