@@ -174,17 +174,34 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
 
         # ── bidirectional Dijkstra ───────────────────────────────────────────
         while hf and hb:
-            # termination: lower bound on any path through meeting point
+            # Remove stale heap heads before evaluating the stopping bound.
+            # This keeps the bound tight and avoids expanding from an obsolete
+            # (artificially small) frontier distance.
+            while hf:
+                top = hf[0]
+                top_d = top // n
+                if top_d == df[top - top_d * n]:
+                    break
+                _pop(hf)
+            while hb:
+                top = hb[0]
+                top_d = top // n
+                if top_d == db[top - top_d * n]:
+                    break
+                _pop(hb)
+            if not hf or not hb:
+                break
+
             hf_d = hf[0] // n
             hb_d = hb[0] // n
             if hf_d + hb_d >= mu:
                 break
 
-            # expand from the direction with the smaller current frontier
             if hf_d <= hb_d:
                 # ── forward step ─────────────────────────────────────────────
-                x, u = divmod(_pop(hf), n)
-                if x > df[u]: continue          # stale entry
+                entry = _pop(hf)
+                x = entry // n
+                u = entry - x * n
                 a = fp[u];  b = fp[u + 1]
                 for j in range(a, b):
                     v = fc[j];  y = x + fw[j]
@@ -196,8 +213,9 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
                         if c < mu: mu = c
             else:
                 # ── backward step ─────────────────────────────────────────────
-                x, u = divmod(_pop(hb), n)
-                if x > db[u]: continue          # stale entry
+                entry = _pop(hb)
+                x = entry // n
+                u = entry - x * n
                 a = rp[u];  b = rp[u + 1]
                 for j in range(a, b):
                     v = rc[j];  y = x + rw[j]
