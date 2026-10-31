@@ -186,4 +186,28 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   queries; stream-op volume (~300 M entries) is untouched.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match; local peak RSS 322.6 MB.
+- Run: run-955d721e4219 - PASS: T=0.744 s, M=140.2 MB, S=1079, K=10.43,
+  **50.88 pts**. T inside the +/-8% board noise band; M unmoved (140.3 ->
+  140.2), which rules out thread stacks and the offset table as the memory
+  term and points at allocator behaviour (glibc per-thread arenas) on the
+  12-thread scoring box.
+
+## Step 13: pair-log scan + counting-sort partition + arena cap (v16, this push)
+
+- The corpus scan no longer keeps ~93k per-term Vec<u32> per thread (12 x
+  93k Vec headers ~ 27 MB plus growth slack). Each scan thread appends
+  (key, docid) pairs to one sequential log; a stable counting-sort
+  partition by key (per-thread counts, key-major prefix) groups them, and
+  each merge thread encodes its term/bigram range straight from the
+  partitioned runs with a one-shot reserve (no doubling slack).
+- Dedup stays in the scan (last-docid arrays, 4.5 MB); partitioned runs
+  are ascending by construction (stripes are contiguous doc ranges, the
+  partition is stable), so global order needs no sort.
+- SEG 8 -> 16 keeps the transient logs+partition ~16 MB.
+- Dockerfile: ENV MALLOC_ARENA_MAX=4 (runtime stage). Board M sat at ~2x
+  the live data size; glibc's default 8x-ncpu arenas fragment the build
+  across mmap'd heaps on 12 threads. Allocations here are bulk, so arena
+  contention is negligible.
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match.
 - Run: PENDING
