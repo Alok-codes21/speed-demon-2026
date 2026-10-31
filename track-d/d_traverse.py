@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+"""
+Track D (Traverse) — Python 3.13, standard library only.
+
+Python-side optimizations, guided by ideas in the supplied reference repository:
+- Bidirectional Dijkstra with a lower-bound termination condition.
+- Endpoint-sorted query processing while preserving original output order.
+- Self-loop filtering during CSR construction.
+- Duplicate-query caching and low-degree source/target shortcuts.
+- Compact forward/reverse CSR graphs and touched-node distance resets.
+- Local bindings in the shortest-path hot loop and buffered output.
 """
 d_traverse.py  ·  Speed-Demon | Track-D  ·  Optimised Submission
 ═══════════════════════════════════════════════════════════════════════════════
