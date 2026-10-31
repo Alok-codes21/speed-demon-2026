@@ -447,7 +447,7 @@ struct ScanRes {
     bposts: Vec<Vec<u32>>, // per bid
     last_doc: Vec<u32>,
     blast: Vec<u32>,
-    offs: Vec<u64>,
+    offs: Vec<u32>,
     ndocs: u32,
 }
 
@@ -469,7 +469,7 @@ fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes)
         let line_start = i;
         // skip id field + tab
         i = find_byte(buf, i, b'\t') + 1;
-        offs.push(line_start as u64);
+        offs.push(line_start as u32);
         // tokenize until the newline (a separator itself)
         let line_end = find_byte(buf, i, b'\n');
         scan_tokens_scalar(buf, i, line_end, q, posts, bposts, last_doc, blast, docid);
@@ -618,6 +618,48 @@ fn diff_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
         if cur.v != x {
             out.push(x);
         }
+    }
+}
+
+/// intersect two varint streams directly into out (cleared first)
+fn intersect_ss(mut x: Cur, mut y: Cur, out: &mut Vec<u32>) {
+    out.clear();
+    while x.v != NONE && y.v != NONE {
+        if x.v < y.v {
+            x.adv();
+        } else if y.v < x.v {
+            y.adv();
+        } else {
+            out.push(x.v);
+            x.adv();
+            y.adv();
+        }
+    }
+}
+
+/// union two varint streams directly into out (cleared first)
+fn union_ss(mut x: Cur, mut y: Cur, out: &mut Vec<u32>) {
+    out.clear();
+    while x.v != NONE && y.v != NONE {
+        if x.v < y.v {
+            out.push(x.v);
+            x.adv();
+        } else if y.v < x.v {
+            out.push(y.v);
+            y.adv();
+        } else {
+            out.push(x.v);
+            x.adv();
+            y.adv();
+        }
+    }
+    while x.v != NONE {
+        out.push(x.v);
+        x.adv();
+    }
+    while y.v != NONE {
+        out.push(y.v);
+        y.adv();
     }
 }
 
@@ -776,7 +818,7 @@ fn main() {
         .collect();
     let mut tstreams: Vec<Stream> = (0..n_terms).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
     let mut bstreams: Vec<Stream> = (0..n_bids).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
-    let mut offs: Vec<u64> = Vec::with_capacity(1_200_000);
+    let mut offs: Vec<u32> = Vec::with_capacity(1_200_000);
     let tsz = n_terms.div_ceil(nthreads);
     let bsz = n_bids.max(1).div_ceil(nthreads);
     for seg in 0..SEG {
@@ -787,7 +829,10 @@ fn main() {
                 if lo >= hi {
                     continue;
                 }
-                scope.spawn(move || scan_into(dr, lo, hi, qr, stp));
+                std::thread::Builder::new()
+                    .stack_size(256 << 10)
+                    .spawn_scoped(scope, move || scan_into(dr, lo, hi, qr, stp))
+                    .unwrap();
             }
         });
         // global doc offsets, in doc order (stripes are contiguous doc ranges)
@@ -805,7 +850,9 @@ fn main() {
                 let bc = b_it.next().unwrap_or(&mut []);
                 let tbase = m * tsz;
                 let bbase = m * bsz;
-                scope.spawn(move || {
+                std::thread::Builder::new()
+                    .stack_size(256 << 10)
+                    .spawn_scoped(scope, move || {
                     for (l, st8) in tc.iter_mut().enumerate() {
                         let tid = tbase + l;
                         for sc in st_ref.iter() {
@@ -824,7 +871,8 @@ fn main() {
                             }
                         }
                     }
-                });
+                    })
+                    .unwrap();
             }
         });
         // release segment postings but keep capacity for the next segment
@@ -835,7 +883,7 @@ fn main() {
         }
     }
     drop(states);
-    offs.push(mlen as u64);
+    offs.push(mlen as u32);
     eprintln!("[t +{:6.3}] scan+merge", t0.elapsed().as_secs_f64());
 
     let st = State { q: &q, docs: &docs, offs: &offs, tstreams: &tstreams, bstreams: &bstreams };
@@ -853,7 +901,10 @@ fn main() {
             }
             let hi = (lo + chunk).min(nq);
             let stc = st;
-            hs.push(scope.spawn(move || eval_range(&stc, lo, hi)));
+            hs.push(std::thread::Builder::new()
+                .stack_size(256 << 10)
+                .spawn_scoped(scope, move || eval_range(&stc, lo, hi))
+                .unwrap());
         }
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
@@ -872,7 +923,7 @@ fn main() {
 struct State<'a> {
     q: &'a Queries,
     docs: &'a Map,
-    offs: &'a [u64],
+    offs: &'a [u32],
     tstreams: &'a [Stream],
     bstreams: &'a [Stream],
 }
@@ -909,8 +960,17 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
     for qi in lo..hi {
         match &st.q.qs[qi] {
             Q::Bool(bq) => {
-                decode_into(st.tlist(bq.tids[0]), &mut a);
-                for k in 1..bq.n as usize {
+                let mut k0 = 1usize;
+                if bq.n >= 2 && bq.ops[0] == 0 {
+                    intersect_ss(Cur::new(st.tlist(bq.tids[0])), Cur::new(st.tlist(bq.tids[1])), &mut a);
+                    k0 = 2;
+                } else if bq.n >= 2 && bq.ops[0] == 1 {
+                    union_ss(Cur::new(st.tlist(bq.tids[0])), Cur::new(st.tlist(bq.tids[1])), &mut a);
+                    k0 = 2;
+                } else {
+                    decode_into(st.tlist(bq.tids[0]), &mut a);
+                }
+                for k in k0..bq.n as usize {
                     let l = st.tlist(bq.tids[k]);
                     match bq.ops[k - 1] {
                         0 => {
