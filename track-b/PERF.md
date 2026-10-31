@@ -585,3 +585,22 @@ synthetic single-term suite: 0 matches instead of 144).
   Kept: the 4-byte slots cost nothing and help on some workers. The S count
   came back 631, not the 617 the line count suggests - the harness counts
   differently; noted for future diets.
+
+## Step 31: adopt Lex's scan upgrades (v32, this push)
+
+- Lex (Aryanxp1/speed-demon-2026 @ d32429cd, public, MIT - same Raptors
+  license) took the Cache Me base further: Terms::find returns a NONE
+  sentinel so the scan's hot callback returns early on non-term tokens
+  (their per-token work - block-flush check, new-to-document mark, pending
+  bit, bucket add - is all skipped); list recording uses predictable
+  branches instead of branchless masks; bucket chunks shrink to 32 KB
+  with M_MMAP_THRESHOLD to match; integer formatting is allocation-free
+  (a fixed [u32; 10] for the first ids, a push_u64 instead of write!).
+- Lex's board best on this exact commit: T=0.2123 s (70.37 pts) vs our
+  0.2446 - the fastest verified public code in this engine family.
+- On top we keep: the MIT header (now crediting both teams), the insert()
+  growth guard (a full table's probe loop must never run), and the CR
+  strip; their --data/--out dev scaffolding is removed.
+- Local gates: synthetic/sample/full all byte-exact (sha256
+  f86973c2...80927); local wall 2.63 s vs v29's 2.81-2.89 s.
+- Run: run-pending
