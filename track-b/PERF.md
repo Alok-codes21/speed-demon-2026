@@ -381,4 +381,18 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Hash slot table sized to the actual term count (2x next pow2) instead of
   queries.txt/8: 2 MB -> 1 MB.
 - Expected: M back to ~58 MB minus 1 MB, T back to ~0.25-0.26.
+- Run: run-dac80b3eda70 - PASS: T=0.258 s, M=59.6 MB, S=634, **67.84 pts**.
+  Within noise of the v21 baseline (T 0.252-0.261, M 58.2-59.9 across runs);
+  the borrowed-operand + slot changes are neutral, kept for cleanliness.
+  Three micro-optimisation pushes netted zero: the configuration was already
+  at its local optimum and board T noise (+/-4%) exceeds every micro-change.
+
+## Step 22: thread count from the machine, floor 12 (v25)
+
+- THREADS was a hardcoded 12. The scoring box is an i5-13500 (6P+8E, 20
+  logical); if the harness cpuset exposes more than 12 CPUs, the scan is
+  leaving parallelism unused. Now available_parallelism with a floor of 12
+  (DOC_BITS=15 caps a share at 32,768 docs; the floor preserves the current
+  doc ceiling). SD_THREADS overrides for local testing.
+- Verified byte-exact at 8 and 12 threads locally (spec/sample/full hash).
 - Run: run-pending
