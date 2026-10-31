@@ -90,3 +90,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: Dockerfile build back to -O3 (step-20 -O2 scored 74.662 < 74.671). c_join.cpp unchanged since step 17.
 - Board T_s/M/S/points: T_s=0.046240 M=10100736 S=311 points=74.530 (same code/config as best run-a47c62b1a994; run noise band 74.53-74.67)
 - Run: run-a00fc5d08e9c
+
+
+## Step 22 (v38 S-golf)
+- Change: statement-count golf of the step-17 batch-16 code, same algorithm and outputs: dropped dead open-failure checks (regions + records), folded UNMATCHED/CK init, folded the quoted_end escape counter into one declaration, intern_name for-header loop, inlined the single-use setbit helper into bflush, if(zm) comma-chain in the regions SWAR parse, hash_long now hashes the raw CSV span instead of the decoded name (exact for distinct-count: CSV escaping is injective, same name => same raw bytes; verified on all four datasets).
+- Source: 304 -> 288 scc code lines (board S expected 311 -> ~295).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ bench parity vs v31a (min 0.302 vs 0.308, hot loop unchanged).
+- Board T_s/M/S/points: pending
+- Run: pending

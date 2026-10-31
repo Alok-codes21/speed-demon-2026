@@ -41,15 +41,12 @@ static uint64_t *NT;
 // slot and no value is ever pending). A per-thread cache measured useless:
 // names have no temporal locality (2% hit rate).
 static inline uint32_t intern_name(uint64_t h) {
-  uint32_t idx = h & HM;
-  while (true) {
+  for (uint32_t idx = h & HM;; idx = (idx + 1) & HM) {
     uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);
     if (k == 0)
       k = __sync_val_compare_and_swap(&NT[idx], 0, h);
-    if (k == h || k == 0) break; // k==0: the CAS above installed h
-    idx = (idx + 1) & HM;
+    if (k == h || k == 0) return idx; // k==0: the CAS above installed h
   }
-  return idx;
 }
 
 // 8 bytes with the high (8 - n) bytes zeroed, never reading past end.
@@ -82,11 +79,7 @@ static inline uint64_t hs(const char *s, uint32_t len, const char *end) {
 // unescape buffer is needed. "" decodes to one quote. Rare on real data.
 static uint64_t hash_long(const char *s, const char *e) {
   uint64_t h = 1469598103934665603ULL;
-  while (s < e) {
-    uint8_t c = (uint8_t)*s++;
-    s += (c == '"' && s < e && *s == '"');
-    h = (h ^ c) * 1099511628211ULL;
-  }
+  while (s < e) h = (h ^ (uint8_t)*s++) * 1099511628211ULL;
   return h | (1ULL << 63);
 }
 
@@ -94,7 +87,6 @@ static uint64_t hash_long(const char *s, const char *e) {
 
 void load_regions(const std::string &path) {
   int fd = open(path.c_str(), O_RDONLY);
-  if (fd < 0) return;
   struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   const char *p = data, *end = data + st.st_size;
@@ -108,15 +100,12 @@ void load_regions(const std::string &path) {
     if (p + 16 <= end) {
       uint64_t v, x; memcpy(&v, p, 8); x = v ^ 0x2C2C2C2C2C2C2C2CULL;
       zm = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
-      if (zm) {
-        n = __builtin_ctzll(zm) >> 3;
-        v <<= 64 - 8 * n; // left-align digits in the 8 lanes
-        // digit lanes only, no borrows:
-        v -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * n));
-        v = v * 2561 >> 8;
-        v = (v & 0x00FF00FF00FF00FFULL) * 6553601 >> 16;
+      if (zm) n = __builtin_ctzll(zm) >> 3,
+        v <<= 64 - 8 * n, // left-align digits in the 8 lanes
+        v -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * n)),
+        v = v * 2561 >> 8,
+        v = (v & 0x00FF00FF00FF00FFULL) * 6553601 >> 16,
         rid = (uint32_t)((v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);
-      }
     }
     while (zm == 0 && p[n] != ',') rid = rid * 10 + (p[n++] - '0'); // tail
     uint32_t w, key = (memcpy(&w, p + n + 1, 4), __builtin_bswap32(w) >> 8);
@@ -126,8 +115,7 @@ void load_regions(const std::string &path) {
     if (rid < 1000000) R2C[rid] = (uint8_t)slot_of[h];
     p += n + 5;
   }
-  UNMATCHED = NC++;
-  CK[UNMATCHED] = 0x5F0000; // '_' sorts after every [A-Z] code
+  CK[UNMATCHED = NC++] = 0x5F0000; // '_' sorts after every [A-Z] code
   munmap((void *)data, st.st_size);
   close(fd);
 }
@@ -150,8 +138,7 @@ static inline const char *find_quote(const char *s, const char *end) {
 
 static __attribute__((always_inline)) inline const char *
 quoted_end(const char *s, const char *end, uint32_t *esc) {
-  *esc = 0;
-  const char *q = find_quote(s, end);
+  const char *q = (*esc = 0, find_quote(s, end));
   // "" decodes to one data quote
   while (__builtin_expect(q != nullptr && q[1] == '"', 0)) {
     (*esc)++;
@@ -164,14 +151,14 @@ struct Worker {
   const char *start, *end; Stats stats[MAX_C];
 };
 
-static inline void setbit(uint32_t nid, uint8_t c) {
-  uint64_t *pw = &CB[c][nid >> 6], mask = 1ULL << (nid & 63);
-  if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0) __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
-}
 // flush up to n buffered bitsets: prefetch all lines, then set
 static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
   for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
-  for (uint32_t j = 0; j < n; j++) setbit(bnid[j], bc[j]);
+  for (uint32_t j = 0; j < n; j++) {
+    uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
+    if ((__atomic_load_n(pw, __ATOMIC_RELAXED) & mask) == 0)
+      __atomic_fetch_or(pw, mask, __ATOMIC_RELAXED);
+  }
 }
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -255,7 +242,6 @@ int main(int argc, char **argv) {
   NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
-  if (fd < 0) return 1;
   struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   madvise((void *)data, st.st_size, MADV_SEQUENTIAL); fend = data + st.st_size;
@@ -305,8 +291,7 @@ int main(int argc, char **argv) {
     if (g.count == 0) continue;
     uint32_t d = 0;
     for (uint32_t i = 0; i < BITS_W; i++) d += __builtin_popcountll(CB[c][i]);
-    char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8),
-                    (char)CK[c], 0};
+    char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
     const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
     fprintf(out, "%s %zu %zu ", nm, (size_t)g.count, (size_t)g.id_sum);
     pr_money(out, g.amount_sum, ' ');
