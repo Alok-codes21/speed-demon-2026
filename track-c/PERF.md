@@ -270,11 +270,17 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: includes de-consolidated back to 10 individual headers (+4 code lines) - bits/stdc++.h pulls <iostream>, whose static-init pages cost +0.83MB RSS (measured: tiny-dataset maxrss 6.97 vs 6.14MB). parse_chunk marked __attribute__((aligned(64))) (0 lines): without it this exact source landed on an unlucky hot-loop layout at +2% T local; with it T is flat vs v72 (153.2 vs 152.9ms median, 16 interleaved reps).
 - M floor analysis (board ~9.9MB): tables 5.9MB (NT 1 + R2C 1 + CB ~3.9 across three 2MB huge pages) + container/runtime baseline ~3.5MB + stats arrays 0.26MB. This step removes the ~0.8MB libstdc++/iostream chunk -> expected board M ~9.0-9.1MB. 8.0MB is NOT reachable T-neutrally: remaining cuts are dense-id intern (measured dead for T), CB sparsification or dropping THP (TLB-miss T risk), and a libstdc++-free build (~0.2MB for +7 S lines, net wash). Each remaining 0.1-0.2MB costs more in T or S than the M term pays.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓ T flat vs v72 ✓ board S 218 (212 + Dockerfile 6).
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.042462 (fastest yet, T flat ✓) M=10698752 S=218 points=76.362958 - M jitter (9.86-10.70 across identical-code runs) swamps the 0.83MB bits effect on the board; the cut stays (free) but board M is environmental within +-0.5MB. Best stays run-b98595b62acb (76.535). Commit 62ef656.
+- Run: run-89b90754fd25
 
 ## Step 49 (v95b branch-free second word in the name hash)
 - Change: hs() loads w1 unconditionally with the byte count clamped by cmov (len > 8 ? len - 8 : 0) instead of branching on len > 8 - name lengths straddle 8 often enough that the branch mispredicted; the extra L1 load is cheaper. Local: -4.4% median vs v94b (16 interleaved pairs).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓. Measured and rejected in the same round: SSE length-scan + SWAR digits for id/region/amount (+14% local - serial scan->convert chain loses to the simple digit loop on this box).
+- Board T_s/M/S/points: pending
+- Run: pending
+
+## Step 50 (v96 one-deep intern/bitset pipeline)
+- Change: intern_name + bitset RMW for record i execute at the start of record i+1's iteration, giving the NT/CB prefetches a full record of latency distance (the board regime is 12 threads against L3/DRAM; a 1-vCPU sandbox cannot measure it). Local flat (+1%, noise) vs v95b. Board is the judge; revert if it does not beat the best.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
