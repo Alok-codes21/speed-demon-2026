@@ -213,3 +213,8 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat (0.1522 vs 0.1560, noise).
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 41 (revert to v58; step-40 PREFETCHW regressed on board)
+- Change: c_join.cpp back to v58. Step-40 (write-intent prefetch on NT + CB lines) scored T_s=0.0448 M=9.9MB S=304 points=75.052 (run-ae31438a7699, -0.34 vs run-7786ec817115, outside the v58 noise band 75.22-75.39). Mechanism: >90% of NT probes are read-only hits; PREFETCHW turns them into exclusive grabs and increases coherence traffic. PREFETCHW dead for read-mostly lines.
+- Board T_s/M/S/points: pending (same code as steps 37/39)
+- Run: pending
