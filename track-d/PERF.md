@@ -5,4 +5,5 @@ Every step from the reference to your final version, each with the live-board ru
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
-| 1 | | | | | |
+| 1 | Restored Rust implementation (teammate's step-15 design, MIT-licensed upstream manusingh090/speed-demon-2026-entry, adapted) | run-98555c37390f | 0.176 | 66.6 | 68.64 |
+| 2 | Crash fix (held): BFS-ahead helper prefetch used link[first[u]] with first[u]==m for zero-outdegree nodes; now computes the prefetch address with wrapping_add. Behavior on valid graphs unchanged: byte-identical output on tiny/sample/full seed-1 gates. Local-only so far, no board run yet. | | | | |
