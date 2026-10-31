@@ -1,19 +1,10 @@
 # Track D: Traverse
 
-This submission is implemented in **Python 3.13 using only the standard library**. The supplied reference repository, [manusingh090/speed-demon-2026-entry](https://github.com/manusingh090/speed-demon-2026-entry), is used only as an optimization reference; its Rust implementation is not included or used at runtime.
+Python 3.13, standard library only. The supplied repository is used only as an optimization reference; its Rust code is not used at runtime.
 
-## Python approach
+- Two-pass memory-mapped graph parsing avoids a huge token list and temporary edge arrays.
+- Forward and reverse CSR use 32-bit node and weight arrays.
+- Bidirectional Dijkstra uses a lower-bound stopping rule.
+- Duplicate-query caching, endpoint shortcuts, and touched-node resets reduce repeated work.
 
-- Build forward and reverse compressed sparse row (CSR) adjacency.
-- Answer queries with bidirectional Dijkstra and a lower-bound stopping rule.
-- Process queries in endpoint-sorted order to improve locality, then write answers in their original input order.
-- Skip self-loops, cache duplicate query answers, and use low-degree shortcuts.
-- Reset only nodes touched by each search and buffer the output.
-
-## Dependencies
-
-None. Python standard library only.
-
-## Validation status
-
-The Python implementation has been restored and updated. The official sample/full output hash checks and leaderboard benchmark still need to be run; no runtime or rank improvement is claimed until those checks are measured.
+Official output-hash validation and leaderboard timing are still pending.
