@@ -132,15 +132,15 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 27 (revert to step-23 code)
 - Change: c_join.cpp back to v39 (step 23: batch-16 code + MADV_HUGEPAGE); steps 24-26 all board-measured regressions or flat-and-costly.
-- Board T_s/M/S/points: T_s=0.045282 M=10076160 S=296 points=74.929 - re-run of step-23 code, inside the historical 74.53-74.67..75.2 noise band
-- Run: run-bc313abcd332
+- Board T_s/M/S/points: no board run of this exact commit observed.
+- Run: (none)
 
 
 ## Step 28 (v46 bitset batch 32)
 - Change: v39 + bitset write batch 16 -> 32 (more MLP in bflush). Batch 8 was flat, 16 was the big win; 32 is the untested end of the ring.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
-- Board T_s/M/S/points: run never landed (board queue dropped or lost the commit-82f5421 run; >35 min overdue, later commits scored around it). Batch 8 was flat, batch 16 the win; batch 32 deprioritized.
-- Run: (none)
+- Board T_s/M/S/points: T_s=0.045282 M=10076160 S=296 points=74.929 - FLAT, inside the v39 noise band (74.93-75.21). Batch 8 flat, batch 16 the win, batch 32 flat: batch 16 confirmed as the sweet spot.
+- Run: run-bc313abcd332
 
 
 ## Step 29 (fully-static link, step-23 code)
@@ -153,5 +153,11 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 30 (v51 batched intern probes)
 - Change: name interning joins the bitset batch: the parse loop now buffers name_hash (was: inline intern_name per record with a serial dependent probe chain); bflush prefetches all 16 first-probe NT slots, then runs the 16 independent intern probe chains back-to-back so their L2 latencies overlap, then prefetches CB lines with the REAL nid (the parse-time CB prefetch guessed h&HM, wrong for displaced entries) and sets bits. Same trick that won big on bitsets (step 21/22), applied to the 1MB intern table's ~4-probe chains. Dockerfile reverted to dynamic (step-29 static was flat).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local 1-CPU wall is latency-blind; board is the measurement.
+- Board T_s/M/S/points: T_s=0.045224 M=9740288 S=302 points=75.027 - FLAT on T (inside the v39 noise band), and the +7 S lines cost ~0.02 pts net. Intern batching unproven; reverted to v39 (step 31).
+- Run: run-c0c1cc23b9a2
+
+
+## Step 31 (revert to step-23 code)
+- Change: c_join.cpp back to v39 (step 23); step-30 intern batching was board-flat with a small S cost.
 - Board T_s/M/S/points: pending
 - Run: pending

@@ -151,14 +151,8 @@ struct Worker {
   const char *start, *end; Stats stats[MAX_C];
 };
 
-// flush up to n buffered records: batch-intern the name hashes (prefetch all
-// first-probe slots, then run 16 independent probe chains so their latencies
-// overlap), then prefetch all bitset lines and set the bits.
-static inline void bflush(uint64_t *bh, uint8_t *bc, uint32_t n) {
-  for (uint32_t j = 0; j < n; j++)
-    if (bh[j]) __builtin_prefetch(&NT[bh[j] & HM]);
-  uint32_t bnid[16];
-  for (uint32_t j = 0; j < n; j++) bnid[j] = bh[j] ? intern_name(bh[j]) : 0;
+// flush up to n buffered bitsets: prefetch all lines, then set
+static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
   for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
   for (uint32_t j = 0; j < n; j++) {
     uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], mask = 1ULL << (bnid[j] & 63);
@@ -173,7 +167,7 @@ void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
-  uint64_t bh[16]; uint32_t nb = 0; uint8_t bc[16];
+  uint32_t bnid[16], nb = 0; uint8_t bc[16];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
     uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
@@ -220,10 +214,11 @@ void *parse_chunk(void *arg) {
     if (cents > s.amount_max)
       s.amount_max = cents;
     s.name_bytes += name_len; s.note_bytes += note_len;
-    bh[nb] = name_len ? name_hash : 0; bc[nb] = c;
-    if (++nb == 16) bflush(bh, bc, 16), nb = 0;
+    uint32_t nid = name_len ? intern_name(name_hash) : 0;
+    bnid[nb] = nid; bc[nb] = c;
+    if (++nb == 16) bflush(bnid, bc, 16), nb = 0;
   }
-  bflush(bh, bc, nb);
+  bflush(bnid, bc, nb);
   return nullptr;
 }
 
