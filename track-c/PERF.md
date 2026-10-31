@@ -443,4 +443,8 @@ Every step from the reference to your final version, each with the live-board ru
   back to back - L3 latency overlaps across the batch (classic MLP).
   Local: +8% on 1 vCPU (single-core OoO already hides the latency); the
   runner's longer L3 latency + 12-thread sharing is what this targets.
+- Run: run-35a89e0dc46a. Board: T 0.040634, M 9.9 MB, S 248, 76.745 points.
+  LOST vs 76.954: T parity within noise, so the +8 buffered slots of code
+  cost S with no T win - intern L3 latency was already hidden. Reverted.
+## Step 67: revert to step-61 v111 (best-known, 76.954)
 - Run: PENDING

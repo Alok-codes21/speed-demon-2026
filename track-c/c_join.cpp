@@ -3,8 +3,6 @@
 // mmap records.csv -> 12 threads parse disjoint granules at record boundaries
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
 // ids in a lock-free hash table; each country keeps a bitset over name ids.
-// The intern is batched 16-deep: all slots prefetched before any probe, so
-// L3 latency overlaps across the batch instead of stalling each record.
 
 #include <algorithm>
 #include <cstdint>
@@ -157,8 +155,7 @@ struct Worker {
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  uint32_t bnid[16], nb = 0, bc[16], bs[16];
-  uint64_t bh[16];
+  uint32_t bnid[16], nb = 0, bc[16];
   // flush n buffered bitsets: prefetch all lines, then set
   auto bf = [&](uint32_t n) {
     for (uint32_t j = 0; j < n; j++)
@@ -167,14 +164,6 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       uint64_t *pw = &CB[bc[j]][bnid[j] >> 6], m = 1ULL << (bnid[j] & 63);
       (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
     }
-  };
-  // batched intern: prefetch the 16 slots, then probe them back to back
-  auto ibf = [&](uint32_t n) {
-    for (uint32_t j = 0; j < n; j++)
-      __builtin_prefetch(&NT[bs[j]]);
-    for (uint32_t j = 0; j < n; j++)
-      bnid[j] = bh[j] ? intern_name(bh[j], bs[j]) : 0;
-    bf(n);
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
@@ -190,7 +179,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
                         ? (esc | (name_len > 25) ? hl(s, e - 2)
                                                  : hs(s, name_len, fend))
                         : 0;
-      slot = nh & HM;
+      __builtin_prefetch(&NT[slot = nh & HM]);
       QF(note_len); // note: only its unescaped byte length is needed
       // region + amount from one 32B delimiter window; scalar on long/tail
       uint32_t reg, mc, mn, c3, nl, ae, a0;
@@ -216,11 +205,11 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_min = cents < st.amount_min ? cents : st.amount_min;
       st.amount_max = cents > st.amount_max ? cents : st.amount_max;
       st.name_bytes += name_len, st.note_bytes += note_len;
-      bh[nb] = nh, bs[nb] = slot, bc[nb] = c;
-      ++nb == 16 && (ibf(16), nb = 0);
+      bnid[nb] = name_len ? intern_name(nh, slot) : 0, bc[nb] = c;
+      ++nb == 16 && (bf(16), nb = 0);
     }
   }
-  ibf(nb);
+  bf(nb);
   return nullptr;
 }
 
