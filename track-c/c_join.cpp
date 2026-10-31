@@ -38,8 +38,8 @@ static uint64_t *NT;
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
 // slot and no value is ever pending). A per-thread cache measured useless:
 // names have no temporal locality (2% hit rate).
-static inline uint32_t intern_name(uint64_t h) {
-  for (uint32_t idx = h & HM;; idx = (idx + 1) & HM)
+static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
+  for (;; idx = (idx + 1) & HM)
     // k==0 below: our CAS installed h into an empty slot
     if (uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);
         (k = k ? k : __sync_val_compare_and_swap(&NT[idx], 0, h)) == h || !k)
@@ -189,7 +189,8 @@ void *parse_chunk(void *arg) {
       } else
         p++;
 
-      __builtin_prefetch(&NT[name_hash & HM]);
+      uint32_t slot = name_hash & HM;
+      __builtin_prefetch(&NT[slot]);
       // note: only its unescaped byte length is needed
       uint32_t note_len = 0;
       if (*p == '"') {
@@ -203,12 +204,12 @@ void *parse_chunk(void *arg) {
       // region, amount
       uint32_t reg_id = num(p, ',');
       uint8_t c = (reg_id < 1000000) ? R2C[reg_id] : 255;
-      __builtin_prefetch(&CB[c == 255 ? 0 : c][(name_hash & HM) >> 6]);
+      __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
       int64_t neg = *p == '-';
       p += neg;
       int64_t cents = num(p, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0');
       p += 2, cents = neg ? -cents : cents; // two fraction digits consumed
-      p += (p < end && *p == '\r'), p += (p < end && *p == '\n');
+      p += p < end ? 1 + (*p == '\r') : 0; // "\r\n" or "\n", bare at eof
 
       // join and aggregate
       c = c == 255 ? UNMATCHED : c;
@@ -217,7 +218,7 @@ void *parse_chunk(void *arg) {
       s.amount_min = cents < s.amount_min ? cents : s.amount_min;
       s.amount_max = cents > s.amount_max ? cents : s.amount_max;
       s.name_bytes += name_len, s.note_bytes += note_len;
-      uint32_t nid = name_len ? intern_name(name_hash) : 0;
+      uint32_t nid = name_len ? intern_name(name_hash, slot) : 0;
       bnid[nb] = nid, bc[nb] = c;
       if (++nb == 16)
         bflush(bnid, bc, 16), nb = 0;

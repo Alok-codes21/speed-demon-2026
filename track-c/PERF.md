@@ -222,5 +222,11 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 42 (v68 source golf for the S axis; 304 -> 247 board lines)
 - Change: same algorithm, rewritten so clang-format emits fewer physical lines: ternaries/comma-exprs for short ifs (min/max stats, region assign, pr_money sign), merged decls, num() helper for the three digit loops, scalar regions parse replaces the SWAR block, if-init in intern_name, granule counter folded into the for, dead munmap/close dropped, <emmintrin.h> folded into <immintrin.h>. Formatted scc 240 + Dockerfile 7 = 247 board S (was 304). One measured trap: load8 as a variable-size memcpy ternary cost +3% local (real memcpy call on the hot path) - kept the explicit branch there.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v58 (+0.3% med, noise).
-- Board T_s/M/S/points: pending (expected S 304->247 = +0.68 pts at constant T/M)
+- Board T_s/M/S/points: T_s=0.043806 M=9895936 S=247 points=75.956588 - NEW BEST (+0.568 over run-7786ec817115; S 304->247 confirmed; T in-band 0.0438). Commit 7ba6c635.
+- Run: run-ebe06f6d4f4d
+
+## Step 43 (v69b record-tail + slot-hoist micro-cuts)
+- Change: line-ending skip as one guarded add (p += p < end ? 1 + (*p == '\r') : 0) replacing two conditional bumps; name slot = name_hash & HM hoisted and passed into intern_name (kills two re-ANDs per record); an AVX-512BW 64B find_quote variant measured +9% SLOWER on the shared vCPU (license downclock) and was dropped. Stacked on step-42 golf.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing -6.0% median / -6.7% min vs v68 (15 interleaved pairs, 1-vCPU sandbox).
+- Board T_s/M/S/points: pending
 - Run: pending
