@@ -40,7 +40,7 @@ fn map_file(path: &str, pad: usize) -> (*const u8, usize) {
     }
 }
 
-struct Map(*const u8, usize);
+struct Map(*const u8);
 unsafe impl Sync for Map {}
 impl Map {
     #[inline(always)]
@@ -271,7 +271,6 @@ enum Q {
 }
 
 struct Queries {
-    pfx: Vec<u64>,
     has_len1: bool,
     qs: Vec<Q>,
     phr_tids: Vec<u32>,
@@ -341,18 +340,14 @@ fn parse_queries(data: &[u8]) -> Queries {
     let n_bids = bigrams.n;
     // Two-byte folded-prefix filter: rejects most non-query tokens with one
     // L1-resident bit test before any hashing happens.
-    let mut pfx = vec![0u64; 1024];
     let mut has_len1 = false;
     for tid in 0..n_terms as u32 {
         let tb = terms.term_bytes(tid);
-        if tb.len() >= 2 {
-            let k = ((tb[0] | 0x20) as usize) << 8 | (tb[1] | 0x20) as usize;
-            pfx[k >> 6] |= 1u64 << (k & 63);
-        } else {
+        if tb.len() < 2 {
             has_len1 = true;
         }
     }
-    Queries { qs, phr_tids, phr_bids, terms, bigrams, big1, n_terms, n_bids, pfx, has_len1 }
+    Queries { qs, phr_tids, phr_bids, terms, bigrams, big1, n_terms, n_bids, has_len1 }
 }
 
 
@@ -418,14 +413,6 @@ fn handle_token(
 #[allow(clippy::too_many_arguments)]
 // ------------------------------------------------------- AVX2 tokenizer ----
 /// Token byte classes: [a-zA-Z0-9]. 32 bytes -> 32-bit token mask.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn tok_mask32(p: *const u8) -> u32 {
-    use core::arch::x86_64::*;
-    let v = _mm256_loadu_si256(p as *const __m256i);
-    tok_mask32_v(v)
-}
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -762,8 +749,6 @@ fn decode_into(bytes: &[u8], out: &mut Vec<u32>) {
 
 // ------------------------------------------------------- sorted set ops ----
 #[inline(always)]
-
-#[inline(always)]
 fn intersect_stream(a: &[u32], l: &Stream, out: &mut Vec<u32>) {
     out.clear();
     if (a.len() as u64) * 24 < l.n as u64 {
@@ -925,7 +910,7 @@ fn main() {
     eprintln!("[t +{:6.3}] parse", t0.elapsed().as_secs_f64());
     // corpus
     let (mp, mlen) = map_file(&format!("{data}/docs.txt"), 64);
-    let docs = Map(mp, mlen);
+    let docs = Map(mp);
 
     eprintln!("[t +{:6.3}] mmap", t0.elapsed().as_secs_f64());
     let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).min(16);
@@ -1069,6 +1054,23 @@ fn main() {
         // release segment logs but keep capacity for the next segment
         for s2 in states.iter_mut() {
             s2.log.clear();
+        }
+        if seg == 0 {
+            // Pre-size every stream from segment 0: postings are ~uniform across
+            // segments, so final size ~= seg-0 size x SEG. One exact reserve per
+            // stream kills the incremental-growth realloc churn (thousands of
+            // interleaved small Vecs copying + freeing into 2 glibc arenas is
+            // what inflates the board's peak RSS far past live data).
+            for st9 in tstreams.iter_mut().chain(bstreams.iter_mut()) {
+                let est = st9.buf.len() * SEG + st9.buf.len() / 16 + 64;
+                if est > st9.buf.capacity() {
+                    st9.buf.reserve_exact(est - st9.buf.capacity());
+                }
+                let ses = st9.skip.len() * SEG + st9.skip.len() / 16 + 4;
+                if ses > st9.skip.capacity() {
+                    st9.skip.reserve_exact(ses - st9.skip.capacity());
+                }
+            }
         }
     }
     drop(states);
