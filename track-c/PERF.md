@@ -613,4 +613,14 @@ Every step from the reference to your final version, each with the live-board ru
   80 T win kept, the 9 macro lines recovered. hs short-name branch kept.
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
   parallel stress stable, ASAN+UBSAN clean. Local timing parity with v139.
+- Run: S=274 (run-1ed23b437593) - structural recovery worked, 8 of the 9
+  macro lines back (v135=273). T=0.038778, inside the family cluster; pts
+  77.616 on this roll, banked best unchanged (77.884, run-95947d8b1a47).
+
+## Step 83 - v140t: 16-thread oversubscription probe
+- v140 with the parse pool widened 12 -> 16 threads. The board box's SMT
+  siblings may hide more of our latency-bound random-access stalls; 6
+  threads lost ~25% earlier, so if 16 also loses, the count settles at 12.
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
+  stress hash-stable, ASAN+UBSAN clean (sample/edge/tiny).
 - Run: PENDING
