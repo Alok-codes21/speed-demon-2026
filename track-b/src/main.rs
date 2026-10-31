@@ -39,49 +39,54 @@ static FOLD: [u8; 256] = build_fold();
 /// Query terms are 1..=32 bytes, so a longer token can never match one.
 const MAX_TERM: usize = 32;
 
-// fxhash-style rolling hash; deterministic across platforms, no libm.
+// Chunk-based token hash; deterministic across platforms, no libm.
+// Folding is byte | 0x20, which is exactly the spec's A-Z -> a-z fold on
+// token bytes ([a-z0-9A-Z] all keep or gain the 0x20 bit).
 const HMUL: u64 = 0x517c_c1b7_2722_0a95;
+const FOLD64: u64 = 0x2020_2020_2020_2020;
 
-struct Hasher {
-    h: u64,
-    block: u64,
-    shift: u32,
-}
-
-impl Hasher {
-    #[inline(always)]
-    fn new() -> Self {
-        Hasher { h: 0, block: 0, shift: 0 }
-    }
-    #[inline(always)]
-    fn byte(&mut self, b: u8) {
-        self.block |= (b as u64) << self.shift;
-        self.shift += 8;
-        if self.shift == 64 {
-            self.h = (self.h.rotate_left(5) ^ self.block).wrapping_mul(HMUL);
-            self.block = 0;
-            self.shift = 0;
-        }
-    }
-    #[inline(always)]
-    fn finish(self, len: u64) -> u64 {
-        let mut h = (self.h.rotate_left(5) ^ self.block).wrapping_mul(HMUL);
-        h = (h.rotate_left(5) ^ len).wrapping_mul(HMUL);
-        if h == 0 {
-            1 // reserve 0
-        } else {
-            h
-        }
-    }
-}
-
+/// Hashes `len` bytes at `p`. Caller guarantees 32 readable bytes at `p`
+/// (the scan buffer is padded; query words are staged through a pad).
 #[inline(always)]
-fn hash_bytes(b: &[u8]) -> u64 {
-    let mut hs = Hasher::new();
-    for &x in b {
-        hs.byte(x);
+unsafe fn hash_token_ptr(p: *const u8, len: usize, fold: bool) -> u64 {
+    let mut h = (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    if len >= 8 {
+        let mut i = 0usize;
+        while i + 8 <= len {
+            let mut c = std::ptr::read_unaligned(p.add(i) as *const u64);
+            if fold {
+                c |= FOLD64;
+            }
+            h = (h ^ c).wrapping_mul(HMUL);
+            i += 8;
+        }
+        if i < len {
+            let mut c = std::ptr::read_unaligned(p.add(len - 8) as *const u64);
+            if fold {
+                c |= FOLD64;
+            }
+            h = (h ^ c).wrapping_mul(HMUL);
+        }
+    } else {
+        let mask = (1u64 << (len * 8)) - 1;
+        let mut c = std::ptr::read_unaligned(p as *const u64) & mask;
+        if fold {
+            c |= FOLD64 & mask;
+        }
+        h = (h ^ c).wrapping_mul(HMUL);
     }
-    hs.finish(b.len() as u64)
+    let h = (h ^ (h >> 29)).wrapping_mul(HMUL);
+    if h == 0 || h == u64::MAX {
+        1 // reserved sentinels
+    } else {
+        h
+    }
+}
+
+fn hash_query_word(b: &[u8]) -> u64 {
+    let mut pad = [0u8; 40];
+    pad[..b.len()].copy_from_slice(b);
+    unsafe { hash_token_ptr(pad.as_ptr(), b.len(), false) }
 }
 
 // Term table: open addressing over single u64 entries
@@ -130,6 +135,41 @@ impl Terms {
     fn filter_test(&self, hash: u64) -> bool {
         let k = (hash as usize) & (FILTER_BITS - 1);
         (self.filter[k >> 6] >> (k & 63)) & 1 == 1
+    }
+    /// Folded-compare lookup: matches stored folded bytes against raw token
+    /// bytes folded with | 0x20 (exact on [a-z0-9A-Z]).
+    #[inline(always)]
+    fn get_folded(&self, hash: u64, ptr: *const u8, len: usize) -> Option<u64> {
+        let h32 = Self::h32(hash);
+        let mut i = (h32 as usize) & self.mask();
+        loop {
+            let e = self.slots[i];
+            if e == EMPTY {
+                return None;
+            }
+            if e as u32 == h32 {
+                let (off, l) = self.spans[((e >> 32) & 0xFF_FFFF) as usize];
+                if l as usize == len {
+                    let sb = unsafe {
+                        std::slice::from_raw_parts(self.arena.as_ptr().add(off as usize), len)
+                    };
+                    let rb = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    let mut eq = true;
+                    let mut k = 0;
+                    while k < len {
+                        if sb[k] != rb[k] | 0x20 {
+                            eq = false;
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if eq {
+                        return Some(e);
+                    }
+                }
+            }
+            i = (i + 1) & self.mask();
+        }
     }
     /// Full lookup; returns the raw entry (hash32 | id | flags).
     #[inline(always)]
@@ -229,7 +269,7 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
             let mut expect_term = true;
             for w in line[5..].split(|&b| b == b' ') {
                 if expect_term {
-                    let h = hash_bytes(w);
+                    let h = hash_query_word(w);
                     t.push(terms.insert(h, w));
                     terms.mark(h, w, FLAG_DOCS);
                 } else {
@@ -247,7 +287,7 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
             let inner = &line[8..line.len() - 1];
             let mut t: Vec<u32> = Vec::with_capacity(8);
             for w in inner.split(|&b| b == b' ') {
-                let h = hash_bytes(w);
+                let h = hash_query_word(w);
                 t.push(terms.insert(h, w));
                 terms.mark(h, w, FLAG_POS);
             }
@@ -302,8 +342,135 @@ fn next_token(data: &[u8], i: &mut usize, tb: &mut [u8]) -> usize {
     tl
 }
 
+
+// ---------------------------------------------------------------------------
+// AVX2 text scanner: classifies 32 bytes per instruction into token/separator
+// bits, then walks token runs. Folds via | 0x20 (exact on token bytes).
+// ---------------------------------------------------------------------------
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn emit_token(
+    base: *const u8,
+    start: usize,
+    len: usize,
+    pos: u32,
+    id: u32,
+    terms: &Terms,
+    post: &mut Post,
+    recent: &mut [(u32, u32)],
+) {
+    if len > MAX_TERM {
+        return;
+    }
+    let h = hash_token_ptr(base.add(start), len, true);
+    if !terms.filter_test(h) {
+        return;
+    }
+    if let Some(e) = terms.get_folded(h, base.add(start), len) {
+        let t = ((e >> 32) & 0xFF_FFFF) as usize;
+        let fl = (e >> 56) as u8;
+        if fl & FLAG_DOCS != 0 {
+            let rc = &mut recent[t & (RECENT - 1)];
+            if *rc != (t as u32, id) {
+                if post.docs[t].last() != Some(&id) {
+                    post.docs[t].push(id);
+                }
+                *rc = (t as u32, id);
+            }
+        }
+        if fl & FLAG_POS != 0 {
+            if pos < POS_LIMIT {
+                post.ents[t].push((id << POS_SHIFT) | pos);
+            } else {
+                post.ovf.push((t as u32, ((id as u64) << 32) | pos as u64));
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_text_avx2(
+    text: &[u8],
+    id: u32,
+    terms: &Terms,
+    post: &mut Post,
+    recent: &mut [(u32, u32)],
+) {
+    use std::arch::x86_64::*;
+    let base = text.as_ptr();
+    let n = text.len();
+    let fold = _mm256_set1_epi8(0x20);
+    let x80 = _mm256_set1_epi8(-128);
+    // signed-compare range tests via the xor-0x80 trick
+    let ge_a = _mm256_set1_epi8((0x60u8 ^ 0x80) as i8); // > 'a'-1
+    let le_z = _mm256_set1_epi8((0x7Bu8 ^ 0x80) as i8); // < 'z'+1
+    let ge_0 = _mm256_set1_epi8((0x2Fu8 ^ 0x80) as i8); // > '0'-1
+    let le_9 = _mm256_set1_epi8((0x3Au8 ^ 0x80) as i8); // < '9'+1
+
+    // Pass 1: token-bit mask per 32-byte vector (pad bytes classify as
+    // separators; the last vector is masked to the true length).
+    let mut masks = [0u32; 2048];
+    let nv = n.div_ceil(32);
+    debug_assert!(nv <= 2048);
+    let mut v = 0usize;
+    while v < nv {
+        let c = _mm256_loadu_si256(base.add(v * 32) as *const __m256i);
+        let f = _mm256_xor_si256(_mm256_or_si256(c, fold), x80);
+        let cx = _mm256_xor_si256(c, x80);
+        let letter = _mm256_and_si256(_mm256_cmpgt_epi8(f, ge_a), _mm256_cmpgt_epi8(le_z, f));
+        let digit = _mm256_and_si256(_mm256_cmpgt_epi8(cx, ge_0), _mm256_cmpgt_epi8(le_9, cx));
+        let mut m = _mm256_movemask_epi8(_mm256_or_si256(letter, digit)) as u32;
+        let rem = n - v * 32;
+        if rem < 32 {
+            m &= (1u32 << rem) - 1;
+        }
+        masks[v] = m;
+        v += 1;
+    }
+
+    // Pass 2: walk token runs over the mask array.
+    let mut pos: u32 = 0;
+    let mut v = 0usize;
+    let mut run_start: i64 = -1;
+    while v < nv {
+        let mut m = masks[v];
+        let base_bit = v * 32;
+        if run_start >= 0 {
+            let lead = (!m).trailing_zeros() as usize; // leading 1-bits
+            if lead == 32 {
+                v += 1;
+                continue; // whole vector is one continuing token
+            }
+            emit_token(base, run_start as usize, base_bit + lead - run_start as usize, pos, id, terms, post, recent);
+            pos += 1;
+            run_start = -1;
+            m = if lead + 1 >= 32 { 0 } else { m & (!0u32 << (lead + 1)) };
+        }
+        while m != 0 {
+            let s = m.trailing_zeros() as usize;
+            let after = m >> s;
+            let run = (!after).trailing_zeros() as usize;
+            if s + run < 32 {
+                emit_token(base, base_bit + s, run, pos, id, terms, post, recent);
+                pos += 1;
+                m = if s + run + 1 >= 32 { 0 } else { m & (!0u32 << (s + run + 1)) };
+            } else {
+                run_start = (base_bit + s) as i64;
+                break;
+            }
+        }
+        v += 1;
+    }
+    // A token may run right up to the end of the text (final vector fully
+    // consumed); emit it here.
+    if run_start >= 0 {
+        emit_token(base, run_start as usize, n - run_start as usize, pos, id, terms, post, recent);
+    }
+}
+
 /// Scans whole lines in `data`: decimal id, TAB, text, LF.
-fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u32)]) {
+fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u32)], use_avx2: bool) {
     let mut tb = [0u8; MAX_TERM + 8];
     let n = data.len();
     let mut i = 0usize;
@@ -319,6 +486,12 @@ fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u
             i += 1;
         }
         let text = &data[text_start..i];
+        #[cfg(target_arch = "x86_64")]
+        if use_avx2 && text.len() <= 65536 {
+            unsafe { scan_text_avx2(text, id, terms, post, recent) };
+            i += 1; // skip LF
+            continue;
+        }
         let tn = text.len();
         let mut j = 0usize;
         let mut pos: u32 = 0;
@@ -328,7 +501,7 @@ fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u
                 break;
             }
             if tl <= MAX_TERM {
-                let h = hash_bytes(&tb[..tl]);
+                let h = unsafe { hash_token_ptr(tb.as_ptr(), tl, false) };
                 if terms.filter_test(h) {
                     if let Some(e) = terms.get(h, &tb[..tl]) {
                         let t = ((e >> 32) & 0xFF_FFFF) as usize;
@@ -362,6 +535,11 @@ const BLOCK: usize = 1 << 22; // 4 MB streaming blocks
 
 /// Streams [start, end) of docs.txt; both bounds sit right after an LF.
 fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usize) -> Post {
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = std::arch::is_x86_feature_detected!("avx2")
+        && std::env::var_os("TRACKB_SCALAR").is_none();
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_avx2 = false;
     let mut post = Post {
         docs: (0..n_terms).map(|_| Vec::new()).collect(),
         ents: (0..n_terms).map(|_| Vec::new()).collect(),
@@ -389,7 +567,7 @@ fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usi
             }
         };
         if cut > 0 {
-            scan_lines(&buf[..cut], terms, &mut post, &mut recent);
+            scan_lines(&buf[..cut], terms, &mut post, &mut recent, use_avx2);
             buf.copy_within(cut..avail, 0);
             carry = avail - cut;
         }
@@ -737,3 +915,4 @@ fn main() {
         f.write_all(p).expect("write results.txt");
     }
 }
+

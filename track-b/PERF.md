@@ -22,7 +22,7 @@ On an Apple M4 Pro the same reference is 27.2 s with 2.29 GB peak RSS.
    instead of held resident; positional index dropped for doc-id lists only.
    Memory fell 649 MB -> 253 MB on the board, but phrase verification by
    re-reading candidate docs cost wall time (0.882 s -> 0.992 s).
-5. **Runtime-first redesign (current).** Per team priority, wall time comes
+5. **Runtime-first redesign (v4).** Per team priority, wall time comes
    first, so phrase verification is back on stored positions - but only for
    PHRASE terms, packed as (doc << 13) | pos u32s, verified by binary
    search; BOOL terms keep deduplicated doc-id lists only. The scan keeps
@@ -31,6 +31,24 @@ On an Apple M4 Pro the same reference is 27.2 s with 2.29 GB peak RSS.
    table, plus a per-thread (term, doc) recency cache for hot vocabulary.
    Dev sandbox (1 vCPU): **2.55 s** wall (vs 4.4 s for the v1 positional
    build), 385 MB peak RSS.
+
+6. **Quota-aware threads + 4 MB blocks (v5).** Thread count now reads the
+   cgroup CPU quota (cpu.max / cfs_quota) instead of the host core count the
+   container reports (capped at the quota, else host, max 16). Board memory
+   did not move (501 MB) - the bloat is not thread buffers; still hunting it.
+7. **AVX2 tokenizer (v6, current).** The corpus scan classifies 32 bytes per
+   instruction into token/separator bitmasks (unsigned range tests via the
+   xor-0x80 trick, case folded with | 0x20, exact on [a-z0-9A-Z]) and walks
+   token runs over the masks. Tokens are hashed chunk-wise straight from the
+   scan buffer (8-byte unaligned reads, overlapping tail) with no per-byte
+   table lookups; term-table probes compare case-folded in place. Runtime
+   detected (is_x86_feature_detected!) with the scalar loop as fallback.
+   Dev sandbox (1 vCPU): 3.67 s wall vs 5.1-5.75 s scalar on the full
+   dataset; identical output on all four verification datasets.
+
+Note: the board re-runs every track on each push to the branch, so the v5
+numbers were recorded on a teammate's later commit whose track-b tree is
+identical to 4d9f7f3.
 
 ## Wrong turns
 
@@ -54,4 +72,6 @@ On an Apple M4 Pro the same reference is 27.2 s with 2.29 GB peak RSS.
 | --- | --- | --- |
 | 72d27fd (positional v1) | run-cb0c84fd5f0f | PASS: T=0.882 s, M=649 MB, K=7.96, 45.05 pts (rank 44/58 at the time) |
 | 2071a82 (streaming v2) | run-8688a566173e | PASS: T=0.992 s, M=253 MB, K=8.60, 46.71 pts (rank 43/58 at the time) |
-| runtime-first v4 (this push) | pending | awaiting board run |
+| 66d14cf (runtime-first v4) | run-06ed87c66719 | PASS: T=0.886 s, M=477 MB, K=7.96, 45.06 pts |
+| 4d9f7f3 (quota threads v5) | run-8b18b13d78cd (measured at d2793ac, same track-b code) | PASS: T=0.863 s, M=501 MB, K=8.02, 45.22 pts |
+| SIMD tokenizer v6 (this push) | pending | awaiting board run |
