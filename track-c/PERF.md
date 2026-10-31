@@ -351,7 +351,10 @@ Every step from the reference to your final version, each with the live-board ru
   scalar byte loops; scalar fallback for long fields and the file tail. An
   id-field variant measured slower locally and was dropped (ablation: id mask
   +5%, SWAR id +10%, region/amount mask -4.4% vs step-53 code on 1 vCPU).
-- Run: PENDING
+- Run: run-04f07874db8c. Board: T 0.038054 (best-ever T, -3.8% vs 0.039576),
+  M 11.2 MB (+1.4 MB - the populate faults pages the lazy pattern never
+  touched under the box's THP accounting), S 274, 76.607 points. LOST on net
+  K: the T win (+~0.4) could not pay for M (+~-0.6) and S (+~-0.36).
 
 ## Step 58 result: mask-parsed region + amount fields - REVERTED
 - Board: T 0.0423 -> 0.0400 (-5.4%, the delimiter-mask parse pays on the
@@ -477,4 +480,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Workers populate NT + used CB in 1/12 shares behind a spin barrier before
   claiming granules. A 16-record ring (Pend/Mk) defers region read, sums,
   intern and mark; all three random lines are prefetched at parse/retire.
+- Run: PENDING
+## Step 71: pipeline without the populate (v127)
+- Step-70's T win isolated from its M cost: keep the 16-record ring (region
+  read, sums, intern, mark deferred; plain fetch_or marks), drop the
+  MADV_POPULATE_WRITE pre-faulting that added 1.4 MB on the box.
 - Run: PENDING

@@ -140,9 +140,6 @@ struct Worker {
   Stats stats[MAX_C];
   int tid;
 };
-static char *pool;      // 2MB-aligned base of NT/R2C/CB
-static size_t popbytes; // NT + CB bytes to pre-populate
-static uint32_t nready;
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -160,18 +157,6 @@ static uint32_t nready;
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  // Pre-populate this thread's share of the shared tables: twelve threads
-  // faulting the same pages in races queue on the kernel's page-table lock,
-  // and a read-then-written page faults twice (zero page, then private).
-  {
-    int T = ((Worker *)arg)->tid;
-    size_t pages = popbytes / 4096, from = pages * T / 12, to = pages * (T + 1) / 12;
-    if (to > from)
-      madvise(pool + from * 4096, (to - from) * 4096, 23); // MADV_POPULATE_WRITE
-    __atomic_fetch_add(&nready, 1, 0);
-    while (__atomic_load_n(&nready, 0) < 12)
-      ;
-  }
   // Every record's three random reads (region table, name slot, bitset word)
   // go through a 16-record software pipeline: prefetched when parsed, the
   // country read + sums + intern retire 16 later, the mark 16 after that.
@@ -259,9 +244,8 @@ int main(int argc, char **argv) {
   madvise((void *)al, 6 << 20, 14); // MADV_HUGEPAGE
   // NT 1MB, R2C 1MB, CB the rest; slot 0 reserved (real hashes set bit 63)
   NT = (uint64_t *)al, R2C = (uint8_t *)(al + (1 << 20)),
-  CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1, pool = (char *)al;
+  CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1;
   load_regions(data_dir + "/regions.csv");
-  popbytes = (1 << 20) + (size_t)NC * BITS_W * 8; // NT + used CB (R2C is already faulted by load_regions)
   struct stat st;
   fstat(open((data_dir + "/records.csv").c_str(), O_RDONLY), &st);
   const char *data = (const char *)mmap(
