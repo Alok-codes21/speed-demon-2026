@@ -632,3 +632,8 @@ synthetic single-term suite: 0 matches instead of 144).
 - run-d83358f3724f (sibling-folder push re-ran track-b at head): T=0.2281 s
   (fastest yet) but M spiked to 57.1 MB, 69.19 pts. MALLOC_ARENA_MAX=1 is
   the standing candidate if the M spike repeats.
+
+- run-551200f87557 (step-33 PERF push): T=0.2226 s, M=50.0 MB, S=666,
+  **70.03 pts - new best**, past lippinc/cache-me/newtonredheat to rank 9.
+- run-71afcd450e12 (sibling-folder push re-ran track-b): T=0.2242 s,
+  M=50.2 MB, 69.94 pts. The T band has shifted down to 0.222-0.224.
