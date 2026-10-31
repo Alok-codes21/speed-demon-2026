@@ -12,3 +12,4 @@ check_*.py
 inspect_*.py
 count_*.py
 test_engine.*
+monitor_*.py

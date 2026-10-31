@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <malloc.h>
 #include <vector>
 #include <string>
 
@@ -23,9 +24,18 @@ static inline uint64_t hash_term(const char* s, uint32_t len) {
     return h ? h : 1;
 }
 
-const uint32_t VOCAB_CAP = 262144, VOCAB_MASK = VOCAB_CAP - 1;
+static inline uint64_t hash_corpus_token(const char* s, uint32_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (uint32_t i = 0; i < len; ++i) { h ^= char_map[(uint8_t)s[i]]; h *= 0x100000001b3ULL; }
+    return h ? h : 1;
+}
+
+const uint32_t VOCAB_CAP = 131072, VOCAB_MASK = VOCAB_CAP - 1;
 struct VocabSlot { uint64_t hash; uint32_t term_id, len; char str[32]; };
 static VocabSlot vocab[VOCAB_CAP];
+
+struct TermInfo { uint32_t len; char str[32]; };
+static TermInfo terms_info[VOCAB_CAP];
 static uint32_t num_terms = 0;
 
 static inline uint32_t intern_term(const char* s, uint32_t len) {
@@ -40,16 +50,23 @@ static inline uint32_t intern_term(const char* s, uint32_t len) {
     uint32_t id = num_terms++;
     vocab[idx] = {h, id + 1, len, {}};
     memcpy(vocab[idx].str, s, len);
+    terms_info[id] = {len, {}};
+    memcpy(terms_info[id].str, s, len);
     return id;
 }
 
-static inline int lookup_term(const char* s, uint32_t len) {
+static inline int lookup_corpus_token(const char* s, uint32_t len) {
     if (len > 31) len = 31;
-    uint64_t h = hash_term(s, len);
+    uint64_t h = hash_corpus_token(s, len);
     uint32_t idx = h & VOCAB_MASK;
     while (vocab[idx].term_id) {
-        if (vocab[idx].hash == h && vocab[idx].len == len && memcmp(vocab[idx].str, s, len) == 0)
-            return (int)(vocab[idx].term_id - 1);
+        if (vocab[idx].hash == h && vocab[idx].len == len) {
+            bool eq = true;
+            for (uint32_t i = 0; i < len; ++i) {
+                if (char_map[(uint8_t)s[i]] != (uint8_t)vocab[idx].str[i]) { eq = false; break; }
+            }
+            if (eq) return (int)(vocab[idx].term_id - 1);
+        }
         idx = (idx + 1) & VOCAB_MASK;
     }
     return -1;
@@ -67,7 +84,7 @@ void parse_queries(const std::string& path) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return;
     struct stat st; fstat(fd, &st);
-    const char* data = (const char*)mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    const char* data = (const char*)mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     const char *p = data, *end = data + st.st_size;
     while (p < end) {
@@ -107,10 +124,11 @@ void parse_queries(const std::string& path) {
     munmap((void*)data, st.st_size);
 }
 
-struct DocSpan { const char* text; uint32_t len; };
-static DocSpan doc_spans[524288];
+struct DocSpan { uint32_t off, len; };
+static DocSpan doc_spans[262144];
 static uint32_t* global_postings = nullptr;
 static uint32_t postings_offsets[VOCAB_CAP + 1];
+static const char* global_corpus = nullptr;
 
 const int N_THREADS = 12;
 struct WorkerState {
@@ -134,20 +152,16 @@ static void* scan_pass1(void* arg) {
         while (p < end && *p != '\n') {
             while (p < end && *p != '\n' && !char_map[(uint8_t)*p]) p++;
             if (p >= end || *p == '\n') break;
-            char tok[32]; uint32_t tok_len = 0;
-            while (p < end) {
-                uint8_t c = char_map[(uint8_t)*p];
-                if (!c) break;
-                if (tok_len < 31) tok[tok_len++] = c;
-                p++;
-            }
-            int tid = lookup_term(tok, tok_len);
+            const char* tok_s = p;
+            while (p < end && char_map[(uint8_t)*p]) p++;
+            uint32_t tok_len = (uint32_t)(p - tok_s);
+            int tid = lookup_corpus_token(tok_s, tok_len);
             if (tid >= 0 && w->last_doc[tid] != doc_id + 1) {
                 w->last_doc[tid] = doc_id + 1;
                 w->counts[tid]++;
             }
         }
-        doc_spans[doc_id] = {tstart, (uint32_t)(p - tstart)};
+        doc_spans[doc_id] = {(uint32_t)(tstart - global_corpus), (uint32_t)(p - tstart)};
         if (p < end && *p == '\n') p++;
     }
     return nullptr;
@@ -164,14 +178,10 @@ static void* scan_pass2(void* arg) {
         while (p < end && *p != '\n') {
             while (p < end && *p != '\n' && !char_map[(uint8_t)*p]) p++;
             if (p >= end || *p == '\n') break;
-            char tok[32]; uint32_t tok_len = 0;
-            while (p < end) {
-                uint8_t c = char_map[(uint8_t)*p];
-                if (!c) break;
-                if (tok_len < 31) tok[tok_len++] = c;
-                p++;
-            }
-            int tid = lookup_term(tok, tok_len);
+            const char* tok_s = p;
+            while (p < end && char_map[(uint8_t)*p]) p++;
+            uint32_t tok_len = (uint32_t)(p - tok_s);
+            int tid = lookup_corpus_token(tok_s, tok_len);
             if (tid >= 0 && w->last_doc[tid] != doc_id + 1) {
                 w->last_doc[tid] = doc_id + 1;
                 *w->write_ptrs[tid]++ = doc_id;
@@ -182,8 +192,30 @@ static void* scan_pass2(void* arg) {
     return nullptr;
 }
 
+static inline bool bsearch_doc(const uint32_t* arr, uint32_t n, uint32_t x) {
+    uint32_t l = 0, r = n;
+    while (l < r) {
+        uint32_t mid = (l + r) >> 1;
+        if (arr[mid] < x) l = mid + 1;
+        else r = mid;
+    }
+    return l < n && arr[l] == x;
+}
+
 static inline void intersect(const uint32_t* a, uint32_t na, const uint32_t* b, uint32_t nb, std::vector<uint32_t>& out) {
-    out.clear(); out.reserve(std::min(na, nb));
+    out.clear();
+    if (!na || !nb) return;
+    if (nb >= 16 * na) {
+        out.reserve(na);
+        for (uint32_t i = 0; i < na; ++i) if (bsearch_doc(b, nb, a[i])) out.push_back(a[i]);
+        return;
+    }
+    if (na >= 16 * nb) {
+        out.reserve(nb);
+        for (uint32_t j = 0; j < nb; ++j) if (bsearch_doc(a, na, b[j])) out.push_back(b[j]);
+        return;
+    }
+    out.reserve(std::min(na, nb));
     uint32_t i = 0, j = 0;
     while (i < na && j < nb) {
         if (a[i] == b[j]) { out.push_back(a[i]); i++; j++; }
@@ -205,7 +237,15 @@ static inline void union_op(const uint32_t* a, uint32_t na, const uint32_t* b, u
 }
 
 static inline void diff_op(const uint32_t* a, uint32_t na, const uint32_t* b, uint32_t nb, std::vector<uint32_t>& out) {
-    out.clear(); out.reserve(na);
+    out.clear();
+    if (!na) return;
+    if (!nb) { out.assign(a, a + na); return; }
+    if (nb >= 16 * na) {
+        out.reserve(na);
+        for (uint32_t i = 0; i < na; ++i) if (!bsearch_doc(b, nb, a[i])) out.push_back(a[i]);
+        return;
+    }
+    out.reserve(na);
     uint32_t i = 0, j = 0;
     while (i < na && j < nb) {
         if (a[i] == b[j]) { i++; j++; }
@@ -215,31 +255,40 @@ static inline void diff_op(const uint32_t* a, uint32_t na, const uint32_t* b, ui
     while (i < na) out.push_back(a[i++]);
 }
 
-bool verify_phrase(uint32_t doc_id, const uint32_t* phrase_terms, uint32_t n) {
-    const DocSpan& span = doc_spans[doc_id];
-    const char *p = span.text, *end = p + span.len;
-    uint32_t ring[8], count = 0;
+struct PhraseWord { uint32_t len; const char* str; };
+
+bool verify_phrase_fast(uint32_t doc_id, const PhraseWord* pw, uint32_t k) {
+    const char* p = global_corpus + doc_spans[doc_id].off;
+    const char* end = p + doc_spans[doc_id].len;
+    uint32_t matched = 0;
     while (p < end) {
         while (p < end && !char_map[(uint8_t)*p]) p++;
         if (p >= end) break;
-        char tok[32]; uint32_t tok_len = 0;
-        while (p < end) {
-            uint8_t c = char_map[(uint8_t)*p];
-            if (!c) break;
-            if (tok_len < 31) tok[tok_len++] = c;
-            p++;
+        const char* tstart = p;
+        while (p < end && char_map[(uint8_t)*p]) p++;
+        uint32_t tlen = (uint32_t)(p - tstart);
+
+        bool eq = (tlen == pw[matched].len);
+        if (eq) {
+            for (uint32_t i = 0; i < tlen; ++i) {
+                if (char_map[(uint8_t)tstart[i]] != (uint8_t)pw[matched].str[i]) {
+                    eq = false; break;
+                }
+            }
         }
-        int tid = lookup_term(tok, tok_len);
-        uint32_t cur_id = (tid >= 0) ? (uint32_t)tid : 0xFFFFFFFF;
-        if (count < n) ring[count++] = cur_id;
-        else {
-            for (uint32_t k = 0; k < n - 1; ++k) ring[k] = ring[k + 1];
-            ring[n - 1] = cur_id;
-        }
-        if (count == n) {
-            bool ok = true;
-            for (uint32_t k = 0; k < n; ++k) if (ring[k] != phrase_terms[k]) { ok = false; break; }
-            if (ok) return true;
+        if (eq) {
+            matched++;
+            if (matched == k) return true;
+        } else if (matched > 0) {
+            bool eq0 = (tlen == pw[0].len);
+            if (eq0) {
+                for (uint32_t i = 0; i < tlen; ++i) {
+                    if (char_map[(uint8_t)tstart[i]] != (uint8_t)pw[0].str[i]) {
+                        eq0 = false; break;
+                    }
+                }
+            }
+            matched = eq0 ? 1 : 0;
         }
     }
     return false;
@@ -257,37 +306,69 @@ static void* eval_queries(void* arg) {
     WorkerState* w = (WorkerState*)arg;
     w->out.reserve(2 * 1024 * 1024);
     std::vector<uint32_t> bufA, bufB, matches;
+    bufA.reserve(65536); bufB.reserve(65536); matches.reserve(16384);
     char num[32];
+
     for (size_t q_idx = w->q_s; q_idx < w->q_e; ++q_idx) {
         const auto& q = queries[q_idx];
         const uint32_t* res = nullptr;
         uint32_t res_len = 0;
-        uint32_t t0 = q.terms[0];
-        const uint32_t* cur_p = global_postings + postings_offsets[t0];
-        uint32_t cur_len = postings_offsets[t0 + 1] - postings_offsets[t0];
-        std::vector<uint32_t>* cur_v = nullptr;
-        for (uint32_t j = 1; j < q.n_terms; ++j) {
-            uint32_t tj = q.terms[j];
-            const uint32_t* r_p = global_postings + postings_offsets[tj];
-            uint32_t r_len = postings_offsets[tj + 1] - postings_offsets[tj];
-            std::vector<uint32_t>& nxt = (cur_v == &bufA) ? bufB : bufA;
-            if (!q.is_phrase) {
+
+        if (!q.is_phrase) {
+            uint32_t t0 = q.terms[0];
+            const uint32_t* cur_p = global_postings + postings_offsets[t0];
+            uint32_t cur_len = postings_offsets[t0 + 1] - postings_offsets[t0];
+            std::vector<uint32_t>* cur_v = nullptr;
+            for (uint32_t j = 1; j < q.n_terms; ++j) {
+                uint32_t tj = q.terms[j];
+                const uint32_t* r_p = global_postings + postings_offsets[tj];
+                uint32_t r_len = postings_offsets[tj + 1] - postings_offsets[tj];
+                std::vector<uint32_t>& nxt = (cur_v == &bufA) ? bufB : bufA;
                 if (q.ops[j - 1] == OP_AND) intersect(cur_p, cur_len, r_p, r_len, nxt);
                 else if (q.ops[j - 1] == OP_OR) union_op(cur_p, cur_len, r_p, r_len, nxt);
                 else diff_op(cur_p, cur_len, r_p, r_len, nxt);
-            } else {
-                intersect(cur_p, cur_len, r_p, r_len, nxt);
+                cur_v = &nxt; cur_p = cur_v->data(); cur_len = cur_v->size();
             }
-            cur_v = &nxt; cur_p = cur_v->data(); cur_len = cur_v->size();
-        }
-        if (q.is_phrase) {
-            matches.clear();
-            for (uint32_t i = 0; i < cur_len; ++i)
-                if (verify_phrase(cur_p[i], q.terms, q.n_terms)) matches.push_back(cur_p[i]);
-            res = matches.data(); res_len = matches.size();
-        } else {
             res = cur_p; res_len = cur_len;
+        } else {
+            std::pair<uint32_t, uint32_t> sorted_terms[8];
+            for (uint32_t j = 0; j < q.n_terms; ++j) {
+                uint32_t tj = q.terms[j];
+                uint32_t len = postings_offsets[tj + 1] - postings_offsets[tj];
+                sorted_terms[j] = {len, tj};
+            }
+            std::sort(sorted_terms, sorted_terms + q.n_terms);
+
+            uint32_t t0 = sorted_terms[0].second;
+            const uint32_t* cur_p = global_postings + postings_offsets[t0];
+            uint32_t cur_len = sorted_terms[0].first;
+            std::vector<uint32_t>* cur_v = nullptr;
+
+            for (uint32_t j = 1; j < q.n_terms && cur_len > 0; ++j) {
+                uint32_t tj = sorted_terms[j].second;
+                const uint32_t* r_p = global_postings + postings_offsets[tj];
+                uint32_t r_len = sorted_terms[j].first;
+                std::vector<uint32_t>& nxt = (cur_v == &bufA) ? bufB : bufA;
+                intersect(cur_p, cur_len, r_p, r_len, nxt);
+                cur_v = &nxt; cur_p = cur_v->data(); cur_len = cur_v->size();
+            }
+
+            matches.clear();
+            if (cur_len > 0) {
+                PhraseWord pw[8];
+                for (uint32_t j = 0; j < q.n_terms; ++j) {
+                    uint32_t tid = q.terms[j];
+                    pw[j] = {terms_info[tid].len, terms_info[tid].str};
+                }
+                for (uint32_t i = 0; i < cur_len; ++i) {
+                    if (verify_phrase_fast(cur_p[i], pw, q.n_terms)) {
+                        matches.push_back(cur_p[i]);
+                    }
+                }
+            }
+            res = matches.data(); res_len = matches.size();
         }
+
         uint64_t sum = 0;
         for (uint32_t i = 0; i < res_len; ++i) sum += res[i];
         char* pt = num;
@@ -318,8 +399,9 @@ int main(int argc, char** argv) {
     if (fd < 0) return 1;
     struct stat st; fstat(fd, &st);
     size_t file_sz = st.st_size;
-    const char* corpus = (const char*)mmap(nullptr, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    const char* corpus = (const char*)mmap(nullptr, file_sz, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
+    global_corpus = corpus;
 
     size_t chunk_sz = file_sz / N_THREADS;
     for (int i = 0; i < N_THREADS; ++i) {
@@ -357,6 +439,13 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < N_THREADS; ++i) pthread_create(&ths[i], nullptr, scan_pass2, &workers[i]);
     for (int i = 0; i < N_THREADS; ++i) pthread_join(ths[i], nullptr);
+
+    for (int i = 0; i < N_THREADS; ++i) {
+        workers[i].counts.clear(); workers[i].counts.shrink_to_fit();
+        workers[i].last_doc.clear(); workers[i].last_doc.shrink_to_fit();
+        workers[i].write_ptrs.clear(); workers[i].write_ptrs.shrink_to_fit();
+    }
+    malloc_trim(0);
 
     size_t q_chunk = (queries.size() + N_THREADS - 1) / N_THREADS;
     for (int i = 0; i < N_THREADS; ++i) {

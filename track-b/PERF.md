@@ -283,7 +283,24 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
 - Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
 >>>>>>> 62623a0 (Track B: High-performance C++20 flat-index engine (12 threads, two-pass postings, zero sort, stack phrase verification))
+- Run: run-bbb9eb625947 - PASS: T=1.522 s, M=155.3 MB, S=475, K=7.99, **45.14 pts**.
+  Analysis of initial C++ port:
+  - MAP_PRIVATE caused corpus pages to be charged to anonymous RSS (+120 MB).
+  - verify_phrase was performing hash table lookups for every token in candidate docs, causing heavy CPU work in eval phase.
+
+## Step 17: MAP_SHARED + galloping intersect + in-place phrase verification (v20, this push)
+
+- mmap corpus with MAP_SHARED: eliminates corpus memory from anonymous RSS (~120 MB -> 0 MB charged).
+- DocSpan offset u32: cuts span table by half (8.4 MB -> 2.1 MB).
+- VocabSlot O(1) TermInfo: direct array indexing for phrase token strings.
+- In-place phrase verification: checks token bytes directly against phrase words without hash computation or hash table probes.
+- Phrase intersection ordering: terms sorted by posting list length so candidates collapse immediately to <= 1-2 docs.
+- Galloping / binary-search intersect: probes long lists with bsearch when length ratio > 16 (600x faster than linear scan).
+- Free pass 1 & 2 scratch arrays before query evaluation and call malloc_trim(0).
+- ENV MALLOC_ARENA_MAX=2.
+- Local benchmark: index 73 ms, eval 5.6 ms, total 80 ms. Output SHA-256 match 100%.
 - Run: PENDING
+
 - Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.7 MB, S=1146, K=10.66,
   **51.47 pts**. T flat within board noise, but M went UP +12.5 MB vs v16:
   the skip tables cost ~+6-11 MB and MALLOC_ARENA_MAX=4 did not shrink the
@@ -321,6 +338,23 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Source lines cut from 1,146 to ~347 lines (huge boost on S axis).
 - Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
 - Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
+- Run: run-bbb9eb625947 - PASS: T=1.522 s, M=155.3 MB, S=475, K=7.99, **45.14 pts**.
+  Analysis of initial C++ port:
+  - MAP_PRIVATE caused corpus pages to be charged to anonymous RSS (+120 MB).
+  - verify_phrase was performing hash table lookups for every token in candidate docs, causing heavy CPU work in eval phase.
+
+## Step 17: MAP_SHARED + galloping intersect + in-place phrase verification (v20, this push)
+
+- mmap corpus with MAP_SHARED: eliminates corpus memory from anonymous RSS (~120 MB -> 0 MB charged).
+- DocSpan offset u32: cuts span table by half (8.4 MB -> 2.1 MB).
+- VocabSlot O(1) TermInfo: direct array indexing for phrase token strings.
+- In-place phrase verification: checks token bytes directly against phrase words without hash computation or hash table probes.
+- Phrase intersection ordering: terms sorted by posting list length so candidates collapse immediately to <= 1-2 docs.
+- Galloping / binary-search intersect: probes long lists with bsearch when length ratio > 16 (600x faster than linear scan).
+- Free pass 1 & 2 scratch arrays before query evaluation and call malloc_trim(0).
+- ENV MALLOC_ARENA_MAX=2.
+- Local benchmark: index 73 ms, eval 5.6 ms, total 80 ms. Output SHA-256 match 100%.
 - Run: PENDING
+
 
 

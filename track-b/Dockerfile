@@ -3,6 +3,6 @@ COPY . /src
 RUN g++ -O3 -march=native -std=c++20 -pthread -fno-exceptions -fno-rtti -static-libstdc++ -static-libgcc -o /solution /src/b_index.cpp
 
 FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-ENV MALLOC_ARENA_MAX=4
+ENV MALLOC_ARENA_MAX=2
 COPY --from=build /solution /app/solution
 ENTRYPOINT ["/app/solution"]
