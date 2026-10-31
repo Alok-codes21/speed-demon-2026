@@ -199,6 +199,12 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 38 (v62 fused intern+dedup table)
 - Change: the separate NT intern table (1MB) and CB category bitset (4MB) are replaced by ONE fused table: 2^17 entries x 40B = 5.24MB, entry = 8B hash + 32B (256-bit) category bitmap. One probed line serves both interning and dedup; the batch-16 CB prefetch machinery goes away (the entry line is already fetched by the intern probe). Distinct counts come from a barrier-synchronized parallel transpose of the table at the end. Board insight: every fast team (NickTrapp 11.8MB, CoD 12.6MB, Kirk 11.2MB) runs more memory than our 9.85MB - a fused table in that shape is the plausible reason. M ~9.85 -> ~10.1MB.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat vs v58 (1-CPU sandbox cannot measure the contention removal this targets; board is the measurement).
+- Board T_s/M/S/points: T_s=0.042774 M=9940992 S=248 points=76.182542 - NEUTRAL vs step 45 (-0.103, within board jitter). Kept: 192 granules stay. Commit ce3082bc.
+- Run: run-5ecd5ac7ab37
+
+## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
+- Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
 - Board T_s/M/S/points: pending
 - Run: pending
 
@@ -211,6 +217,12 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 40 (v64 write-intent prefetch on NT + CB)
 - Change: __builtin_prefetch(p) -> __builtin_prefetch(p, 1) (PREFETCHW) at the two prefetch sites whose lines are later written by atomics: the NT intern-slot prefetch (CAS may follow) and the bflush CB line prefetch (fetch_or follows). Fetching in exclusive state skips the S->M upgrade round-trip before each RFO. Invisible on a 1-CPU sandbox (no coherence traffic); board is the measurement.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓. Local flat (0.1522 vs 0.1560, noise).
+- Board T_s/M/S/points: T_s=0.042774 M=9940992 S=248 points=76.182542 - NEUTRAL vs step 45 (-0.103, within board jitter). Kept: 192 granules stay. Commit ce3082bc.
+- Run: run-5ecd5ac7ab37
+
+## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
+- Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
 - Board T_s/M/S/points: pending
 - Run: pending
 
@@ -234,16 +246,22 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 44 (v71 thread count 12 -> 16)
 - Change: nth 12 -> 16 (granules stay 96, stealing balances). Step 34 showed 12 > 10, so the box has >= 12 SMT slots; if it has 16, T wins up to +25%; if it has exactly 12, mild oversubscription costs a few % on this run only (best-score unaffected). Board is the measurement (1-vCPU sandbox cannot measure thread scaling).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
-- Board T_s/M/S/points: T_s=0.0443 M=10.1MB S=248 points=75.925192 - REGRESSION vs run-f12e9567f984 (76.016): the box has 12 SMT slots; 16 threads oversubscribe. Thread count settled at 12.
+- Board T_s/M/S/points: T_s=0.043564 M=10.1MB S=248 points=75.925192 - REGRESSION vs run-f12e9567f984 (76.016): the box has 12 SMT slots; 16 threads oversubscribe. Thread count settled at 12.
 - Run: run-da6d96c3d713
 
 ## Step 45 (revert to v69b; step-44 16-thread bet lost)
 - Change: c_join.cpp back to step-43 code (nth=12). Best stays run-f12e9567f984 (76.016).
-- Board T_s/M/S/points: pending (same code as step 43)
-- Run: pending
+- Board T_s/M/S/points: T_s=0.042504 M=9863168 S=248 points=76.285427 - NEW BEST (+0.270 over run-f12e9567f984; same code as step 43, favorable T/M jitter). Commit 19622651.
+- Run: run-1ffe9fde6560
 
 ## Step 46 (v72 granules 96 -> 192)
 - Change: granule count 96 -> 192 (gst[193]); halves the worst-case idle tail (~0.2ms -> ~0.1ms of 43ms). Everything else identical to step-43 code. Board is the measurement (1-vCPU sandbox cannot measure stealing).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: T_s=0.042774 M=9940992 S=248 points=76.182542 - NEUTRAL vs step 45 (-0.103, within board jitter). Kept: 192 granules stay. Commit ce3082bc.
+- Run: run-5ecd5ac7ab37
+
+## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
+- Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
 - Board T_s/M/S/points: pending
 - Run: pending
