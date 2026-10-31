@@ -169,4 +169,21 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Dev sandbox (1 vCPU): eval phase 0.95 -> 0.82 s.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
+- Run: run-c3832dee33e1 - PASS: T=0.708 s, M=140.3 MB, S=1013, K=10.78,
+  **51.63 pts** (rank 41/64 at the time). Wall 0.750 -> 0.708 s; memory
+  149.6 -> 140.3 MB.
+
+## Step 12: small thread stacks + u32 offsets + first-op fusion (v15, this push)
+
+- Worker threads are spawned with 256 KB stacks (Builder::spawn_scoped)
+  instead of the 8 MB default: 12 x 8 MB of mostly-unmapped but reserved
+  stack space drops out of the measured footprint.
+- The doc-offset index is u32 (max doc < 2^32) instead of u64: 8 -> 4 MB.
+- BOOL evaluation fuses the FIRST operator directly on two streams
+  (intersect_ss/union_ss) when the accumulator is still a term: for the
+  common AND/OR-led queries the first operand is never decoded into a
+  scratch vector. Measured: first-term decode volume 448 -> 38 MB per 50k
+  queries; stream-op volume (~300 M entries) is untouched.
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match; local peak RSS 322.6 MB.
 - Run: PENDING
