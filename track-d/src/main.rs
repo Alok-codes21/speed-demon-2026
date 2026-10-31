@@ -320,7 +320,7 @@ fn main() {
         // Fetch the offsets 8 queue entries ahead and the edges 4 ahead.
         let ahead = |ord: &Vec<u32>, i: usize| {
             ord.get(i + 8).map(|&u| prefetch(&first[u as usize]));
-            ord.get(i + 4).map(|&u| prefetch(&link[first[u as usize] as usize]));
+            ord.get(i + 4).map(|&u| prefetch(link.as_ptr().wrapping_add(first[u as usize] as usize)));
         };
         loop {
             let mut seed = None;
@@ -518,3 +518,4 @@ fn main() {
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write("/out/distances.txt", out).unwrap();
 }
+
