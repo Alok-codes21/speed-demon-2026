@@ -433,4 +433,36 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Local gates: spec and sample byte-exact, full-data sha256
   f86973c2...80927 unchanged, synthetic edge suite passes, HWM ~300 MB.
 - Expected: the v21 numbers (T~0.252, M~58.7, S 620 + ~14 guard lines).
+- Run: run-89857911fa63 - PASS: T=0.2526 s, M=54.96 MB, S=666, K=24.63,
+  **68.25 pts** - new board best. A same-code re-roll from a PERF.md-only
+  commit (run-a84dc9c5b688) scored 67.36 (T=0.270, M=57.0): same-code
+  board noise is +/-7% on T and +/-2 MB on M, wider than the +/-4% / +/-1 MB
+  assumed earlier - worth a free re-roll whenever a PERF.md batch goes up.
+
+## Step 25: block-streaming engine - segmented scan with delta-varint streams (v28, this push)
+
+- Replaces the v21 line's whole-corpus scan and per-thread u16 gap-unit
+  postings with the segmented engine from our own v12-v17 line: the corpus
+  is scanned in 32 sequential segments; each segment's per-thread
+  (term, doc-offset) pair logs are counting-sort partitioned by term
+  (stable, threads in doc order, so every term's run is globally sorted
+  with no sort pass) and parallel-encoded into per-term delta-varint byte
+  streams; the segment's logs and partition are then released. Only the
+  streams persist: 17 MB for the whole run vs 21 MB of unit postings plus
+  their bucket churn.
+- The partition is a single-thread pass over the segment's small logs with
+  an nterms-wide count + cursor pair (0.6 MB) instead of threads x nterms
+  rows (7.3 MB) - fewer pages touched beats more cores on this data.
+- Exact per-segment sizing: a length pass over each term's run computes the
+  segment's varint bytes, then reserve_exact grows each stream with zero
+  amortized slack. The board measures peak RSS, so the earlier segment-0
+  heuristic pre-size (1.6x overshoot) had to go; a final shrink_to_fit
+  hands back the last allocator bins.
+- Bitmap terms, in-scan phrase verification, the hash-table growth guard
+  and the static 12 threads are unchanged; query eval is byte-identical
+  (list_of decodes the streams instead of the gap units).
+- Local gates: spec worked example exact; tiny, sample and synthetic sets
+  byte-exact; full-data sha256 f86973c2...80927 unchanged; scan 3.03 ->
+  2.52 s; charged memory (HWM minus the 254 MB mmap'd text) ~51 -> ~48 MB.
+  Cost: ~117 more counted lines (S 666 -> ~783).
 - Run: run-pending
