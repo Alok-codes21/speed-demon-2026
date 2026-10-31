@@ -1,17 +1,17 @@
 // Speed Demon 2026 - Track A: Ingest (Team Cosmic).
 //
-// std-only Rust; mmap/madvise/ftruncate/prctl reached through extern "C".
+// std-only Rust, AVX2; mmap/madvise/fadvise reached through extern "C".
 //
 // Streaming pipeline (no phase barriers):
-//   1. The log is mapped read-only over one guard zero page and claimed in
-//      1 MiB line-aligned blocks by an atomic cursor.
-//   2. Parsing a block decodes each line with fixed-offset timestamp digits,
-//      one 64-byte SIMD probe for the two spaces, a shared lock-free-read
-//      endpoint dictionary, and a digit-count latency decode that never
-//      searches for the line feed. Records pack into 4 bytes
-//      (latency | 5xx flag | endpoint id) and land in per-hour run buffers
-//      recycled from a pool; latencies >= 2^20 us (~1%) go to a per-hour
-//      side list.
+//   1. The log is mapped read-only (huge pages when available) over one
+//      guard zero page and claimed in 256 KiB line-aligned blocks; each
+//      block is parsed as four interleaved streams so one line's
+//      dictionary probe overlaps the next line's decode.
+//   2. A line decodes with raw-ASCII timestamp arithmetic, one 64-byte SIMD
+//      probe for the two spaces, a shared lock-free-read endpoint
+//      dictionary, and a digit-count latency decode that never searches
+//      for the line feed. Records pack into 4 bytes (latency | 5xx flag |
+//      endpoint id) and land in per-hour run buffers recycled from a pool.
 //   3. Blocks register their runs in file order; a watermark tracks the
 //      highest hour seen in the registered prefix. Once the watermark is
 //      LAG hours past an hour, that hour is finalized on the spot: a
@@ -19,8 +19,11 @@
 //      output order), three nested selections for p50/p95/p99, and text
 //      formatting. Finalization overlaps the scan, so only a few hours of
 //      records are ever live.
-//   4. Finished hour texts are written to the output in order by whoever
-//      finds the writer free; written pages are dropped with fadvise.
+//   4. Finished hour texts are written in order by whoever finds the
+//      writer free - outside the lock, so no finalize blocks behind the
+//      kernel - and written pages are dropped with fadvise two hours
+//      behind the frontier. At the end each worker drops its share of the
+//      input mapping so process exit has no page table to tear down.
 //   5. The log is only nearly ordered: a line arriving after its hour was
 //      finalized sets a flag, and the whole file is reprocessed with an
 //      infinite lag (finalize nothing until every block is parsed), which
@@ -35,12 +38,12 @@ use std::thread;
 const HOURS: usize = 72;
 const SLOTS: usize = 8192;        // shared dictionary slots, power of two
 const MAX_NAMES: usize = 2048;    // endpoint ids must fit 12 bits with the flag
-const PACK_MAX: u32 = 1 << 20;    // latencies below this pack into 20 bits
 const LABEL: usize = 21;          // "2026-10-30T18:00:00Z "
 const BLOCK: usize = 256 << 10;   // parse granularity
 const AHEAD: usize = 48;          // at most this many blocks past the watermark
 const STREAMS: usize = 4;         // interleaved parse streams per block
-const RUN_WORDS: usize = BLOCK / 40 + 16; // one word per shortest line fits
+const RUN_RECS: usize = BLOCK / 40 + 16; // one record per shortest line fits
+const REC: usize = 6;            // record: u32 latency, u16 id | 5xx << 11
 const LAG: usize = 2;             // hours behind the watermark it is safe to finalize
 const NEVER: usize = 1000;        // fallback lag: nothing finalizes mid-scan
 
@@ -49,14 +52,11 @@ const MAP_PRIVATE: i32 = 0x02;
 const MAP_FIXED: i32 = 0x10;
 const MAP_ANON: i32 = 0x20;
 const FADV_DONTNEED: i32 = 4;
-const PR_SET_THP_DISABLE: i32 = 41;
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn posix_fadvise(fd: i32, off: i64, len: i64, advice: i32) -> i32;
-    fn prctl(opt: i32, a2: usize, a3: usize, a4: usize, a5: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 const MADV_DONTNEED: i32 = 4;
 const MADV_HUGEPAGE: i32 = 14;
@@ -70,13 +70,12 @@ struct Name {
 }
 
 #[inline(always)]
-fn name_eq<const SIMD: bool>(a: Name, b: Name) -> bool {
+fn name_eq(a: Name, b: Name) -> bool {
     if a.len != b.len {
         return false;
     }
     let n = a.len as usize;
-    #[cfg(target_arch = "x86_64")]
-    if SIMD && n <= 32 {
+    if n <= 32 {
         unsafe {
             use std::arch::x86_64::*;
             let x = _mm256_loadu_si256(a.ptr as *const __m256i);
@@ -90,23 +89,16 @@ fn name_eq<const SIMD: bool>(a: Name, b: Name) -> bool {
 }
 
 #[inline(always)]
-unsafe fn find_byte<const SIMD: bool>(mut s: *const u8, c: u8) -> *const u8 {
-    #[cfg(target_arch = "x86_64")]
-    if SIMD {
-        use std::arch::x86_64::*;
-        let v = _mm256_set1_epi8(c as i8);
-        loop {
-            let m = _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(s as *const __m256i), v));
-            if m != 0 {
-                return s.add(m.trailing_zeros() as usize);
-            }
-            s = s.add(32);
+unsafe fn find_byte(mut s: *const u8, c: u8) -> *const u8 {
+    use std::arch::x86_64::*;
+    let v = _mm256_set1_epi8(c as i8);
+    loop {
+        let m = _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(s as *const __m256i), v));
+        if m != 0 {
+            return s.add(m.trailing_zeros() as usize);
         }
+        s = s.add(32);
     }
-    while *s != c {
-        s = s.add(1);
-    }
-    s
 }
 
 // From one byte past the timestamp, locate the endpoint's start and end.
@@ -114,9 +106,8 @@ unsafe fn find_byte<const SIMD: bool>(mut s: *const u8, c: u8) -> *const u8 {
 // takes the slow scan. The line feed is never searched: take_latency counts
 // the digits itself and the next line starts right after them.
 #[inline(always)]
-unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8) {
-    #[cfg(target_arch = "x86_64")]
-    if SIMD {
+unsafe fn scan_line(m: *const u8) -> (*const u8, *const u8) {
+    {
         use std::arch::x86_64::*;
         let a = _mm256_loadu_si256(m as *const __m256i);
         let b = _mm256_loadu_si256(m.add(32) as *const __m256i);
@@ -128,18 +119,9 @@ unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8) {
             return (m.add(s1 as usize + 1), m.add(rest.trailing_zeros() as usize));
         }
         let name = m.add(s1 as usize + 1);
-        let name_end = find_byte::<SIMD>(name, b' ');
-        return (name, name_end);
+        let name_end = find_byte(name, b' ');
+        (name, name_end)
     }
-    let mut s1 = 0usize;
-    while *m.add(s1) != b' ' {
-        s1 += 1;
-    }
-    let mut s2 = s1 + 1;
-    while *m.add(s2) != b' ' {
-        s2 += 1;
-    }
-    (m.add(s1 + 1), m.add(s2))
 }
 
 // Up to 8 decimal digits ending just before `end`, branch-free.
@@ -228,15 +210,15 @@ impl Dict {
     }
 
     #[inline(always)]
-    fn intern<const SIMD: bool>(&self, s: Name) -> u32 {
+    fn intern(&self, s: Name) -> u32 {
         let mut i = Self::hash(s) & (SLOTS - 1);
         loop {
             let v = self.slots[i].load(Ordering::Acquire);
             if v == 0 {
-                return self.insert::<SIMD>(s);
+                return self.insert(s);
             }
             let id = (v & 0xffff) as u32 - 1;
-            if name_eq::<SIMD>(self.img_name(id), s) {
+            if name_eq(self.img_name(id), s) {
                 return id;
             }
             i = (i + 1) & (SLOTS - 1);
@@ -244,7 +226,7 @@ impl Dict {
     }
 
     #[cold]
-    fn insert<const SIMD: bool>(&self, s: Name) -> u32 {
+    fn insert(&self, s: Name) -> u32 {
         let _g = self.mu.lock().unwrap();
         let mut i = Self::hash(s) & (SLOTS - 1);
         loop {
@@ -269,7 +251,7 @@ impl Dict {
                 return id;
             }
             let id = (v & 0xffff) as u32 - 1;
-            if name_eq::<SIMD>(self.img_name(id), s) {
+            if name_eq(self.img_name(id), s) {
                 return id;
             }
             i = (i + 1) & (SLOTS - 1);
@@ -342,7 +324,7 @@ fn percentiles(a: &mut [u32]) -> (u32, u32, u32) {
 
 // ---------------------------------------------------------- streaming engine
 
-type Run = (*mut u32, u32); // one hour's records from one block
+type Run = (*mut u8, u32); // one hour's records from one block
 
 struct Reg {
     top: Vec<i32>,          // per block: its highest hour, -1 until registered
@@ -350,17 +332,15 @@ struct Reg {
     prefix_max: i32,        // highest top over the registered prefix
     registered: usize,
     runs: [Vec<Run>; HOURS],
-    wide: [Vec<(u32, u32)>; HOURS], // (latency, key) pairs that overflow the packing
     next_hour: usize,       // next hour to finalize
     bad: bool,              // a line arrived after its hour finalized
-    pool: Vec<*mut u32>,    // recycled run buffers
+    pool: Vec<*mut u8>,     // recycled run buffers
 }
 
 struct Out {
     parts: [Option<Vec<u8>>; HOURS],
     written: usize,
     writing: bool,
-    file: File,
     off: i64,
     ends: [i64; HOURS + 1],      // output offset after each hour
     text_pool: Vec<Vec<u8>>,     // recycled per-hour text buffers
@@ -370,6 +350,7 @@ struct Out {
 struct Engine {
     log: *const u8,
     size: usize,
+    file: File,
     nblocks: usize,
     lag: usize,
     threads: usize,
@@ -410,15 +391,13 @@ impl Engine {
     }
 
     // Parse one block into per-hour run buffers and register them.
-    fn parse<const SIMD: bool>(&self, b: usize) {
+    fn parse(&self, b: usize) {
         let start = unsafe { self.log.add(self.align(b)) };
         let end = unsafe { self.log.add(self.align(b + 1)) };
         let mut scan = BlockScan {
             engine: self,
             wp: [std::ptr::null_mut(); HOURS],
             bp: [std::ptr::null_mut(); HOURS],
-            wide: Vec::new(),
-            wide_h: Vec::new(),
         };
         // Four line-aligned streams parsed in round-robin: the dictionary
         // probe of one line overlaps the next line's decode, hiding the
@@ -435,15 +414,15 @@ impl Engine {
         }
         while pos.iter().zip(stop.iter()).all(|(p, s)| p < s) {
             for i in 0..STREAMS {
-                pos[i] = unsafe { scan.line::<SIMD>(pos[i]) };
+                pos[i] = unsafe { scan.line(pos[i]) };
             }
         }
         for i in 0..STREAMS {
             while pos[i] < stop[i] {
-                pos[i] = unsafe { scan.line::<SIMD>(pos[i]) };
+                pos[i] = unsafe { scan.line(pos[i]) };
             }
         }
-        let BlockScan { wp, bp, wide, wide_h, .. } = scan;
+        let BlockScan { wp, bp, .. } = scan;
         // Register runs in file order and advance the watermark.
         let mut r = self.mu.lock().unwrap();
         let mut last = -1i32;
@@ -454,17 +433,9 @@ impl Engine {
                     r.bad = true;
                     r.pool.push(bp[h]);
                 } else {
-                    let n = unsafe { wp[h].offset_from(bp[h]) } as u32;
+                    let n = (unsafe { wp[h].offset_from(bp[h]) } as u32) / REC as u32;
                     r.runs[h].push((bp[h], n));
                 }
-            }
-        }
-        for (i, &(lat, key)) in wide.iter().enumerate() {
-            let h = wide_h[i] as usize;
-            if h < r.next_hour {
-                r.bad = true;
-            } else {
-                r.wide[h].push((lat, key));
             }
         }
         r.top[b] = last;
@@ -477,12 +448,13 @@ impl Engine {
         self.cv.notify_all();
     }
 
-    fn take_buf(&self) -> *mut u32 {
+    fn take_buf(&self) -> *mut u8 {
+        // +8: the last record's single 8-byte store spills past its 6 bytes.
         let mut r = self.mu.lock().unwrap();
         match r.pool.pop() {
             Some(p) => p,
             None => unsafe {
-                std::alloc::alloc(std::alloc::Layout::array::<u32>(RUN_WORDS).unwrap()) as *mut u32
+                std::alloc::alloc(std::alloc::Layout::array::<u8>(RUN_RECS * REC + 8).unwrap())
             },
         }
     }
@@ -500,23 +472,19 @@ impl Engine {
     // Counting-sort one hour's records by endpoint (in byte order, the output
     // order), select percentiles per group, format the hour's text.
     fn finalize(&self, h: usize) {
-        let (runs, wide, order) = {
+        let (runs, order) = {
             let mut r = self.mu.lock().unwrap();
             let runs = std::mem::take(&mut r.runs[h]);
-            let wide = std::mem::take(&mut r.wide[h]);
             let _g = self.dict.mu.lock().unwrap();
             let order = unsafe { (*self.dict.sorted.get()).clone() };
-            (runs, wide, order)
+            (runs, order)
         };
         let mut count = vec![0u32; 2 * MAX_NAMES];
         for &(buf, n) in &runs {
             for i in 0..n as usize {
-                let rec = unsafe { *buf.add(i) };
-                count[(rec & 0xfff) as usize] += 1;
+                let tag = unsafe { (buf.add(i * REC + 4) as *const u16).read_unaligned() };
+                count[(tag & 0xfff) as usize] += 1;
             }
-        }
-        for &(_, key) in &wide {
-            count[(key & 0xfff) as usize] += 1;
         }
         // Segment offsets in endpoint byte order; errors share the id segment.
         let mut pos = vec![0u32; MAX_NAMES];
@@ -537,18 +505,11 @@ impl Engine {
         }
         for &(buf, n) in &runs {
             for i in 0..n as usize {
-                let rec = unsafe { *buf.add(i) };
-                let id = (rec & 0x7ff) as usize;
-                let c = &mut pos[id];
-                lat[*c as usize] = rec >> 12;
+                let tag = unsafe { (buf.add(i * REC + 4) as *const u16).read_unaligned() };
+                let c = &mut pos[(tag & 0x7ff) as usize];
+                lat[*c as usize] = unsafe { (buf.add(i * REC) as *const u32).read_unaligned() };
                 *c += 1;
             }
-        }
-        for &(l, key) in &wide {
-            let id = (key & 0x7ff) as usize;
-            let c = &mut pos[id];
-            lat[*c as usize] = l;
-            *c += 1;
         }
 
         let label = hour_label(h);
@@ -604,7 +565,7 @@ impl Engine {
         // owns the file position and the other threads only deposit into
         // parts[], so no finalize ever blocks behind the kernel.
         let mut out = self.out.lock().unwrap();
-        let fd = out.file.as_raw_fd();
+        let fd = self.file.as_raw_fd();
         out.parts[h] = Some(text);
         if out.writing {
             return;
@@ -616,13 +577,10 @@ impl Engine {
                 break;
             }
             let Some(part) = out.parts[w].take() else { break };
+            let off = out.off as u64;
             drop(out);
-            let mut done = 0;
-            while done < part.len() {
-                let n = unsafe { write(fd, part.as_ptr().add(done), part.len() - done) };
-                assert!(n > 0, "write summary.txt");
-                done += n as usize;
-            }
+            use std::os::unix::fs::FileExt;
+            self.file.write_all_at(&part, off).expect("write summary.txt");
             let mut o = self.out.lock().unwrap();
             o.off += part.len() as i64;
             o.ends[w + 1] = o.off;
@@ -639,13 +597,13 @@ impl Engine {
         out.writing = false;
     }
 
-    fn run<const SIMD: bool>(&self) -> bool {
+    fn run(&self) -> bool {
         thread::scope(|s| {
             for i in 0..self.threads {
                 s.spawn(move || {
                     loop {
                         match self.claim() {
-                            Claim::Parse(b) => self.parse::<SIMD>(b),
+                            Claim::Parse(b) => self.parse(b),
                             Claim::Finalize(h) => self.finalize(h),
                             Claim::Done => break,
                         }
@@ -666,19 +624,17 @@ impl Engine {
     }
 }
 
-// Per-block scan state: the open run buffer per hour and the overflow list.
+// Per-block scan state: the open run buffer per hour.
 struct BlockScan<'e> {
     engine: &'e Engine,
-    wp: [*mut u32; HOURS],
-    bp: [*mut u32; HOURS],
-    wide: Vec<(u32, u32)>,
-    wide_h: Vec<u32>,
+    wp: [*mut u8; HOURS],
+    bp: [*mut u8; HOURS],
 }
 
 impl BlockScan<'_> {
     // Parse the line at `p`, return the next line's start.
     #[inline(always)]
-    unsafe fn line<const SIMD: bool>(&mut self, p: *const u8) -> *const u8 {
+    unsafe fn line(&mut self, p: *const u8) -> *const u8 {
         // YYYY-MM-DDTHH: raw-ASCII hour index, branch-free. The day units
         // digit (p[9]) plus the month parity (p[6]&1: 0 for October, 1 for
         // November) times 24, plus the two hour digits; the constant folds
@@ -688,27 +644,24 @@ impl BlockScan<'_> {
             + *p.add(12) as usize
             - 1698;
 
-        let (name, name_end) = scan_line::<SIMD>(p.add(28));
-        let id = self.engine.dict.intern::<SIMD>(Name {
+        let (name, name_end) = scan_line(p.add(28));
+        let id = self.engine.dict.intern(Name {
             ptr: name,
             len: (name_end as usize - name as usize) as u32,
         });
         let key = id | if *name_end.add(1) == b'5' { 0x800 } else { 0 };
         let (latency, next) = take_latency(name_end.add(5));
 
-        if latency >= PACK_MAX {
-            self.wide.push((latency, key));
-            self.wide_h.push(h as u32);
-            return next;
-        }
         let mut w = self.wp[h];
         if w.is_null() {
             w = self.engine.take_buf();
             self.wp[h] = w;
             self.bp[h] = w;
         }
-        *w = (latency << 12) | key;
-        self.wp[h] = w.add(1);
+        // One 8-byte store covers the 6-byte record; the next record's store
+        // rewrites the two spilled bytes (the buffer has 8 bytes of slack).
+        std::ptr::write_unaligned(w as *mut u64, latency as u64 | (key as u64) << 32);
+        self.wp[h] = w.add(REC);
         next
     }
 }
@@ -755,8 +708,6 @@ fn main() {
         madvise(log, size, MADV_HUGEPAGE);
     }
 
-    let simd = std::arch::is_x86_feature_detected!("avx2");
-
     for lag in [LAG, NEVER] {
         std::fs::create_dir_all(out_dir).ok();
         let file = std::fs::OpenOptions::new()
@@ -779,29 +730,24 @@ fn main() {
                 prefix_max: -1,
                 registered: 0,
                 runs: std::array::from_fn(|_| Vec::new()),
-                wide: std::array::from_fn(|_| Vec::new()),
                 next_hour: 0,
                 bad: false,
                 pool: Vec::new(),
             }),
+            file,
             cv: Condvar::new(),
             next_block: AtomicUsize::new(0),
             out: Mutex::new(Out {
                 parts: std::array::from_fn(|_| None),
                 written: 0,
                 writing: false,
-                file,
                 off: 0,
                 ends: [0; HOURS + 1],
                 text_pool: Vec::new(),
                 lat_pool: Vec::new(),
             }),
         };
-        let ok = if simd {
-            engine.run::<true>()
-        } else {
-            engine.run::<false>()
-        };
+        let ok = engine.run();
 
         if ok {
             return;
