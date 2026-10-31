@@ -136,7 +136,7 @@ static inline const char *quoted_end(const char *s, const char *end,
 struct Worker {
   Stats stats[MAX_C];
 };
-static Worker workers[12];
+static Worker workers[6];
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
@@ -202,7 +202,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   // After all parsing, each worker popcounts a slice of the country bitsets
   // (the serial 4MB sweep would be ~1% of T); main waits at the same barrier.
   pthread_barrier_wait(&bar);
-  for (uint32_t c = (uint32_t)((Worker *)arg - workers); c < NC; c += 12) {
+  for (uint32_t c = (uint32_t)((Worker *)arg - workers); c < NC; c += 6) {
     uint32_t d = 0;
     for (uint32_t i = 0; i < BITS_W; i++)
       d += __builtin_popcountll(CB[c][i]);
@@ -247,17 +247,17 @@ int main(int argc, char **argv) {
     gst[i] = m ? m + 2 : fend;
   }
 
-  pthread_barrier_init(&bar, nullptr, 13);
-  pthread_t ths[12];
-  for (int i = 0; i < 12; i++)
+  pthread_barrier_init(&bar, nullptr, 7);
+  pthread_t ths[6];
+  for (int i = 0; i < 6; i++)
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   pthread_barrier_wait(&bar); // all parsing done; popcounts run in parallel
-  for (int i = 0; i < 12; i++)
+  for (int i = 0; i < 6; i++)
     pthread_join(ths[i], nullptr);
 
   // Merge the per-thread aggregates (empty threads merge as zeros).
   Stats final_s[MAX_C];
-  for (uint32_t i = 0; i < 12 * NC; i++) {
+  for (uint32_t i = 0; i < 6 * NC; i++) {
     auto &w = workers[i / NC].stats[i % NC], &f = final_s[i % NC];
     f.count += w.count, f.id_sum += w.id_sum, f.amount_sum += w.amount_sum;
     f.amount_min = std::min(f.amount_min, w.amount_min),

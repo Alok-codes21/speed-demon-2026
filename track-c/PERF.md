@@ -310,3 +310,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: -1.5-2% median vs v101 (165-167 vs 169ms; the explainable serial-tail cut is ~0.5%, the rest is layout luck). Hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 5x sample / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 55 (v104 DIAGNOSTIC: 6 threads for one board run, will revert)
+- Change: thread count 12 -> 6 (worker array, merge loop, popcount slice, barrier count). Purpose: decompose the board bottleneck. If T(6) ~ 2x T(12)=0.042 the design is compute-bound with near-linear scaling and a leaner parse pays directly; if T(6) ~ T(12) the memory system saturates before 12 threads and only cutting random accesses pays. Not intended to score; reverted right after the reading.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
