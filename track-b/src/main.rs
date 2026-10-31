@@ -403,16 +403,18 @@ fn scan_tokens_scalar(
 struct ScanRes {
     posts: Vec<Vec<u32>>,  // per tid (only BOOL terms fill)
     bposts: Vec<Vec<u32>>, // per bid
+    last_doc: Vec<u32>,
+    blast: Vec<u32>,
     offs: Vec<u64>,
     ndocs: u32,
 }
 
-fn scan(buf: &Map, mut i: usize, end: usize, q: &Queries) -> ScanRes {
-    let mut posts: Vec<Vec<u32>> = (0..q.n_terms).map(|_| Vec::new()).collect();
-    let mut bposts: Vec<Vec<u32>> = (0..q.n_bids).map(|_| Vec::new()).collect();
-    let mut last_doc = vec![NONE; q.n_terms];
-    let mut blast = vec![NONE; q.n_bids];
-    let mut offs: Vec<u64> = Vec::with_capacity(25_000);
+fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes) {
+    let posts = &mut st.posts;
+    let bposts = &mut st.bposts;
+    let last_doc = &mut st.last_doc;
+    let blast = &mut st.blast;
+    let offs = &mut st.offs;
     // first line's doc id (ids are dense and ascending); peek, do not advance
     let mut docid: u32 = 0;
     {
@@ -438,14 +440,50 @@ fn scan(buf: &Map, mut i: usize, end: usize, q: &Queries) -> ScanRes {
             }
             j
         };
-        scan_tokens_scalar(buf, i, line_end, q, &mut posts, &mut bposts, &mut last_doc, &mut blast, docid);
+        scan_tokens_scalar(buf, i, line_end, q, posts, bposts, last_doc, blast, docid);
         i = line_end + 1;
         docid += 1;
     }
-    for v in posts.iter_mut().chain(bposts.iter_mut()) {
-        v.shrink_to_fit();
+    st.ndocs = docid;
+}
+
+// --------------------------------------------------------------- varint ----
+#[inline(always)]
+fn put_varint(out: &mut Vec<u8>, mut v: u32) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
     }
-    ScanRes { posts, bposts, offs, ndocs: docid }
+    out.push(v as u8);
+}
+
+/// One term's (or bigram's) postings as a growing delta-varint stream.
+struct Stream {
+    buf: Vec<u8>,
+    last: u32,
+}
+
+/// Decode a delta-varint doc list into out (cleared first).
+#[inline(always)]
+fn decode_into(bytes: &[u8], out: &mut Vec<u32>) {
+    out.clear();
+    let mut v = 0u32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let mut x = 0u32;
+        let mut sh = 0;
+        loop {
+            let b = bytes[i];
+            i += 1;
+            x |= ((b & 0x7f) as u32) << sh;
+            if b < 0x80 {
+                break;
+            }
+            sh += 7;
+        }
+        v += x;
+        out.push(v);
+    }
 }
 
 // ------------------------------------------------------- sorted set ops ----
@@ -588,79 +626,99 @@ fn main() {
 
     eprintln!("[t +{:6.3}] mmap", t0.elapsed().as_secs_f64());
     let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).min(16);
-    // chunk starts aligned to line boundaries
-    let mut bounds = Vec::with_capacity(nthreads + 1);
+    const SEG: usize = 8; // scan segments; each merged+released before the next
+    // chunk starts aligned to line boundaries: nthreads stripes per segment
+    let nchunks = nthreads * SEG;
+    let mut bounds = Vec::with_capacity(nchunks + 1);
     bounds.push(0usize);
-    for t in 1..nthreads {
-        let mut s = mlen * t / nthreads;
-        while s < mlen && docs.b(s - 1) != b'\n' {
-            s += 1;
+    for t in 1..nchunks {
+        let mut p = mlen * t / nchunks;
+        while p < mlen && docs.b(p - 1) != b'\n' {
+            p += 1;
         }
-        bounds.push(s.min(mlen));
+        bounds.push(p.min(mlen));
     }
     bounds.push(mlen);
 
     let qr = &q;
     let dr = &docs;
     let br = &bounds;
-    let scans: Vec<ScanRes> = std::thread::scope(|scope| {
-        let mut hs = Vec::new();
-        for t in 0..nthreads {
-            if br[t] >= br[t + 1] {
-                continue;
+    let mut states: Vec<ScanRes> = (0..nthreads)
+        .map(|_| ScanRes {
+            posts: (0..n_terms).map(|_| Vec::new()).collect(),
+            bposts: (0..n_bids).map(|_| Vec::new()).collect(),
+            last_doc: vec![NONE; n_terms],
+            blast: vec![NONE; n_bids],
+            offs: Vec::new(),
+            ndocs: 0,
+        })
+        .collect();
+    let mut tstreams: Vec<Stream> = (0..n_terms).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
+    let mut bstreams: Vec<Stream> = (0..n_bids).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
+    let mut offs: Vec<u64> = Vec::with_capacity(1_200_000);
+    let tsz = n_terms.div_ceil(nthreads);
+    let bsz = n_bids.max(1).div_ceil(nthreads);
+    for seg in 0..SEG {
+        // parallel scan of this segment's stripes into the persistent states
+        std::thread::scope(|scope| {
+            for (t, stp) in states.iter_mut().enumerate() {
+                let (lo, hi) = (br[seg * nthreads + t], br[seg * nthreads + t + 1]);
+                if lo >= hi {
+                    continue;
+                }
+                scope.spawn(move || scan_into(dr, lo, hi, qr, stp));
             }
-            hs.push(scope.spawn(move || scan(dr, br[t], br[t + 1], qr)));
+        });
+        // global doc offsets, in doc order (stripes are contiguous doc ranges)
+        for s2 in states.iter_mut() {
+            offs.extend_from_slice(&s2.offs);
+            s2.offs.clear();
         }
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    eprintln!("[t +{:6.3}] scan", t0.elapsed().as_secs_f64());
-    let nchunks = scans.len();
-
-    // global doc offsets, in doc order (chunks are contiguous doc ranges)
-    let total_docs: u32 = scans.iter().map(|s| s.ndocs).sum();
-    let mut offs: Vec<u64> = Vec::with_capacity(total_docs as usize + 1);
-    for s in &scans {
-        offs.extend_from_slice(&s.offs);
+        // parallel stream merge: each thread owns a term range + bigram range
+        let st_ref: &Vec<ScanRes> = &states;
+        let mut t_it = tstreams.chunks_mut(tsz);
+        let mut b_it = bstreams.chunks_mut(bsz);
+        std::thread::scope(|scope| {
+            for m in 0..nthreads {
+                let tc = t_it.next().unwrap_or(&mut []);
+                let bc = b_it.next().unwrap_or(&mut []);
+                let tbase = m * tsz;
+                let bbase = m * bsz;
+                scope.spawn(move || {
+                    for (l, st8) in tc.iter_mut().enumerate() {
+                        let tid = tbase + l;
+                        for sc in st_ref.iter() {
+                            for &d in &sc.posts[tid] {
+                                put_varint(&mut st8.buf, d - st8.last);
+                                st8.last = d;
+                            }
+                        }
+                    }
+                    for (l, st8) in bc.iter_mut().enumerate() {
+                        let bid = bbase + l;
+                        for sc in st_ref.iter() {
+                            for &d in &sc.bposts[bid] {
+                                put_varint(&mut st8.buf, d - st8.last);
+                                st8.last = d;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        // release segment postings but keep capacity for the next segment
+        for s2 in states.iter_mut() {
+            for v in s2.posts.iter_mut().chain(s2.bposts.iter_mut()) {
+                v.clear();
+            }
+        }
+        eprintln!("[t +{:6.3}] seg {}", t0.elapsed().as_secs_f64(), seg);
     }
+    drop(states);
     offs.push(mlen as u64);
+    eprintln!("[t +{:6.3}] scan+merge", t0.elapsed().as_secs_f64());
 
-    // Merge postings: per term, concat chunk lists in chunk order (each is
-    // ascending, chunk doc ranges are ascending, so the concat is sorted)
-    // and delta-varint encode. Bigram lists concat into a flat u32 arena.
-    let mut posts: Vec<Vec<Vec<u32>>> = Vec::with_capacity(nchunks);
-    let mut bposts: Vec<Vec<Vec<u32>>> = Vec::with_capacity(nchunks);
-    for s in scans {
-        posts.push(s.posts);
-        bposts.push(s.bposts);
-    }
-    let total_postings: usize = posts.iter().flat_map(|c| c.iter()).map(|v| v.len()).sum();
-    let mut tarena: Vec<u32> = Vec::with_capacity(total_postings);
-    let mut term_ref: Vec<(u32, u32)> = Vec::with_capacity(n_terms);
-    for tid in 0..n_terms {
-        let off = tarena.len() as u32;
-        for c in posts.iter_mut() {
-            tarena.extend_from_slice(&c[tid]);
-            c[tid] = Vec::new(); // free as we go
-        }
-        term_ref.push((off, tarena.len() as u32 - off));
-    }
-    eprintln!("[t +{:6.3}] term merge", t0.elapsed().as_secs_f64());
-    drop(posts);
-    let mut barena: Vec<u32> = Vec::new();
-    let mut big_ref: Vec<(u32, u32)> = Vec::with_capacity(n_bids); // (off, len)
-    for bid in 0..n_bids {
-        let off = bposts_arena_len(&barena);
-        for c in bposts.iter_mut() {
-            barena.extend_from_slice(&c[bid]);
-            c[bid] = Vec::new();
-        }
-        big_ref.push((off, (barena.len() as u32) - off));
-    }
-    eprintln!("[t +{:6.3}] bigram merge", t0.elapsed().as_secs_f64());
-    drop(bposts);
-
-    let st = State { q: &q, docs: &docs, offs: &offs, tarena: &tarena, term_ref: &term_ref, barena: &barena, big_ref: &big_ref };
-
+    let st = State { q: &q, docs: &docs, offs: &offs, tstreams: &tstreams, bstreams: &bstreams };
     eprintln!("[t +{:6.3}] state", t0.elapsed().as_secs_f64());
     // Evaluate queries in parallel over contiguous ranges (order preserved).
     let nq = q.qs.len();
@@ -690,30 +748,22 @@ fn main() {
     f.write_all(&all).unwrap();
 }
 
-fn bposts_arena_len(a: &Vec<u32>) -> u32 {
-    a.len() as u32
-}
-
 #[derive(Clone, Copy)]
 struct State<'a> {
     q: &'a Queries,
     docs: &'a Map,
     offs: &'a [u64],
-    tarena: &'a [u32],
-    term_ref: &'a [(u32, u32)],
-    barena: &'a [u32],
-    big_ref: &'a [(u32, u32)],
+    tstreams: &'a [Stream],
+    bstreams: &'a [Stream],
 }
 
 impl<'a> State<'a> {
     #[inline(always)]
-    fn tlist(&self, tid: u32) -> &'a [u32] {
-        let (off, len) = self.term_ref[tid as usize];
-        &self.tarena[off as usize..][..len as usize]
+    fn tlist(&self, tid: u32) -> &'a [u8] {
+        &self.tstreams[tid as usize].buf
     }
-    fn blist(&self, bid: u32) -> &'a [u32] {
-        let (off, len) = self.big_ref[bid as usize];
-        &self.barena[off as usize..][..len as usize]
+    fn blist(&self, bid: u32) -> &'a [u8] {
+        &self.bstreams[bid as usize].buf
     }
     /// Map one doc token to its query-term id (NONE when not a query term).
     #[inline(always)]
@@ -739,8 +789,7 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
     for qi in lo..hi {
         match &st.q.qs[qi] {
             Q::Bool(bq) => {
-                a.clear();
-                a.extend_from_slice(st.tlist(bq.tids[0]));
+                decode_into(st.tlist(bq.tids[0]), &mut a);
                 for k in 1..bq.n as usize {
                     let l = st.tlist(bq.tids[k]);
                     match bq.ops[k - 1] {
@@ -749,21 +798,24 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                                 a.clear();
                                 continue;
                             }
-                            intersect_into(&a, l, &mut c);
+                            decode_into(l, &mut b);
+                            intersect_into(&a, &b, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         1 => {
                             if l.is_empty() {
                                 continue;
                             }
-                            union_into(&a, l, &mut c);
+                            decode_into(l, &mut b);
+                            union_into(&a, &b, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         _ => {
                             if a.is_empty() || l.is_empty() {
                                 continue;
                             }
-                            diff_into(&a, l, &mut c);
+                            decode_into(l, &mut b);
+                            diff_into(&a, &b, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                     }
@@ -775,12 +827,10 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                 let boff = *boff as usize;
                 let k = *len as usize;
                 let bids = &st.q.phr_bids[boff..boff + k - 1];
-                let mut cand: &[u32] = st.blist(bids[0]);
-                let mut ok = !cand.is_empty();
+                decode_into(st.blist(bids[0]), &mut a);
+                let mut ok = !a.is_empty();
                 if ok && k > 2 {
                     // intersect the remaining bigram lists
-                    a.clear();
-                    a.extend_from_slice(cand);
                     for &bid in &bids[1..] {
                         let l = st.blist(bid);
                         if l.is_empty() {
@@ -788,27 +838,27 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                             ok = false;
                             break;
                         }
-                        intersect_into(&a, l, &mut c);
+                        decode_into(l, &mut b);
+                        intersect_into(&a, &b, &mut c);
                         std::mem::swap(&mut a, &mut c);
                         if a.is_empty() {
                             ok = false;
                             break;
                         }
                     }
-                    cand = unsafe { std::mem::transmute::<&[u32], &[u32]>(&a) };
                 }
                 if !ok {
                     out.extend_from_slice(b"0 0\n");
                     continue;
                 }
                 if k == 2 {
-                    write_result(&mut out, cand);
+                    write_result(&mut out, &a);
                     continue;
                 }
                 // verify exact sequence by re-tokenizing each candidate doc
                 let tids = &st.q.phr_tids[off..off + k];
                 b.clear();
-                'docs: for &d in cand {
+                'docs: for &d in &a {
                     verify_tokens(st, d as usize, &mut toks);
                     let n = toks.len();
                     if n >= k {
