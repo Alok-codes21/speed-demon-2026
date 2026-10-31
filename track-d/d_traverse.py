@@ -1,202 +1,4 @@
-"""Track D (Traverse): optimized."""
 
-import argparse
-import os
-from heapq import heappop, heappush
-
-
-def main(data_dir, out_dir):
-    # ---- fast graph load ----
-    with open(os.path.join(data_dir, "graph.txt"), "rb") as f:
-        tok = f.read().split()
-    n, m = int(tok[0]), int(tok[1])
-    adj = [[] for _ in range(n)]
-    vals = list(map(int, tok[2:2 + 3 * m]))
-    for u, v, w in zip(vals[0::3], vals[1::3], vals[2::3]):
-        adj[u].append((v, w))
-    del tok, vals
-
-    # ---- load queries, group by source ----
-    with open(os.path.join(data_dir, "queries.txt"), "rb") as f:
-        q = list(map(int, f.read().split()))
-    ss, ts = q[0::2], q[1::2]
-
-    by_source = {}
-    for s, t in zip(ss, ts):
-        if s != t:
-            by_source.setdefault(s, set()).add(t)
-
-    # ---- one Dijkstra per unique source ----
-    N = n  # heap entry = dist * N + node (one int instead of a tuple)
-    INF = float("inf")
-    dist = [INF] * n
-    ans = {}
-
-    for s, remaining in by_source.items():
-        dist[s] = 0
-        touched = [s]
-        heap = [s]  # 0 * N + s
-        while heap:
-            x = heappop(heap)
-            d = x // N
-            u = x - d * N
-            if d > dist[u]:
-                continue  # stale entry
-            if u in remaining:
-                ans[(s, u)] = d
-                remaining.discard(u)
-                """Track D (Traverse): bidirectional Dijkstra."""
-
-import argparse
-import os
-from heapq import heappop, heappush
-
-INF = 1 << 62
-
-
-def main(data_dir, out_dir):
-    # ---- fast load: forward and reverse adjacency ----
-    with open(os.path.join(data_dir, "graph.txt"), "rb") as f:
-        tok = f.read().split()
-    n, m = int(tok[0]), int(tok[1])
-    adj = [[] for _ in range(n)]
-    radj = [[] for _ in range(n)]
-    vals = list(map(int, tok[2:2 + 3 * m]))
-    for u, v, w in zip(vals[0::3], vals[1::3], vals[2::3]):
-        adj[u].append((v, w))
-        radj[v].append((u, w))
-    del tok, vals
-
-    with open(os.path.join(data_dir, "queries.txt"), "rb") as f:
-        q = list(map(int, f.read().split()))
-
-    cache = {}
-    out = []
-    for i in range(0, len(q), 2):
-        s, t = q[i], q[i + 1]
-        key = (s, t)
-        r = cache.get(key)
-        if r is None:
-            r = cache[key] = bidir(adj, radj, s, t)
-        out.append(r)
-
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "distances.txt"), "w", encoding="ascii", newline="\n") as f:
-        f.write("".join(f"{d}\n" for d in out))
-
-
-def bidir(adj, radj, s, t):
-    if s == t:
-        return 0
-    df = {s: 0}   # forward distances from s
-    db = {t: 0}   # backward distances to t
-    hf = [(0, s)]
-    hb = [(0, t)]
-    mu = INF      # best s-t path length found so far
-
-    while hf and hb:
-        if hf[0][0] + hb[0][0] >= mu:
-            break  # no better path can exist
-        if len(hf) <= len(hb):
-            d, u = heappop(hf)
-            if d > df[u]:
-                continue
-            for v, w in adj[u]:
-                nd = d + w
-                if nd < df.get(v, INF):
-                    import os
-import sys
-from heapq import heappop, heappush
-
-
-def main(d, o):
-    t = open(d + "/graph.txt", "rb").read().split()
-    n, m = int(t[0]), int(t[1])
-    a = [[] for _ in range(n)]
-    r = [[] for _ in range(n)]
-    for i in range(2, 2 + 3 * m, 3):
-        u, v, w = int(t[i]), int(t[i + 1]), int(t[i + 2])
-        a[u].append((v, w))
-        r[v].append((u, w))
-    q = open(d + "/queries.txt", "rb").read().split()
-    I = 1 << 62
-    df = [I] * n
-    db = [I] * n
-    res = []
-    for k in range(0, len(q), 2):
-        s, e = int(q[k]), int(q[k + 1])
-        if s == e:
-            res.append(0)
-            continue
-        df[s] = 0
-        db[e] = 0
-        hf, hb = [(0, s)], [(0, e)]
-        tf, tb = [s], [e]
-        mu = I
-        while hf and hb and hf[0][0] + hb[0][0] < mu:
-            if len(hf) <= len(hb):
-                x, u = heappop(hf)
-                if x > df[u]:
-                    continue
-                for v, w in a[u]:
-                    y = x + w
-                    if y < df[v]:
-                        if df[v] == I:
-                            tf.append(v)
-                        df[v] = y
-                        heappush(hf, (y, v))
-                        mu = min(mu, y + db[v])
-            else:
-                x, u = heappop(hb)
-                if x > db[u]:
-                    continue
-                import os
-import sys
-from heapq import heappop, heappush
-
-
-def main(d, o):
-    t = open(d + "/graph.txt", "rb").read().split()
-    n, m = int(t[0]), int(t[1])
-    a = [[] for _ in range(n)]
-    r = [[] for _ in range(n)]
-    for i in range(2, 2 + 3 * m, 3):
-        u, v, w = int(t[i]), int(t[i + 1]), int(t[i + 2])
-        a[u].append((v, w))
-        r[v].append((u, w))
-    q = open(d + "/queries.txt", "rb").read().split()
-    I = 1 << 62
-    df = [I] * n
-    db = [I] * n
-    res = []
-    for k in range(0, len(q), 2):
-        s, e = int(q[k]), int(q[k + 1])
-        if s == e:
-            res.append(0)
-            continue
-        df[s] = 0
-        db[e] = 0
-        hf, hb = [(0, s)], [(0, e)]
-        tf, tb = [s], [e]
-        mu = I
-        while hf and hb and hf[0][0] + hb[0][0] < mu:
-            if len(hf) <= len(hb):
-                x, u = heappop(hf)
-                if x > df[u]:
-                    continue
-                for v, w in a[u]:
-                    y = x + w
-                    if y < df[v]:
-                        if df[v] == I:
-                            tf.append(v)
-                        df[v] = y
-                        heappush(hf, (y, v))
-                        mu = min(mu, y + db[v])
-            else:
-                x, u = heappop(hb)
-                if x > db[u]:
-                    continue
-                
 import os
 import sys
 from array import array
@@ -206,58 +8,31 @@ from heapq import heappop, heappush
 INF = 1 << 62
 
 
-def csr_py(U, V, W, n):
-    cnt = [0] * (n + 1)
+def load_graph(path):
+    import numpy as np
 
-    for u in U:
-        cnt[u + 1] += 1
+    g = np.fromfile(path, dtype=np.int64, sep=" ")
 
-    ptr = [0] * (n + 1)
+    n, m = int(g[0]), int(g[1])
 
-    for i in range(n):
-        ptr[i + 1] = ptr[i] + cnt[i]
+    if g.size != 2 + 3 * m:
+        raise ValueError("Invalid graph file")
 
-    pos = ptr[:]
-    ix = array("i", [0]) * len(U)
-    wt = array("q", [0]) * len(U)
+    edges = g[2:].reshape(m, 3)
 
-    for u, v, w in zip(U, V, W):
-        p = pos[u]
-        pos[u] += 1
-        ix[p] = v
-        wt[p] = w
+    u = edges[:, 0]
+    v = edges[:, 1]
+    w = edges[:, 2]
 
-    return ptr, ix, wt
+    if (u < 0).any() or (u >= n).any():
+        raise ValueError("Invalid edge source")
 
+    if (v < 0).any() or (v >= n).any():
+        raise ValueError("Invalid edge destination")
 
-def load_py(path):
-    with open(path, "rb") as f:
-        n, m = map(int, f.readline().split())
+    if (w < 0).any():
+        raise ValueError("Dijkstra requires non-negative weights")
 
-        U, V, W = array("i"), array("i"), array("q")
-
-        while True:
-            chunk = f.readlines(1 << 20)
-            if not chunk:
-                break
-
-            tokens = b" ".join(chunk).split()
-
-            U.extend(map(int, tokens[0::3]))
-            V.extend(map(int, tokens[1::3]))
-            W.extend(map(int, tokens[2::3]))
-
-    if len(U) != m:
-        raise ValueError("Invalid graph edge count")
-
-    return (
-        n,
-        csr_py(U, V, W, n),
-        csr_py(V, U, W, n)
-    )
-
-
-def csr_np(np, u, v, w, n):
     order = np.argsort(u)
 
     counts = np.bincount(u, minlength=n)
@@ -266,173 +41,121 @@ def csr_np(np, u, v, w, n):
     ptr[0] = 0
     np.cumsum(counts, out=ptr[1:])
 
-    ix = v[order].astype(np.int32, copy=False)
-    wt = w[order].astype(np.int64, copy=False)
+    sorted_v = v[order].astype(np.int32, copy=False)
+    sorted_w = w[order].astype(np.int64, copy=False)
 
-    return ptr, ix, wt
+    fv = array("i")
+    fw = array("q")
 
+    fv.frombytes(sorted_v.tobytes())
+    fw.frombytes(sorted_w.tobytes())
 
-def load(path):
-    try:
-        import numpy as np
+    del g, edges, u, v, w, order
+    del sorted_v, sorted_w, counts
 
-        g = np.fromfile(path, dtype=np.int64, sep=" ")
-
-        n, m = int(g[0]), int(g[1])
-
-        if g.size != 2 + 3 * m:
-            raise ValueError("Invalid graph file")
-
-        e = g[2:].reshape(m, 3)
-
-        forward = csr_np(
-            np, e[:, 0], e[:, 1], e[:, 2], n
-        )
-
-        reverse = csr_np(
-            np, e[:, 1], e[:, 0], e[:, 2], n
-        )
-
-        return n, forward, reverse
-
-    except ImportError:
-        return load_py(path)
+    return n, ptr.tolist(), fv, fw
 
 
-def bidirectional_dijkstra(s, t, fp, fv, fw, rp, rv, rw, df, db):
+def solve(n, ptr, fv, fw, queries):
 
-    if s == t:
-        return 0
+    answers = [-1] * (len(queries) // 2)
 
-    df[s] = 0
-    db[t] = 0
+    # Group destinations by source.
+    groups = {}
 
-    hf = [(0, s)]
-    hb = [(0, t)]
+    for i in range(0, len(queries), 2):
+        s, t = queries[i], queries[i + 1]
 
-    tf = [s]
-    tb = [t]
+        if not (0 <= s < n and 0 <= t < n):
+            raise ValueError("Invalid query")
 
-    mu = INF
+        if s == t:
+            answers[i // 2] = 0
+            continue
 
-    while hf and hb:
+        if s not in groups:
+            groups[s] = {}
 
-        # Remove stale forward heap entries
-        while hf and hf[0][0] != df[hf[0][1]]:
-            heappop(hf)
+        groups[s].setdefault(t, []).append(i // 2)
 
-        # Remove stale backward heap entries
-        while hb and hb[0][0] != db[hb[0][1]]:
-            heappop(hb)
+    dist = [INF] * n
 
-        if not hf or not hb:
-            break
+    # Process each unique source once.
+    for s, pending in groups.items():
 
-        # Optimal stopping condition
-        if hf[0][0] + hb[0][0] >= mu:
-            break
+        dist[s] = 0
+        touched = [s]
 
-        # Expand the side with the smaller minimum distance
-        if hf[0][0] <= hb[0][0]:
+        # Packed heap entry: distance * n + vertex
+        heap = [s]
 
-            x, u = heappop(hf)
+        remaining = len(pending)
 
-            if db[u] != INF:
-                mu = min(mu, x + db[u])
+        while heap and remaining:
 
-            a = fp[u]
-            b = fp[u + 1]
+            entry = heappop(heap)
 
-            for j in range(a, b):
+            d = entry // n
+            u = entry - d * n
+
+            if d != dist[u]:
+                continue
+
+            # Destination reached with its shortest distance.
+            indices = pending.pop(u, None)
+
+            if indices is not None:
+                for idx in indices:
+                    answers[idx] = d
+
+                remaining -= 1
+
+                if remaining == 0:
+                    break
+
+            # Traverse CSR adjacency.
+            for j in range(ptr[u], ptr[u + 1]):
+
                 v = fv[j]
-                y = x + fw[j]
+                nd = d + fw[j]
 
-                if y < df[v]:
+                if nd < dist[v]:
 
-                    if df[v] == INF:
-                        tf.append(v)
+                    if dist[v] == INF:
+                        touched.append(v)
 
-                    df[v] = y
-                    heappush(hf, (y, v))
+                    dist[v] = nd
 
-                    if db[v] != INF:
-                        mu = min(mu, y + db[v])
+                    heappush(heap, nd * n + v)
 
-        else:
+        # Reset only visited vertices.
+        for v in touched:
+            dist[v] = INF
 
-            x, u = heappop(hb)
-
-            if df[u] != INF:
-                mu = min(mu, x + df[u])
-
-            a = rp[u]
-            b = rp[u + 1]
-
-            for j in range(a, b):
-                v = rv[j]
-                y = x + rw[j]
-
-                if y < db[v]:
-
-                    if db[v] == INF:
-                        tb.append(v)
-
-                    db[v] = y
-                    heappush(hb, (y, v))
-
-                    if df[v] != INF:
-                        mu = min(mu, y + df[v])
-
-    # Reset only vertices touched by this query
-    for v in tf:
-        df[v] = INF
-
-    for v in tb:
-        db[v] = INF
-
-    return mu if mu < INF else -1
+    return answers
 
 
 def main(data_dir, out_dir):
 
-    n, forward, reverse = load(
-        os.path.join(data_dir, "graph.txt")
-    )
+    graph_path = os.path.join(data_dir, "graph.txt")
+    query_path = os.path.join(data_dir, "queries.txt")
 
-    fp, fv, fw = forward
-    rp, rv, rw = reverse
+    n, ptr, fv, fw = load_graph(graph_path)
 
-    with open(
-        os.path.join(data_dir, "queries.txt"), "rb"
-    ) as f:
-        q = list(map(int, f.read().split()))
+    with open(query_path, "rb") as f:
+        queries = list(map(int, f.read().split()))
 
-    if len(q) % 2:
-        raise ValueError("Invalid query count")
+    if len(queries) % 2:
+        raise ValueError("Invalid query file")
 
-    df = [INF] * n
-    db = [INF] * n
+    answers = solve(n, ptr, fv, fw, queries)
+
+    os.makedirs(out_dir, exist_ok=True)
 
     output_path = os.path.join(out_dir, "distances.txt")
 
-    with open(output_path, "w", encoding="ascii") as out:
-
-        for k in range(0, len(q), 2):
-
-            s = q[k]
-            t = q[k + 1]
-
-            if not (0 <= s < n and 0 <= t < n):
-                raise ValueError("Invalid source or destination")
-
-            ans = bidirectional_dijkstra(
-                s, t,
-                fp, fv, fw,
-                rp, rv, rw,
-                df, db
-            )
-
-            out.write(str(ans) + "\n")
+    with open(output_path, "w", encoding="ascii") as f:
+        f.write("\n".join(map(str, answers)) + "\n")
 
 
 if __name__ == "__main__":
@@ -449,7 +172,5 @@ if __name__ == "__main__":
 
         elif args[i] == "--out":
             output = args[i + 1]
-
-    os.makedirs(output, exist_ok=True)
 
     main(data, output)
