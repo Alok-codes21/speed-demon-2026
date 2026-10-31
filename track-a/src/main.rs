@@ -1,3 +1,4 @@
+
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
@@ -51,12 +52,13 @@ fn main() -> io::Result<()> {
     let mut line = Vec::with_capacity(160);
 
     // Endpoint IDs are compact; group IDs are dense: hour * 1842 + endpoint.
-    let mut endpoint_ids: HashMap<Vec<u8>, u16> = HashMap::with_capacity(2_048);
+    let mut endpoint_ids: HashMap<Vec<u8>, u16> =
+        HashMap::with_capacity(2_048);
     let mut endpoints: Vec<Vec<u8>> = Vec::with_capacity(ENDPOINTS);
     let mut stats = vec![Stats::default(); GROUPS];
 
     // Each u64 packs (group_id << 32) | latency.
-    // Sorting these values orders groups and their latencies in one operation.
+    // Sorting orders groups and their latencies in one operation.
     let mut values: Vec<u64> = Vec::with_capacity(INPUT_LINES);
 
     while reader.read_until(b'\n', &mut line)? != 0 {
@@ -97,22 +99,27 @@ fn main() -> io::Result<()> {
 
         let group_id = hour * ENDPOINTS + endpoint_id;
         let group = &mut stats[group_id];
+
         group.count += 1;
+
         if (500..=599).contains(&status) {
             group.errors += 1;
         }
 
         values.push(((group_id as u64) << 32) | latency as u64);
+
         line.clear();
     }
 
-    // Numeric sort: group ID first, then latency (both ascending).
+    // Numeric sort: group ID first, then latency.
     values.sort_unstable();
 
     // Read exact nearest-rank percentiles from each group's sorted segment.
     let mut cursor = 0usize;
+
     for group in &mut stats {
         let count = group.count as usize;
+
         if count == 0 {
             continue;
         }
@@ -124,21 +131,29 @@ fn main() -> io::Result<()> {
         group.p50 = values[cursor + p50_rank] as u32;
         group.p95 = values[cursor + p95_rank] as u32;
         group.p99 = values[cursor + p99_rank] as u32;
+
         cursor += count;
     }
+
     debug_assert_eq!(cursor, values.len());
 
-    // Endpoint IDs were assigned by first appearance, not byte order.
-    // Sort the IDs once, then emit hours chronologically and endpoints bytewise.
+    // Endpoint IDs are assigned by first appearance, not byte order.
+    // Sort IDs once, then emit endpoints bytewise.
     let mut endpoint_order: Vec<usize> = (0..endpoints.len()).collect();
-    endpoint_order.sort_unstable_by(|&a, &b| endpoints[a].cmp(&endpoints[b]));
+
+    endpoint_order.sort_unstable_by(|&a, &b| {
+        endpoints[a].cmp(&endpoints[b])
+    });
 
     fs::create_dir_all(out_dir)?;
-    let output_path = Path::new(out_dir).join("summary.txt");
-    let mut output = BufWriter::with_capacity(1 << 20, File::create(output_path)?);
 
-    // The hour label is generated from the fixed 72-hour span.
+    let output_path = Path::new(out_dir).join("summary.txt");
+    let mut output =
+        BufWriter::with_capacity(1 << 20, File::create(output_path)?);
+
+    // Generate labels for the fixed 72-hour span.
     let mut hour_labels = [[0u8; 13]; HOURS];
+
     for slot in 0..HOURS {
         let (month, day, hour) = match slot {
             0..=5 => (10u32, 30u32, 18u32 + slot as u32),
@@ -146,6 +161,7 @@ fn main() -> io::Result<()> {
             30..=53 => (11, 1, (slot - 30) as u32),
             _ => (11, 2, (slot - 54) as u32),
         };
+
         let label = format!("2026-{month:02}-{day:02}T{hour:02}");
         hour_labels[slot][..13].copy_from_slice(label.as_bytes());
     }
@@ -153,6 +169,7 @@ fn main() -> io::Result<()> {
     for hour in 0..HOURS {
         for &endpoint_id in &endpoint_order {
             let group = stats[hour * ENDPOINTS + endpoint_id];
+
             if group.count == 0 {
                 continue;
             }
