@@ -57,13 +57,6 @@ Note: the board re-runs every track on each push to the branch, so the v5
 numbers were recorded on a teammate's later commit whose track-b tree is
 identical to 4d9f7f3.
 
-9. **Hot-term bitmaps for BOOL eval (v8).** Terms with >= 8,192 documents
-   store a 1-bit-per-doc bitmap instead of a doc-id list (31 KB for 250k
-   docs vs 4 B/doc lists), so AND/OR/NOT over hot terms become word
-   operations; list operands test or set bits directly. Local (1 vCPU):
-   eval 0.88 s -> 0.46 s, wall 3.67 -> 3.13 s, peak RSS 385 -> 358 MB.
-   All four correctness gates byte-identical.
-
 ## Wrong turns
 
 - Storing positions for every corpus token (full positional index) was the
@@ -89,5 +82,24 @@ identical to 4d9f7f3.
 | 66d14cf (runtime-first v4) | run-06ed87c66719 | PASS: T=0.886 s, M=477 MB, K=7.96, 45.06 pts |
 | 4d9f7f3 (quota threads v5) | run-8b18b13d78cd (measured at d2793ac, same track-b code) | PASS: T=0.863 s, M=501 MB, K=8.02, 45.22 pts |
 | 7fa17fc (AVX2 tokenizer v6) | run-ddbd7deaacbb | PASS: T=0.723 s, M=501 MB, K=8.46, 46.36 pts |
-| 5a090f1 (peak-trim v7) | pending | awaiting board run |
-| hot-bitmap BOOL eval v8 (this push) | pending | awaiting board run |
+| peak-trim v7 (this push) | pending | awaiting board run |
+
+
+## Step 7: bigram phrase index + query-only postings rewrite (v10)
+
+Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
+
+- PHRASE no longer stores positions at all. A **bigram inverted index**
+  (consecutive query-term pairs, ~40k distinct) answers 2-term phrases with
+  one lookup; longer phrases intersect their bigram lists and re-tokenize
+  only the surviving documents (median 1) to verify the exact sequence.
+  This removes the (doc<<13)|pos positional lists that dominated memory.
+- BOOL postings are collected only for the 53k terms that need them
+  (21.1M doc ids) and stored delta-varint encoded (~27 MB).
+- docs.txt is mmap'd (the harness pre-faults /data before the run's cgroup
+  exists, so mapped pages do not count toward M) instead of streamed.
+- Verification: spec worked example exact; full/sample/tiny seed-1 outputs
+  match the published sha256 (full f86973c2...80927); 1-vCPU dev wall
+  3.1 s full dataset, peak RSS 383 MB local (includes the 254 MB corpus
+  pages, which the board does not charge).
+- Run: PENDING
