@@ -3,8 +3,8 @@
 // mmap records.csv -> 12 threads parse disjoint granules at record boundaries
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
 // ids in a lock-free hash table; each country keeps a bitset over name ids.
-// DIAGNOSTIC step: every page of records.csv is touched once before parsing
-// (double read) to measure the file-read share of board T.
+// The intern is batched 16-deep: all slots prefetched before any probe, so
+// L3 latency overlaps across the batch instead of stalling each record.
 
 #include <algorithm>
 #include <cstdint>
@@ -31,7 +31,6 @@ static uint8_t *R2C;           // region id -> country slot
 static uint32_t CK[MAX_C], NC = 0, UNMATCHED = 0; // packed codes; '_' unmatched
 static uint64_t *NT; // name hash table; slot 0 reserved (id 0 = empty name)
 static uint32_t gn; // granule counter
-static volatile uint64_t touch_sink;
 
 // Names intern to slot ids in a lock-free open-addressing table; the slot
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
@@ -140,7 +139,6 @@ static inline const char *quoted_end(const char *s, const char *end,
 
 struct Worker {
   Stats stats[MAX_C];
-  uint32_t tid;
 };
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -159,7 +157,8 @@ struct Worker {
 
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  uint32_t bnid[16], nb = 0, bc[16];
+  uint32_t bnid[16], nb = 0, bc[16], bs[16];
+  uint64_t bh[16];
   // flush n buffered bitsets: prefetch all lines, then set
   auto bf = [&](uint32_t n) {
     for (uint32_t j = 0; j < n; j++)
@@ -169,15 +168,14 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       (__atomic_load_n(pw, 0) & m) || (__atomic_fetch_or(pw, m, 0), 0);
     }
   };
-  {
-    // touch every cache line of this thread's granule share (16 of 192)
-    uint32_t tid = ((Worker *)arg)->tid;
-    const char *q0 = gst[tid * 16], *q1 = tid == 11 ? fend : gst[(tid + 1) * 16];
-    uint64_t acc = 0;
-    for (const char *q = q0; q < q1; q += 64)
-      acc += (uint8_t)*q;
-    touch_sink = acc;
-  }
+  // batched intern: prefetch the 16 slots, then probe them back to back
+  auto ibf = [&](uint32_t n) {
+    for (uint32_t j = 0; j < n; j++)
+      __builtin_prefetch(&NT[bs[j]]);
+    for (uint32_t j = 0; j < n; j++)
+      bnid[j] = bh[j] ? intern_name(bh[j], bs[j]) : 0;
+    bf(n);
+  };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
     while (p < end) {
@@ -192,7 +190,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
                         ? (esc | (name_len > 25) ? hl(s, e - 2)
                                                  : hs(s, name_len, fend))
                         : 0;
-      __builtin_prefetch(&NT[slot = nh & HM]);
+      slot = nh & HM;
       QF(note_len); // note: only its unescaped byte length is needed
       // region + amount from one 32B delimiter window; scalar on long/tail
       uint32_t reg, mc, mn, c3, nl, ae, a0;
@@ -218,11 +216,11 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_min = cents < st.amount_min ? cents : st.amount_min;
       st.amount_max = cents > st.amount_max ? cents : st.amount_max;
       st.name_bytes += name_len, st.note_bytes += note_len;
-      bnid[nb] = name_len ? intern_name(nh, slot) : 0, bc[nb] = c;
-      ++nb == 16 && (bf(16), nb = 0);
+      bh[nb] = nh, bs[nb] = slot, bc[nb] = c;
+      ++nb == 16 && (ibf(16), nb = 0);
     }
   }
-  bf(nb);
+  ibf(nb);
   return nullptr;
 }
 
@@ -265,7 +263,7 @@ int main(int argc, char **argv) {
   static Worker workers[12];
   pthread_t ths[12];
   for (int i = 0; i < 12; i++)
-    workers[i].tid = i, pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
+    pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   for (int i = 0; i < 12; i++)
     pthread_join(ths[i], nullptr);
 

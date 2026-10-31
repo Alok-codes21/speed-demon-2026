@@ -431,4 +431,16 @@ Every step from the reference to your final version, each with the live-board ru
   T(step-65) - T(step-61) = the marginal cost of one full read: ~0 means
   reads overlap compute freely (compute-bound); ~10 ms means the read path
   is the floor and the leaders must be reading differently.
+- Run: run-cd89cef956c9. Board: T 0.044769, M 10.2 MB, S 252, 75.524 points.
+  READOUT: the second full read costs +4.8 ms - reads overlap compute well;
+  we are compute/latency-bound, not read-floor-bound.
+
+## Step 66: batched intern (16-deep MLP over the name table)
+- The intern-table probe was the one shared-table access still issued
+  per-record with only ~15 cycles of prefetch cover (the bitset has had a
+  16-deep prefetch batch since step 21). Now 16 records buffer their
+  (hash, slot) pairs; the batch prefetches all 16 slots, then probes them
+  back to back - L3 latency overlaps across the batch (classic MLP).
+  Local: +8% on 1 vCPU (single-core OoO already hides the latency); the
+  runner's longer L3 latency + 12-thread sharing is what this targets.
 - Run: PENDING
