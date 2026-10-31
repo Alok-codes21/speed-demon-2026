@@ -82,5 +82,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: Dockerfile build -O3 -> -O2, same c_join.cpp (step 19 code).
 - Mechanism: -O2 benches a hair faster locally (med 0.250 vs 0.253) and re-rolls board T_s; -funroll-loops measured worse, rejected.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
-- Board T_s/M/S/points: pending
+- Board T_s/M/S/points: T_s=0.046105 M=9871360 S=311 points=74.662 - no better than -O3's 74.671 (run noise); Dockerfile reverted to -O3 (step 21)
+- Run: run-4906ffd29653
+
+
+## Step 21 (revert to -O3)
+- Change: Dockerfile build back to -O3 (step-20 -O2 scored 74.662 < 74.671). c_join.cpp unchanged since step 17.
 - Run: PENDING
