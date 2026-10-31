@@ -311,7 +311,9 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Fix: after segment 0, reserve_exact(estimated final size) for every
   stream buffer and skip table.
 - Dead-code trim: unused tok_mask32 wrapper, leftover prefix-filter field.
-- Run: run-pending
+- Run: none - the board watcher skipped these commits (c2f3a49, 5bbe10a)
+  when the v21 adoption landed 4 minutes later; local scan+merge went
+  2.0 -> 1.2 s warm, but no board reading exists.
 
 ## Step 18: Cache Me architecture adoption + in-scan phrase verification + dense bitmaps (v21, this push)
 
@@ -326,3 +328,31 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Lines of code: ~550 lines (compact, maximum boost on S axis).
 - Removed b_index.py from track-b: slashes counted source lines by ~875 lines.
 - Projected metrics: T <= 0.16 s, M <= 45 MB, K >= 28 - 32, targeting 72 - 75+ points (Top 3 on Track B).
+
+## Step 18 result
+
+- Run: run-c29a8bbdd919 - PASS: T=0.261 s, M=59.9 MB, S=620, K=22.67,
+  **67.77 pts** (rank 9/65 at the time). Projected M (<= 45 MB) missed:
+  measured 59.9 MB.
+
+## Step 19: scan-peak memory trim toward the 44 MB cap (v22)
+
+- M model from local profiling (ndocs=250k, nterms=75,747): postings 21 MB +
+  bitmaps 11 MB + hash slot/keys 4.5 MB + scan-time bucket-chunk waste
+  ~15-20 MB (456 bucket Vecs x 64 KB chunks, half full on average) = ~60 MB
+  peak during the scan.
+- Bucket chunks 64 KB -> 16 KB: waste 15 -> ~4 MB. Local full-run wall time
+  unchanged (1.66-1.71 s vs 1.71-1.74 s baseline, single core).
+- Bitmap threshold df > N/32 -> df > N/16: a bitmap costs 31,250 B per term,
+  postings 2 B per doc, so the memory break-even is df = N/16; terms between
+  N/32 and N/16 (196 terms) move back to postings: -6.1 MB bitmaps, +4.5 MB
+  postings = net -1.6 MB.
+- Eval borrows the shared bitmaps as operands instead of copying them per
+  query (TermDocs::Bits(&[u64])); only the accumulator is owned. Kills ~40k
+  transient 31 KB copies per run.
+- main.rs gains the MIT copyright + permission notice header for the Cache Me
+  code incorporated in step 18 (their repo's licence requires it in copies;
+  comments do not count on the S axis).
+- Expected M ~46-48 MB (M axis +~0.55 pts). Verification: spec exact;
+  tiny/sample byte-diff; full sha256 f86973c2...80927 unchanged.
+- Run: run-pending
