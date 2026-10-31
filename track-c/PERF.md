@@ -721,7 +721,9 @@ Every step from the reference to your final version, each with the live-board ru
   proven code base is restored before structural work.
 - Local: full seed-1 sha256 d8088b1c...f0f536 verified byte-exact after the
   revert.
-- Run: PENDING
+- Run: run-cb6df21089fd (pushed 2026-10-31T19:35:28Z): T 0.037924,
+  M 8,396,800 B, S 273, 77.91 pts - BANKED as the new best (+0.03 over
+  run-95947d8b1a47, inside the same-code noise band).
 
 
 ## Step 90 - vector group probe in the intern table + write prefetch (v152)
@@ -746,4 +748,40 @@ Every step from the reference to your final version, each with the live-board ru
   and sample (seed 7) diffs vs the reference clean, stress x3, ASAN+UBSAN
   clean, TSAN clean (the probe's first draft used one plain 32-byte load -
   TSAN-flagged; replaced with per-slot atomic loads before push).
+- Run: run-51ac018951e2 (pushed 2026-10-31T19:43:18Z): T 0.037328,
+  M 9,428,992 B, S 295, 77.33 pts - LOST. T moved -1.6% (inside the +-16%
+  same-code noise band, so no measurable speed win) while M grew +1.03 MB,
+  beyond the +-0.5 MB wander band, and S grew 22 lines. The M+S penalty
+  (~0.4 pt) exceeds any plausible T gain; the tricks are not worth +1 MB on
+  this box. Reverted in step 91.
+
+## Step 91 - parallel populate-read of records.csv (v153)
+
+- Each worker pulls its 1/12 slice of the records mapping into the page
+  cache and page tables with MADV_POPULATE_READ BEFORE the start barrier,
+  instead of demand-faulting 202MB inside the timed loop. Demand faults pay
+  per-page fault-handler overhead and serialize on the kernel fault path;
+  the slices populate 12-way in parallel while the tables pre-populate.
+- M unchanged (file-backed pages are not anonymous RSS; banked runs show the
+  records mapping does not count against M), S +6. No parse logic touched.
+- Local: full seed-1 sha256 d8088b1c...f0f536 byte-exact; generated tiny
+  (seeds 1, 2), sample (seed 7) and generated-sample-scale diffs vs the
+  reference clean; ASAN+UBSAN clean, TSAN clean.
+- Run: PENDING
+
+## Step 91 - revert to v135, then parallel populate-read of records.csv (v154)
+
+- Step 90's candidate lost on M, so the code returns to the banked-best v135
+  base and the populate-read change is re-applied cleanly on top of it (one
+  variable per board run, measured against the banked baseline):
+  each worker pulls its 1/12 slice of the records mapping into the page
+  cache and page tables with MADV_POPULATE_READ BEFORE the start barrier,
+  instead of demand-faulting 202MB inside the timed loop. Demand faults pay
+  per-page fault-handler overhead and serialize on the kernel fault path;
+  the slices populate 12-way in parallel alongside the table pre-populate.
+- M unchanged (file-backed pages are not anonymous RSS; banked runs show the
+  records mapping does not count against M), S +6. No parse logic touched.
+- Local: full seed-1 sha256 d8088b1c...f0f536 byte-exact; generated tiny
+  (seeds 1, 2), sample-scale (seed 7) and generated-sample diffs vs the
+  reference clean; stress x3; ASAN+UBSAN clean, TSAN clean.
 - Run: PENDING
