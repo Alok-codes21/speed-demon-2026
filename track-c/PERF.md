@@ -623,4 +623,7 @@ Every step from the reference to your final version, each with the live-board ru
   threads lost ~25% earlier, so if 16 also loses, the count settles at 12.
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
   stress hash-stable, ASAN+UBSAN clean (sample/edge/tiny).
-- Run: PENDING
+- Run: T=0.048303, M=9.64MB (run-cb86cd8eb1c9) - 16 threads is +25%
+  WORSE, mirroring the 6T loss: the box peaks at 12, both under- and
+  over-subscription lose. Thread count settled at 12. Tip reverted to
+  v140 (step 83 revert); the 24T variant was gated but not pushed.
