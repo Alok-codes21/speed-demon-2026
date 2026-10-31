@@ -154,11 +154,12 @@ unsafe fn find_byte<const SIMD: bool>(mut s: *const u8, c: u8) -> *const u8 {
     s
 }
 
-// From one byte past the timestamp, locate the endpoint's start and end and
-// the line feed. The endpoint is short enough that all three usually sit in
-// one 64-byte window; a near-maximum endpoint takes the slow scan.
+// From one byte past the timestamp, locate the endpoint's start and end.
+// Both spaces usually sit in one 64-byte window; a near-maximum endpoint
+// takes the slow scan. The line feed is never searched: take_latency counts
+// the digits itself and the next line starts right after them.
 #[inline(always)]
-unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8, *const u8) {
+unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8) {
     #[cfg(target_arch = "x86_64")]
     if SIMD {
         use std::arch::x86_64::*;
@@ -166,16 +167,14 @@ unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8, *c
         let b = _mm256_loadu_si256(m.add(32) as *const __m256i);
         let sp = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(0x20))) as u32 as u64)
             | ((_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(0x20))) as u32 as u64) << 32);
-        let nl = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(0x0a))) as u32 as u64)
-            | ((_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(0x0a))) as u32 as u64) << 32);
-        if nl != 0 {
-            let s1 = sp.trailing_zeros();
-            let s2 = (sp & (sp - 1)).trailing_zeros();
-            return (m.add(s1 as usize + 1), m.add(s2 as usize), m.add(nl.trailing_zeros() as usize));
+        let s1 = sp.trailing_zeros();
+        let rest = sp & (sp - 1);
+        if rest != 0 {
+            return (m.add(s1 as usize + 1), m.add(rest.trailing_zeros() as usize));
         }
-        let name = m.add(sp.trailing_zeros() as usize + 1);
+        let name = m.add(s1 as usize + 1);
         let name_end = find_byte::<SIMD>(name, b' ');
-        return (name, name_end, find_byte::<SIMD>(name_end.add(5), b'\n'));
+        return (name, name_end);
     }
     let mut s1 = 0usize;
     while *m.add(s1) != b' ' {
@@ -185,11 +184,7 @@ unsafe fn scan_line<const SIMD: bool>(m: *const u8) -> (*const u8, *const u8, *c
     while *m.add(s2) != b' ' {
         s2 += 1;
     }
-    let mut e = s2 + 1;
-    while *m.add(e) != b'\n' {
-        e += 1;
-    }
-    (m.add(s1 + 1), m.add(s2), m.add(e))
+    (m.add(s1 + 1), m.add(s2))
 }
 
 // Up to 8 decimal digits ending just before `end`, branch-free: the bytes
@@ -206,14 +201,25 @@ unsafe fn dec8(end: *const u8, len: usize) -> u32 {
     (quads & 0xFFFF_FFFF) as u32 + (quads >> 32) as u32 * 10_000
 }
 
+// Parse the decimal latency starting at `s` and return (value, next line).
+// The digit count comes from one 8-byte load: xor with '0' puts 0x00 on digit
+// bytes whose value stays < 10; the +0x76 | v trick sets the high bit exactly
+// on non-digit bytes, so ctz/8 counts the digits without finding the LF.
 #[inline(always)]
-unsafe fn decode_latency(eol: *const u8, len: usize) -> u32 {
-    if len <= 8 {
-        dec8(eol, len)
-    } else if len == 9 {
-        (*eol.sub(9) - b'0') as u32 * 100_000_000 + dec8(eol, 8)
+unsafe fn take_latency(s: *const u8) -> (u32, *const u8) {
+    let v = (s as *const u64).read_unaligned() ^ 0x3030_3030_3030_3030;
+    let other = (v.wrapping_add(0x7676_7676_7676_7676) | v) & 0x8080_8080_8080_8080;
+    if other != 0 {
+        let digits = (other.trailing_zeros() >> 3) as usize;
+        (dec8(s.add(digits), digits), s.add(digits + 1))
     } else {
-        ((*eol.sub(10) - b'0') as u32 * 10 + (*eol.sub(9) - b'0') as u32) * 100_000_000 + dec8(eol, 8)
+        let mut lat = dec8(s.add(8), 8);
+        let mut s = s.add(8);
+        while *s != b'\n' {
+            lat = lat * 10 + (*s - b'0') as u32;
+            s = s.add(1);
+        }
+        (lat, s.add(1))
     }
 }
 
@@ -224,6 +230,7 @@ struct Parser {
     arena: *mut u32, // chunk chain storage, carved forward
     next_chunk: usize,
     heads: [u32; HOURS],     // chunk index + 1, 0 when the hour is empty
+    hot: [u32; HOURS],       // fill of each hour's current chunk
     hour_of_chunk: Vec<u8>,  // owning hour per carved chunk
     wide: [Vec<u32>; HOURS], // (latency, key) pairs that overflow the packing
 }
@@ -241,6 +248,7 @@ impl Parser {
             arena,
             next_chunk: 0,
             heads: [0; HOURS],
+            hot: [0; HOURS],
             hour_of_chunk: Vec::new(),
             wide: std::array::from_fn(|_| Vec::new()),
         }
@@ -254,14 +262,14 @@ impl Parser {
             let hh = (*p.add(11) - b'0') as usize * 10 + (*p.add(12) - b'0') as usize;
             let h = (if *p.add(6) == b'0' { day - 30 } else { day + 1 }) * 24 + hh - 18;
 
-            let (name, name_end, eol) = scan_line::<SIMD>(p.add(28));
+            let (name, name_end) = scan_line::<SIMD>(p.add(28));
             let id = self.local.intern::<SIMD>(Name {
                 ptr: name,
                 len: (name_end as usize - name as usize) as u32,
             });
             let key = id | if *name_end.add(1) == b'5' { ERR_BIT } else { 0 };
-            let latency = decode_latency(eol, eol as usize - name_end as usize - 5);
-            p = eol.add(1);
+            let (latency, next) = take_latency(name_end.add(5));
+            p = next;
 
             if latency >= PACK_MAX {
                 let w = self.wide.get_unchecked_mut(h);
@@ -269,21 +277,33 @@ impl Parser {
                 w.push(key);
                 continue;
             }
+            // The hour's current chunk and its fill stay in `hot`, so an
+            // append is one indexed store plus a fill bump; the chunk's count
+            // word is written back only when the chunk rolls over.
             let head = self.heads.get_unchecked_mut(h);
+            let fill = self.hot.get_unchecked_mut(h);
             let mut ci = *head as usize;
-            if ci == 0 || *self.arena.add((ci - 1) * CHUNK_WORDS + 1) as usize == CHUNK_CAP {
+            if ci == 0 || *fill as usize == CHUNK_CAP {
+                if ci != 0 {
+                    *self.arena.add((ci - 1) * CHUNK_WORDS + 1) = *fill;
+                }
                 let nci = self.next_chunk;
                 self.next_chunk += 1;
                 self.hour_of_chunk.push(h as u8);
                 *self.arena.add(nci * CHUNK_WORDS) = *head; // link to previous
-                *self.arena.add(nci * CHUNK_WORDS + 1) = 0; // record count
                 ci = nci + 1;
                 *head = ci as u32;
+                *fill = 0;
             }
-            let base = (ci - 1) * CHUNK_WORDS;
-            let n = *self.arena.add(base + 1) as usize;
-            *self.arena.add(base + 2 + n) = (latency << 12) | key;
-            *self.arena.add(base + 1) = n as u32 + 1;
+            *self.arena.add((ci - 1) * CHUNK_WORDS + 2 + *fill as usize) = (latency << 12) | key;
+            *fill += 1;
+        }
+        // Write back every hour's in-flight fill.
+        for h in 0..HOURS {
+            let ci = self.heads[h] as usize;
+            if ci != 0 {
+                *self.arena.add((ci - 1) * CHUNK_WORDS + 1) = self.hot[h];
+            }
         }
     }
 
