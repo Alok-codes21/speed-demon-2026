@@ -103,5 +103,13 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 23 (v39 MADV_HUGEPAGE on records.csv)
 - Change: v38 + madvise(MADV_HUGEPAGE) on the 202MB records.csv mapping. If the runner's kernel/filesystem backs the file with 2MB folios, page-fault count and dTLB pressure drop ~512x on the dominant input stream. One variable, hash-neutral.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ (sandbox cannot show the fault benefit; board is the measurement). S 289 local (~296 board).
+- Board T_s/M/S/points: T_s=0.044821 M=9965568 S=296 points=75.088 - flat vs step 22 (T identical within noise, points delta is M peak noise): the runner's fs does not give large folios for the file mapping, or fault cost is already negligible. Kept (above the 74.671 keep bar); the madvise is harmless.
+- Run: run-866b8b188e94
+
+
+## Step 24 (v42 SWAR digit parse)
+- Change: v39 + swar_num() helper (regions.csv-proven pattern) replaces the scalar digit loops for record id, region id, and the amount integer part. Scalar tail kept for >8-digit fields and the end-of-file guard.
+- Rationale: digit mul-chains are ~30% of per-record latency. Local 1-CPU sandbox measures v42 ~4-5% slower, but that box now hides latency differently than the 12-thread runner; one clean board measurement settles it.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
 - Board T_s/M/S/points: pending
 - Run: pending

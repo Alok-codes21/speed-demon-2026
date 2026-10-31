@@ -147,6 +147,29 @@ quoted_end(const char *s, const char *end, uint32_t *esc) {
   return q ? q + 2 : nullptr;
 }
 
+// parse unsigned decimal digits terminated by `term`; p advances past it.
+// SWAR when the terminator is within the next 8 bytes (regions.csv pattern),
+// scalar tail otherwise (ids over 8 digits, end-of-file guard).
+static inline uint64_t swar_num(const char *&p, char term, const char *end) {
+  uint64_t val = 0; uint32_t n = 0, zm = 0;
+  if (p + 16 <= end) {
+    uint64_t v, x; memcpy(&v, p, 8);
+    x = v ^ (0x0101010101010101ULL * (uint8_t)term);
+    zm = (uint32_t)((x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL);
+    if (zm) {
+      n = __builtin_ctzll(zm) >> 3;
+      v <<= 64 - 8 * n;
+      v -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * n));
+      v = v * 2561 >> 8;
+      v = (v & 0x00FF00FF00FF00FFULL) * 6553601 >> 16;
+      val = (v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32;
+    }
+  }
+  while (zm == 0 && p[n] != term) val = val * 10 + (p[n++] - '0');
+  p += n + 1;
+  return val;
+}
+
 struct Worker {
   const char *start, *end; Stats stats[MAX_C];
 };
@@ -170,7 +193,7 @@ void *parse_chunk(void *arg) {
   uint32_t bnid[16], nb = 0; uint8_t bc[16];
   while (p < end) {
     p += 3 * ((uint8_t)*p == 0xEF); // skip a UTF-8 BOM before a record
-    uint64_t id = 0; while (*p != ',') id = id * 10 + (*p++ - '0'); p++;
+    uint64_t id = swar_num(p, ',', end);
 
     // name: empty unquoted, or quoted (non-empty names are always quoted)
     uint32_t name_len = 0, esc; uint64_t name_hash = 0;
@@ -196,13 +219,13 @@ void *parse_chunk(void *arg) {
       p++;
 
     // region, amount
-    uint32_t reg_id = 0; while (*p != ',') reg_id = reg_id * 10 + (*p++ - '0'); p++;
+    uint32_t reg_id = (uint32_t)swar_num(p, ',', end);
     uint8_t c = (reg_id < 1000000) ? R2C[reg_id] : 255;
     if (name_len) __builtin_prefetch(&CB[c][(name_hash & HM) >> 6]);
     bool neg = (*p == '-'); p += neg;
-    int64_t cents = 0; while (*p != '.') cents = cents * 10 + (*p++ - '0');
-    cents = cents * 100 + (p[1] - '0') * 10 + (p[2] - '0');
-    p += 3; // '.' and two fraction digits
+    int64_t cents = (int64_t)swar_num(p, '.', end);
+    cents = cents * 100 + (p[0] - '0') * 10 + (p[1] - '0');
+    p += 2; // two fraction digits
     if (neg) cents = -cents;
     p += (p < end && *p == '\r'); p += (p < end && *p == '\n');
 
