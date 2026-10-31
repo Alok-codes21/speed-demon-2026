@@ -556,4 +556,14 @@ synthetic single-term suite: 0 matches instead of 144).
 - Local gates on the trained binary: spec/sample/synthetic/full all
   byte-exact (sha256 f86973c2...80927). Local PGO A/B was noise-bound
   (dev box cache state) - the board decides, as with steps 23/25.
+- Run: run-ba2632207005 - PASS but REGRESSION: T=0.2626 s, M=50.6 MB,
+  S=710, **67.98 pts** vs the v29 band 68.87-69.11. PGO trained on the
+  synthetic corpus cost ~6.5% T on the board (the local A/B had hinted
+  the same); the v13-era -5% does not transfer to this code. M improved
+  0.5 MB, S cost 82 lines - nowhere near enough. Reverted next.
+
+## Step 29: revert the PGO build (v29 code, plain build)
+
+- Dockerfile and Cargo.toml back to the step-27 plain build; src/gen.rs
+  removed. Code unchanged from v29.
 - Run: run-pending
