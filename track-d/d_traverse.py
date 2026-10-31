@@ -91,40 +91,53 @@ def _build_csr(U, V, W, n):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_fast(path):
-    """
-    Read graph in one read() call, split in C, parse ints in batch.
-    Falls back to chunked readline if the file is too large to fit in RAM.
-    Returns (n, fwd_csr, rev_csr).
-    """
-    try:
-        raw   = open(path, "rb").read()
-        parts = raw.split()
-        n, m  = int(parts[0]), int(parts[1])
-        base  = 2
-        # sliced views into the parts list – no copy
-        U = array("i", map(int, parts[base      : base + 3*m : 3]))
-        V = array("i", map(int, parts[base + 1  : base + 3*m : 3]))
-        W = array("q", map(int, parts[base + 2  : base + 3*m : 3]))
-        return n, _build_csr(U, V, W, n), _build_csr(V, U, W, n)
-    except MemoryError:
-        return _load_chunked(path)
-
-
-def _load_chunked(path):
-    """Chunked loader for graphs that don't fit in memory at once."""
+    import mmap
     with open(path, "rb") as f:
-        n, m = map(int, f.readline().split())
-        U, V, W = array("i"), array("i"), array("q")
-        while True:
-            chunk = f.readlines(1 << 20)
-            if not chunk:
-                break
-            t = b" ".join(chunk).split()
-            U.extend(map(int, t[0::3]))
-            V.extend(map(int, t[1::3]))
-            W.extend(map(int, t[2::3]))
-    return n, _build_csr(U, V, W, n), _build_csr(V, U, W, n)
-
+        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        size = len(data)
+        i = 0
+        def number():
+            nonlocal i
+            while i < size and data[i] <= 32:
+                i += 1
+            x = 0
+            while i < size:
+                c = data[i]
+                if c < 48 or c > 57:
+                    i += 1
+                    break
+                x = x * 10 + c - 48
+                i += 1
+            return x
+        n, m = number(), number()
+        outdeg, indeg = array("I", [0]) * n, array("I", [0]) * n
+        for _ in range(m):
+            u, v, w = number(), number(), number()
+            if u != v:
+                outdeg[u] += 1
+                indeg[v] += 1
+        fp, rp = array("I", [0]) * (n + 1), array("I", [0]) * (n + 1)
+        for v in range(n):
+            fp[v + 1] = fp[v] + outdeg[v]
+            rp[v + 1] = rp[v] + indeg[v]
+        del outdeg, indeg
+        fc, fw = array("I", [0]) * fp[n], array("Q", [0]) * fp[n]
+        rc, rw = array("I", [0]) * rp[n], array("Q", [0]) * rp[n]
+        fp_pos, rp_pos = fp[:-1], rp[:-1]
+        i = 0
+        number(); number()
+        for _ in range(m):
+            u, v, w = number(), number(), number()
+            if u == v:
+                continue
+            x = fp_pos[u]
+            fc[x], fw[x] = v, w
+            fp_pos[u] = x + 1
+            x = rp_pos[v]
+            rc[x], rw[x] = u, w
+            rp_pos[v] = x + 1
+        data.close()
+    return n, (fp, fc, fw), (rp, rc, rw)
 
 load = _load_fast
 
@@ -152,8 +165,8 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
     _psh = heappush
 
     # persistent distance arrays – reset per query via touched-node lists
-    df = [I] * n
-    db = [I] * n
+    df = array('Q', [I]) * n
+    db = array('Q', [I]) * n
 
     query_order = sorted(range(0, len(q_raw), 2),
                          key=lambda k: (int(q_raw[k]), int(q_raw[k + 1])))
@@ -322,12 +335,6 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
 def main(d, o):
     n, (fp, fc, fw), (rp, rc, rw) = load(d + "/graph.txt")
     q_raw = open(d + "/queries.txt", "rb").read().split()
-
-    # convert CSR arrays to plain Python lists for fast per-element access
-    # (array.array element access boxes to Python int each time;
-    #  a list stores Python int objects directly — faster in a tight loop)
-    fp = list(fp);  fc = fc.tolist();  fw = fw.tolist()
-    rp = list(rp);  rc = rc.tolist();  rw = rw.tolist()
 
     res = _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw)
 
