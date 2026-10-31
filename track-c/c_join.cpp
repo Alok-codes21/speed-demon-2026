@@ -13,7 +13,6 @@
 #include <immintrin.h>
 #include <atomic>
 #include <pthread.h>
-#include <sys/prctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
@@ -264,11 +263,13 @@ static void pr_money(FILE *f, int64_t c, char sep) {
 }
 
 int main(int argc, char **argv) {
-  prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0); // 4KB pages: populate the used set exactly
   std::string data_dir = argc > 1 ? argv[1] : "/data",
               out_dir = argc > 2 ? argv[2] : "/out";
   // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
   char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
+  // The tables are densely touched (3M+ random CB/NT/R2C accesses), so huge
+  // pages cost ~no extra RSS over 4KB and cut dTLB misses + fault count.
+  madvise(big, 8 << 20, 14); // MADV_HUGEPAGE
   size_t al = (size_t)(big + (2 << 20) - 1) & -(2 << 20);
   // NT 1MB, R2C 1MB, CB the rest; slot 0 reserved (real hashes set bit 63)
   NT = (uint64_t *)al, R2C = (uint8_t *)(al + (1 << 20)),

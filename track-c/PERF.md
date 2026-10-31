@@ -691,4 +691,18 @@ Every step from the reference to your final version, each with the live-board ru
 - Zero new concurrency, zero new memory.
 - Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
   ASAN+UBSAN clean, TSAN clean.
+- Run: run-e31d6bf93933 - clean, T=0.040016, M=8.70MB, S=290. Same-code
+  noise band again (did not bank; best stays 77.884).
+
+## Step 88 - huge pages for the shared tables (TLB pressure)
+
+- Dropped the process-wide THP disable and MADV_HUGEPAGE'd the 8MB table
+  region. Every table page is touched densely (3M+ random CB/NT/R2C accesses
+  over 6MB), so 2MB pages charge ~no extra RSS over 4KB - the "populate the
+  used set exactly" 4KB trick buys nothing when the whole set is used - while
+  the dTLB working set drops from ~1536 pages to 3 huge pages.
+- The records stream keeps its existing MADV_HUGEPAGE (previously nullified
+  by the process-wide disable).
+- Local: peak RSS delta +0.25MB; full/sample sha256 match, tiny/edge diffs
+  clean, stress x3, ASAN+UBSAN clean, TSAN clean.
 - Run: PENDING
