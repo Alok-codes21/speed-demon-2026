@@ -784,4 +784,14 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: full seed-1 sha256 d8088b1c...f0f536 byte-exact; generated tiny
   (seeds 1, 2), sample-scale (seed 7) and generated-sample diffs vs the
   reference clean; stress x3; ASAN+UBSAN clean, TSAN clean.
+- Run: run-a74d59ddf091 (pushed 2026-10-31T19:55:38Z): T 0.046036,
+  M 8,609,792 B, S 278, 75.64 pts - LOST. T rose +21%: pre-faulting the
+  202MB mapping before the start barrier serializes the page-in ahead of
+  all compute, while the demand-fault path it replaced was already overlapped
+  by MADV_SEQUENTIAL readahead across the 12 workers. Reverted in step 92.
+
+## Step 92 - revert to banked v135 (populate-read lost)
+
+- Step 91's populate-read probe lost clearly (T +21%); the tip returns to
+  the banked-best v135 code (step 89 restore, sha-verified base).
 - Run: PENDING

@@ -19,7 +19,7 @@
 
 // table geometry: 2^17 name slots; 256 country slots of 2^17 bits
 static const uint32_t HM = 131071, MAX_C = 256, BITS_W = 2048;
-static const char *fend, *gst[193], *gdata; static size_t gsize; // records.csv end; granule boundaries
+static const char *fend, *gst[193]; // records.csv end; granule boundaries
 
 struct Stats {
   uint64_t count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0;
@@ -163,12 +163,6 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
     size_t pages = popbytes / 4096, from = pages * T / 12, to = pages * (T + 1) / 12;
     if (to > from)
       madvise(pool + from * 4096, (to - from) * 4096, 23); // MADV_POPULATE_WRITE
-    // pull this thread's records slice into the page cache + page tables now:
-    // demand-faulting 202MB inside the timed loop pays per-page fault overhead
-    // and serializes on the kernel fault path. Read-only populate, 12-way.
-    size_t rp = gsize / 4096, rf2 = rp * T / 12, rt2 = rp * (T + 1) / 12;
-    if (rt2 > rf2)
-      madvise((void *)(gdata + rf2 * 4096), (rt2 - rf2) * 4096, 22); // MADV_POPULATE_READ
     __atomic_fetch_add(&nready, 1, 0);
     while (__atomic_load_n(&nready, 0) < 12)
       ;
@@ -269,7 +263,7 @@ int main(int argc, char **argv) {
   const char *data = (const char *)mmap((void *)ra, st.st_size, 3, 0x12, rfd, 0);
   madvise((void *)data, st.st_size, 2),
       madvise((void *)data, st.st_size, 14), // SEQUENTIAL | HUGEPAGE
-      fend = data + st.st_size, gdata = data, gsize = st.st_size;
+      fend = data + st.st_size;
 
   // Split into 192 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
