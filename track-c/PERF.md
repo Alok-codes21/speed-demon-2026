@@ -410,4 +410,14 @@ Every step from the reference to your final version, each with the live-board ru
   i.e. a pread design.
 - Local: +5% on 1 vCPU (the copy cost shows when nothing overlaps); maxrss
   delta +6 MB anon. The board decides.
+- Run: run-adac1a1548d6. Board: T 0.040806 (no better than step 61's
+  0.040012), M 16.1 MB, S 258, 74.481 points. READOUT: the file-read path is
+  not the bottleneck either - we are compute-bound in the parse+dedup loop.
+  Reverted.
+
+## Step 64: DIAGNOSTIC ablation - parse + stats only (dedup removed)
+- Step-61 code with the name hash, intern table and country bitsets removed
+  (distinct counts come out 0; the run fails correctness on purpose). Its T
+  decomposes the board budget into parse+stats vs dedup and decides where
+  the remaining optimization effort goes. Local: -36% on 1 vCPU.
 - Run: PENDING
