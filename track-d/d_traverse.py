@@ -143,12 +143,27 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
     db = [I] * n
 
     res = []
+    answer_cache = {}
 
     for k in range(0, len(q_raw), 2):
         s, t = int(q_raw[k]), int(q_raw[k + 1])
 
         if s == t:
             res.append(0)
+            continue
+
+        # The input intentionally contains duplicate queries.
+        key = (s, t)
+        cached = answer_cache.get(key)
+        if cached is not None:
+            res.append(cached)
+            continue
+
+        # A distinct target is unreachable from a zero-outdegree source.
+        # Likewise, a zero-indegree target cannot be reached from elsewhere.
+        if fp[s] == fp[s + 1] or rp[t] == rp[t + 1]:
+            answer_cache[key] = -1
+            res.append(-1)
             continue
 
         # ── initialise ───────────────────────────────────────────────────────
@@ -193,7 +208,9 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
                         c = y + df[v]
                         if c < mu: mu = c
 
-        res.append(mu if mu < I else -1)
+        answer = mu if mu < I else -1
+        answer_cache[key] = answer
+        res.append(answer)
 
         # ── cheap reset: only touch nodes we actually visited ─────────────────
         for v in tf: df[v] = I
