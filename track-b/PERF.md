@@ -242,7 +242,6 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
 - Dead-code trim (pre-fusion set-op helpers) for the S axis.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
-<<<<<<< HEAD
 - Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.7 MB, S=1146, K=10.66,
   **51.47 pts**. T flat within board noise, but M went UP +12.5 MB vs v16:
   the skip tables cost ~+6-11 MB and MALLOC_ARENA_MAX=4 did not shrink the
@@ -265,96 +264,40 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   scalar fallback (the board's i5-13500 has AVX2).
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
-=======
-- Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.6 MB, S=1131, K=10.70, **51.47 pts**.
+- Run: none - a parallel out-of-band C++ rewrite of the track (commit
+  62623a0, merged at cb99e2b6 with unresolved conflict markers in this
+  file) superseded the push before the watcher polled it, so v18 never
+  got a board run. Its changes are carried forward into v19 below.
 
-## Step 15: High-performance C++20 flat-index rewrite (v18, this push)
+## Step 16: track collision + Rust restore + scan work (v19, this push)
 
-- Complete rewrite in standard C++20 (GCC 16, zero external dependencies).
-- Two-pass contiguous flat inverted index:
-  1. Pass 1 counts term frequencies across 12 threads.
-  2. Prefix-sum calculates exact offsets into a single flat 22 MB postings array.
-  3. Pass 2 fills postings in parallel with zero sorting and zero dynamic allocations.
-- Elimination of positional index:
-  Phrase queries intersect postings to find candidate documents (median 1 document),
-  then verify exact token sequence directly on mmapped text via stack ring buffer.
-- Evaluates 50,000 queries in parallel across 12 threads.
-- Source lines cut from 1,131 to ~347 lines (huge boost on S axis).
-- Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
-- Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
->>>>>>> 62623a0 (Track B: High-performance C++20 flat-index engine (12 threads, two-pass postings, zero sort, stack phrase verification))
-- Run: run-bbb9eb625947 - PASS: T=1.522 s, M=155.3 MB, S=475, K=7.99, **45.14 pts**.
-  Analysis of initial C++ port:
-  - MAP_PRIVATE caused corpus pages to be charged to anonymous RSS (+120 MB).
-  - verify_phrase was performing hash table lookups for every token in candidate docs, causing heavy CPU work in eval phase.
+- Collision: a C++20 flat-index rewrite pushed from outside this
+  optimisation loop replaced track-b (src/, Cargo files, b_index.py
+  deleted; gcc Dockerfile; conflicted PERF.md). Its board runs:
+  run-bbb9eb625947 (C++ v18) PASS T=1.522 s, M=162.8 MB, S=475,
+  **45.14 pts**; a follow-up C++ v20 run was in flight at restore time.
+  Team decision (Alok, 5:18 PM IST): the Rust line continues; the C++
+  commits stay in git history. This push restores the Rust tree
+  (src/main.rs, Cargo.toml/lock, b_index.py, PGO Dockerfile, this log)
+  and removes the conflict markers.
 
-## Step 17: MAP_SHARED + galloping intersect + in-place phrase verification (v20, this push)
-
-- mmap corpus with MAP_SHARED: eliminates corpus memory from anonymous RSS (~120 MB -> 0 MB charged).
-- DocSpan offset u32: cuts span table by half (8.4 MB -> 2.1 MB).
-- VocabSlot O(1) TermInfo: direct array indexing for phrase token strings.
-- In-place phrase verification: checks token bytes directly against phrase words without hash computation or hash table probes.
-- Phrase intersection ordering: terms sorted by posting list length so candidates collapse immediately to <= 1-2 docs.
-- Galloping / binary-search intersect: probes long lists with bsearch when length ratio > 16 (600x faster than linear scan).
-- Free pass 1 & 2 scratch arrays before query evaluation and call malloc_trim(0).
-- ENV MALLOC_ARENA_MAX=2.
-- Local benchmark: index 73 ms, eval 5.6 ms, total 80 ms. Output SHA-256 match 100%.
-- Run: PENDING
-
-- Run: run-46c512c0aa6e - PASS: T=0.726 s, M=125.7 MB, S=1146, K=10.66,
-  **51.47 pts**. T flat within board noise, but M went UP +12.5 MB vs v16:
-  the skip tables cost ~+6-11 MB and MALLOC_ARENA_MAX=4 did not shrink the
-  glibc arena footprint the way the 1-vCPU dev sandbox suggested. Net:
-  -0.48 pts vs the v16 best, which stays our best on the board. Honest
-  wrong turn on the M axis; the eval-side T win is real but too small to
-  read through the noise at this T.
-
-## Step 15: memory-lean terms table + AVX2 tokenizer (v18)
-
-- Removed the 2-byte prefix pre-filter in the scan: profiling showed it
-  rejected only 1,755 of 36.3M tokens (79% of corpus tokens are query
-  terms), so the stage was pure overhead.
-- Terms open-addressing table slots u64 -> u32 (tag15 << 17 | tid): table
-  footprint 2 MB -> 1 MB, one 32-bit load + compare per probe instead of
-  64-bit.
-- AVX2 token classifier: 32 bytes -> 32-bit token/separator mask via
-  unsigned range checks on (c|0x20) in [a-z] and c in [0-9] with movemask,
-  run extraction with cross-block carry; runtime feature detection with
-  scalar fallback (the board's i5-13500 has AVX2).
+- The AVX2 line scan now detects '\n' in the same 32-byte classification
+  pass (movemask on a cmpeq) and returns it, removing the separate SWAR
+  find_byte pass over every line - one full corpus byte-pass eliminated.
+  Found and fixed via a differential synthetic test: a token ending exactly
+  on a 32-byte block edge with trailing punctuation before the newline was
+  closed at the newline instead of the block edge.
+- SEG 16 -> 32: halves the per-segment transient pair-log + partition
+  buffers (~12 MB of scan-phase peak), trading a negligible amount of extra
+  per-segment counting-sort setup.
+- MALLOC_ARENA_MAX 4 -> 2: v17 showed 4 arenas did not bind the glibc
+  per-thread heap slack (M went up with the skip tables, not down); 2
+  arenas is the next probe at the ~50 MB of allocator slack that dominates
+  board M over accounted live data.
+- Skip-table stride stays 32: 128 would save ~4.6 MB but costs ~4x decode
+  distance on every skew probe - a T-for-M trade the numbers do not support.
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
-  reference; full sha256 f86973c2...80927 match.
-
-## Step 16: High-performance C++20 flat-index rewrite (v19, this push)
-
-- Complete rewrite in standard C++20 (GCC 16, zero external dependencies).
-- Two-pass contiguous flat inverted index:
-  1. Pass 1 counts term frequencies across 12 threads.
-  2. Prefix-sum calculates exact offsets into a single flat 22 MB postings array.
-  3. Pass 2 fills postings in parallel with zero sorting and zero dynamic allocations.
-- Elimination of positional index:
-  Phrase queries intersect postings to find candidate documents (median 1 document),
-  then verify exact token sequence directly on mmapped text via stack ring buffer.
-- Evaluates 50,000 queries in parallel across 12 threads.
-- Source lines cut from 1,146 to ~347 lines (huge boost on S axis).
-- Memory cut from ~125 MB to ~35 MB (hits maximum 50x bonus on M axis).
-- Verification: exact 100% SHA-256 match on seed-1 sample (eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f).
-- Run: run-bbb9eb625947 - PASS: T=1.522 s, M=155.3 MB, S=475, K=7.99, **45.14 pts**.
-  Analysis of initial C++ port:
-  - MAP_PRIVATE caused corpus pages to be charged to anonymous RSS (+120 MB).
-  - verify_phrase was performing hash table lookups for every token in candidate docs, causing heavy CPU work in eval phase.
-
-## Step 17: MAP_SHARED + galloping intersect + in-place phrase verification (v20, this push)
-
-- mmap corpus with MAP_SHARED: eliminates corpus memory from anonymous RSS (~120 MB -> 0 MB charged).
-- DocSpan offset u32: cuts span table by half (8.4 MB -> 2.1 MB).
-- VocabSlot O(1) TermInfo: direct array indexing for phrase token strings.
-- In-place phrase verification: checks token bytes directly against phrase words without hash computation or hash table probes.
-- Phrase intersection ordering: terms sorted by posting list length so candidates collapse immediately to <= 1-2 docs.
-- Galloping / binary-search intersect: probes long lists with bsearch when length ratio > 16 (600x faster than linear scan).
-- Free pass 1 & 2 scratch arrays before query evaluation and call malloc_trim(0).
-- ENV MALLOC_ARENA_MAX=2.
-- Local benchmark: index 73 ms, eval 5.6 ms, total 80 ms. Output SHA-256 match 100%.
+  reference; full sha256 f86973c2...80927 match; 1,152-case synthetic
+  AVX2-vs-scalar differential (newline at every mod-32 position, tokens
+  straddling block edges, trailing punctuation).
 - Run: PENDING
-
-
-
