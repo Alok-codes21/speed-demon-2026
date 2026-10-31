@@ -681,8 +681,7 @@ fn main() {
     let nt = std::env::var("SD_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| thread::available_parallelism().map(|x| x.get()).unwrap_or(1))
-        .clamp(1, 12);
+        .unwrap_or_else(|| thread::available_parallelism().map(|x| x.get()).unwrap_or(1));
 
     let input = File::open(format!("{data_dir}/requests.log")).expect("open requests.log");
     let size = input.metadata().expect("stat").len() as usize;
