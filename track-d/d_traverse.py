@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Track D (Traverse) — Python 3.13, standard library only.
 
