@@ -482,7 +482,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Workers populate NT + used CB in 1/12 shares behind a spin barrier before
   claiming granules. A 16-record ring (Pend/Mk) defers region read, sums,
   intern and mark; all three random lines are prefetched at parse/retire.
-- Run: PENDING
+- Run: run-61366d1b41b9. Board: T 0.03834 (best of the last three runs;
+  v128 measured 0.03889/0.03907), M 8.6 MB, S 281 (+7 lines: the aligned
+  spare-page map + mask table + word-loop), 77.592 points - inside the
+  +/-0.6% run noise band around v128's 77.652/77.539, so the hash fix holds
+  its T gain and the tip stays v132.
 ## Step 71: pipeline without the populate (v127)
 - Step-70's T win isolated from its M cost: keep the 16-record ring (region
   read, sums, intern, mark deferred; plain fetch_or marks), drop the
@@ -522,4 +526,6 @@ Every step from the reference to your final version, each with the live-board ru
   sha256 d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x parallel
   stress hash-stable, ASAN+UBSAN clean on tiny+edge. Hash values for the
   >25-byte path changed (internal only; interning semantics unchanged).
+- Run: PENDING
+## Step 76: PERF.md bookkeeping (step-75 result); v132 unchanged
 - Run: PENDING
