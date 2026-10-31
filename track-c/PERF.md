@@ -460,4 +460,21 @@ Every step from the reference to your final version, each with the live-board ru
   LOST: no T win (raw-byte hash issue savings don't show at board scale
   either; the FNV chain was already overlapped) and +3 S lines. Reverted.
 ## Step 69: revert to step-61 v111 (best-known, 76.976)
+- Run: run-379a6242d624. Board: T 0.039576, M 9.9 MB, S 240, 77.191 points.
+  New best (favorable re-measure of v111).
+
+## Step 70: prefetch pipeline + parallel table populate (v126)
+- Technique study credit: Cache Me's public MIT-licensed track-c
+  (github.com/manusingh090/speed-demon-2026-entry) and its PERF.md, which
+  measured on this board: 12% of cycles lost to kernel page-table-lock
+  queuing when 12 threads fault in shared tables (fixed with per-thread
+  MADV_POPULATE_WRITE shares), a 14% stall on the region-table byte read
+  immediately after parse (fixed by deferring the read ~16 records), and a
+  double line fetch from test-then-OR marking (93% of marks are first
+  sightings, so mark with a plain fetch_or). Their parser itself scored
+  slower than ours (their step-1 0.0471 vs our 0.0396), so only these three
+  techniques are ported, reimplemented on our parser/tables (no code taken).
+- Workers populate NT + used CB in 1/12 shares behind a spin barrier before
+  claiming granules. A 16-record ring (Pend/Mk) defers region read, sums,
+  intern and mark; all three random lines are prefetched at parse/retire.
 - Run: PENDING
