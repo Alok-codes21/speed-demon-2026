@@ -17,7 +17,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const uint32_t HASH_SIZE = 131072, HM = HASH_SIZE - 1;
+static const uint32_t HASH_SIZE = 262144, HM = HASH_SIZE - 1;
 // country slots, 64-bit words per bitset
 static const uint32_t MAX_C = 256, BITS_W = HASH_SIZE / 64;
 static const char *fend; // end of the records.csv mapping
@@ -233,12 +233,12 @@ int main(int argc, char **argv) {
   std::string data_dir = argc > 1 ? argv[1] : "/data";
   std::string out_dir = argc > 2 ? argv[2] : "/out";
   // 8MB anon (RW, private); align to 2MB so 6MB of tables sit on 3 huge pages
-  char *big = (char *)mmap(0, 8 << 20, 3, 0x22, -1, 0);
+  char *big = (char *)mmap(0, 16 << 20, 3, 0x22, -1, 0);
   size_t al = ((size_t)big + (2 << 20) - 1) & ~((size_t)(2 << 20) - 1);
-  madvise((void *)al, 6 << 20, MADV_HUGEPAGE);
-  NT = (uint64_t *)al;                     // 1 MB
-  R2C = (uint8_t *)(al + (1 << 20)); // 1 MB
-  CB = (uint64_t(*)[BITS_W])(al + (2 << 20));
+  madvise((void *)al, 12 << 20, MADV_HUGEPAGE);
+  NT = (uint64_t *)al;                     // 2 MB
+  R2C = (uint8_t *)(al + (2 << 20)); // 1 MB
+  CB = (uint64_t(*)[BITS_W])(al + (3 << 20));
   NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
   load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
