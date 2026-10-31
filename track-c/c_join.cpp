@@ -193,7 +193,11 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
     uint32_t k = n & 15; // D=false in the main loop: the drain guards vanish
     if (n >= 32 && (D ? n - 32 < last : true)) {
       Mk &m2 = mk[k];
-      __atomic_fetch_or(&CB[m2.c][m2.bnid >> 6], 1ULL << (m2.bnid & 63), 0);
+      // bits only transition 0->1, so a relaxed read is exact: skip the
+      // atomic (and its RFO) for names already seen in this country
+      uint64_t *cw = &CB[m2.c][m2.bnid >> 6], cb_ = 1ULL << (m2.bnid & 63);
+      if (!(__atomic_load_n(cw, __ATOMIC_RELAXED) & cb_))
+        __atomic_fetch_or(cw, cb_, __ATOMIC_RELAXED);
     }
     if (n >= 16 && (D ? n - 16 < last : true)) {
       Pend &o = pend[k];

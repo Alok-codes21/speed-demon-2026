@@ -676,4 +676,19 @@ Every step from the reference to your final version, each with the live-board ru
   primitive already proven in the region/amount parse.
 - Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
   ASAN+UBSAN clean, TSAN clean.
+- Run: run-6dd2bfef553f - clean, T=0.039311 (same-code noise band vs banked
+  0.038028; below the ~5ms effect floor one board run can resolve), M=8.42MB
+  (M reading varies ~+/-0.5MB run to run), S=288. Did not re-bank.
+
+## Step 87 - relaxed check-then-set on the country bitset
+
+- CB bits only transition 0->1, so a relaxed load before the atomic RMW is
+  exact: when the bit is already set the atomic (and its cross-core RFO) is
+  skipped entirely. Both ops stay __atomic - no data race, TSAN clean.
+- Measured on the full seed: 3.32M CB updates, 10.2% hit already-set bits
+  (names spread across ~200 countries, so most records set a new bit; the
+  skip rate is bounded by data, not by the trick).
+- Zero new concurrency, zero new memory.
+- Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
+  ASAN+UBSAN clean, TSAN clean.
 - Run: PENDING
