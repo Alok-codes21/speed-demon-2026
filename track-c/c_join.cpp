@@ -89,24 +89,40 @@ static inline uint64_t num(const char *&p, char term) {
 }
 
 // ---------------------------------------------------------------- regions.csv
-
-void load_regions(const std::string &path) {
-  struct stat st;
-  fstat(open(path.c_str(), O_RDONLY), &st);
-  const char *data = (const char *)mmap(0, st.st_size, 1, 2, open(path.c_str(), O_RDONLY), 0),
-               *end = data + st.st_size,
-               *p = (const char *)memchr(data, '\n', st.st_size) + 1; // header
-  int16_t slot_of[1024]; // country code -> slot, by first appearance
-  memset(slot_of, -1, sizeof(slot_of)), memset(R2C, 255, 1000000);
-  for (uint64_t rid; p < end && (rid = num(p, ','), true); p += 4) {
-    uint32_t w, key = (memcpy(&w, p, 4), __builtin_bswap32(w) >> 8),
-              h = (key * 0x9E3779B1u) >> 22;
-    while (slot_of[h] >= 0 && CK[slot_of[h]] != key)
-      h = (h + 1) & 1023;
-    slot_of[h] < 0 && (CK[slot_of[h] = (int16_t)NC++] = key, 0);
-    rid < 1000000 && (R2C[rid] = (uint8_t)slot_of[h], 0);
+// Loaded by the worker pool, in parallel: each thread SWAR-parses a slice of
+// lines (comma via the zero-byte trick, digits branch-free), claims country
+// slots from a lock-free code->slot table, and stores region->slot. Slot
+// numbers are arbitrary: output sorts by the packed code, never by slot.
+static int32_t slot_of[1024]; // country code -> slot, CAS-published (-2 = busy)
+static const char *rbs[13];   // region-file slice boundaries for 12 threads
+static inline void reg_slice(const char *p, const char *end) {
+  uint32_t n;
+  for (; p < end; p += n + 5) { // rid(1..6 digits) ',' CCC '\n'
+    uint64_t x;
+    memcpy(&x, p, 8);
+    uint64_t c = x ^ 0x2C2C2C2C2C2C2C2CULL,
+             m = (c - 0x0101010101010101ULL) & ~c & 0x8080808080808080ULL;
+    uint32_t rid, w;
+    n = (uint32_t)__builtin_ctzll(m) >> 3, rid = (uint32_t)DIGS(p, n);
+    memcpy(&w, p + n + 1, 4);
+    uint32_t key = __builtin_bswap32(w) >> 8, h = (key * 0x9E3779B1u) >> 22;
+    for (;; h = (h + 1) & 1023) {
+      int32_t s = __atomic_load_n(&slot_of[h], __ATOMIC_ACQUIRE);
+      if (s == -2)
+        continue;
+      if (s < 0) {
+        if (!__sync_bool_compare_and_swap(&slot_of[h], -1, -2))
+          continue;
+        uint32_t sl = __atomic_fetch_add(&NC, 1, 0);
+        CK[sl] = key;
+        __atomic_store_n(&slot_of[h], (int32_t)sl, __ATOMIC_RELEASE), s = (int32_t)sl;
+      }
+      if (CK[s] == key) {
+        rid < 1000000 && (R2C[rid] = (uint8_t)s, 0);
+        break;
+      }
+    }
   }
-  CK[UNMATCHED = NC++] = 0x5F0000; // '_' sorts after every [A-Z] code
 }
 
 // -------------------------------------------------------------------- parsing
@@ -137,7 +153,6 @@ struct Worker {
   int tid;
 };
 static char *pool;      // 2MB-aligned base of NT/R2C/CB
-static size_t popbytes; // NT + CB bytes to pre-populate
 static uint32_t nready;
 
 // CR never appears inside a quoted field, so every "\r\n" ends a record and
@@ -155,16 +170,26 @@ static uint32_t nready;
     esc = 0, p++;
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
-  // Pre-populate this thread's share of the shared tables: twelve threads
-  // faulting the same pages in races queue on the kernel's page-table lock,
-  // and a read-then-written page faults twice (zero page, then private).
-  {
-    int T = ((Worker *)arg)->tid;
-    size_t pages = popbytes / 4096, from = pages * T / 12, to = pages * (T + 1) / 12;
-    if (to > from)
-      madvise(pool + from * 4096, (to - from) * 4096, 23); // MADV_POPULATE_WRITE
-    __atomic_fetch_add(&nready, 1, 0);
-    while (__atomic_load_n(&nready, 0) < 12)
+  // Phases: clear R2C + populate NT/R2C -> load regions.csv slices ->
+  // populate the CB now that NC is known -> parse. Twelve threads faulting
+  // the same pages in races queue on the kernel's page-table lock, so every
+  // shared table is populated by all threads up front, each its own share.
+  int T = ((Worker *)arg)->tid;
+  for (int phase = 0; phase < 3; phase++) {
+    if (phase == 1)
+      reg_slice(rbs[T], rbs[T + 1]);
+    else {
+      size_t bytes = phase == 0 ? 2 << 20 : (size_t)NC * BITS_W * 8,
+             pages = bytes / 4096, from = pages * T / 12, to = pages * (T + 1) / 12;
+      char *base = phase == 0 ? pool : (char *)CB;
+      if (to > from)
+        madvise(base + from * 4096, (to - from) * 4096, 23); // MADV_POPULATE_WRITE
+      if (phase == 0)
+        memset(R2C + (1000000 / 12) * T, 255,
+               T == 11 ? 1000000 - (1000000 / 12) * 11 : 1000000 / 12);
+    }
+    __atomic_fetch_add(&nready, 1, __ATOMIC_ACQ_REL);
+    while (__atomic_load_n(&nready, __ATOMIC_ACQUIRE) < 12 * (phase + 1))
       ;
   }
   // Every record's three random reads (region table, name slot, bitset word)
@@ -253,8 +278,19 @@ int main(int argc, char **argv) {
   // NT 1MB, R2C 1MB, CB the rest; slot 0 reserved (real hashes set bit 63)
   NT = (uint64_t *)al, R2C = (uint8_t *)(al + (1 << 20)),
   CB = (uint64_t(*)[BITS_W])(al + (2 << 20)), NT[0] = 1, pool = (char *)al;
-  load_regions(data_dir + "/regions.csv");
-  popbytes = (2 << 20) + (size_t)NC * BITS_W * 8; // NT + R2C + used CB
+  memset(slot_of, -1, sizeof(slot_of));
+  NC = 1, UNMATCHED = 0, CK[0] = 0x5F0000; // '_' sorts after every [A-Z] code
+  int gfd = open((data_dir + "/regions.csv").c_str(), O_RDONLY);
+  struct stat grst;
+  fstat(gfd, &grst);
+  char *gres = (char *)mmap(0, grst.st_size + (2 << 20) + 4096, 3, 0x22, -1, 0);
+  size_t ga = (size_t)(gres + (2 << 20) - 1) & -(2 << 20);
+  const char *gdata = (const char *)mmap((void *)ga, grst.st_size, 3, 0x12, gfd, 0);
+  rbs[0] = (const char *)memchr(gdata, '\n', grst.st_size) + 1,
+  rbs[12] = gdata + grst.st_size;
+  for (int i = 1; i < 12; i++)
+    rbs[i] = (const char *)memchr(rbs[0] + (i * (rbs[12] - rbs[0])) / 12, '\n',
+                                  rbs[12] - rbs[0]) + 1;
   int rfd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st;
   fstat(rfd, &st);

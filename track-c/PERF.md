@@ -627,3 +627,18 @@ Every step from the reference to your final version, each with the live-board ru
   WORSE, mirroring the 6T loss: the box peaks at 12, both under- and
   over-subscription lose. Thread count settled at 12. Tip reverted to
   v140 (step 83 revert); the 24T variant was gated but not pushed.
+
+## Step 84 - v141: regions.csv loaded by the worker pool, in parallel
+- The old single-threaded byte-loop region load (200k lines, ~8-9% of total
+  CPU by ablation: 130ms -> 119ms user) becomes a 12-way parallel pass:
+  SWAR comma find + branch-free digit decode per line, country slots claimed
+  from a lock-free code->slot table (CAS publish, slot numbers arbitrary -
+  output sorts by packed code). R2C memset + table populate also spread
+  across the pool, CB populate deferred past the region barrier (NC known).
+  Slot 0 is reserved for _UNMATCHED up front (it is read during parsing).
+- Barrier atomics upgraded to ACQ_REL/ACQUIRE - the inherited relaxed
+  pattern was a formal data race (benign on x86 TSO; TSAN flagged it).
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 8x
+  stress hash-stable, ASAN+UBSAN clean (sample/edge/tiny), TSAN CLEAN (0
+  warnings; the pre-fix build showed the barrier races, now gone).
+- Run: PENDING
