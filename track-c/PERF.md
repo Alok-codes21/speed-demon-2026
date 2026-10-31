@@ -723,3 +723,27 @@ Every step from the reference to your final version, each with the live-board ru
   revert.
 - Run: PENDING
 
+
+## Step 90 - vector group probe in the intern table + write prefetch (v152)
+
+- Three serial changes in one candidate, adapted as ideas (re-implemented in
+  our own code) from techniques visible in public entries on the live board
+  (Cache Me's MIT-licensed repo) and standard SwissTable/simdjson practice:
+  1. The intern table probes four slots per step: four per-slot atomic loads
+     packed into one 32-byte vector compared against the key and against zero
+     in parallel. Only a group's FIRST free slot is claimable and a lost CAS
+     re-scans the same group, preserving the scalar probe's single-insert
+     invariant (a looser multi-claim protocol can double-insert a key under
+     a race; ruled out by construction and by the hash gates).
+  2. The country-bitset word is prefetched with WRITE intent: the atomic OR
+     needs the line exclusive, and a plain (read) prefetch fetches it shared
+     first, paying two coherence transactions.
+  3. The quote scanner reads 64 bytes per iteration (notes are often longer
+     than 32), and the id field decodes from an AVX2 comma window + DIGS
+     instead of the bytewise scan.
+- Zero new concurrency, zero new memory (M unchanged), S 273 -> ~290.
+- Local: full d8088b1c..., sample 9035fed3..., generated tiny (seeds 1, 2)
+  and sample (seed 7) diffs vs the reference clean, stress x3, ASAN+UBSAN
+  clean, TSAN clean (the probe's first draft used one plain 32-byte load -
+  TSAN-flagged; replaced with per-slot atomic loads before push).
+- Run: PENDING

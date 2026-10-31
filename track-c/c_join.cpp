@@ -36,10 +36,30 @@ static uint32_t gn; // granule counter
 // index is the id (all hashes have bit 63 set, so a plain CAS publishes the
 // slot and no value is ever pending). k==0 below: our CAS installed h.
 static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
-  for (uint64_t k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE);;
-       idx = (idx + 1) & HM, k = __atomic_load_n(&NT[idx], __ATOMIC_ACQUIRE))
-    if ((k = k ? k : __sync_val_compare_and_swap(&NT[idx], 0, h)) == h || !k)
-      return idx;
+  // Four slots per probe: one 32-byte compare finds the key or the first free
+  // slot. Only the group's FIRST free slot is claimable, and a lost CAS
+  // re-scans the same group, so a key can never be double-inserted (the
+  // single-insert invariant of the scalar probe is preserved).
+  for (uint32_t i = idx & ~3u;;) {
+    // Per-slot atomic loads (TSAN-clean; the CAS below revalidates a 0 lane,
+    // and a nonzero lane was really published, so group snapshots need no
+    // single-point atomicity)
+    __m256i v = _mm256_setr_epi64x(__atomic_load_n(&NT[i], 5),
+                                   __atomic_load_n(&NT[i + 1], 5),
+                                   __atomic_load_n(&NT[i + 2], 5),
+                                   __atomic_load_n(&NT[i + 3], 5));
+    if (uint32_t hit = _mm256_movemask_pd(_mm256_castsi256_pd(
+            _mm256_cmpeq_epi64(v, _mm256_set1_epi64x(h)))))
+      return i + __builtin_ctz(hit);
+    uint32_t free_ = _mm256_movemask_pd(_mm256_castsi256_pd(
+        _mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
+    if (!free_ && (i = (i + 4) & HM, true))
+      continue;
+    uint32_t j = i + __builtin_ctz(free_);
+    uint64_t s = __sync_val_compare_and_swap(&NT[j], 0, h);
+    if (s == 0 || s == h)
+      return j;
+  }
 }
 
 // Names hash over raw field bytes ("" pairs included - canonical). With the
@@ -115,6 +135,9 @@ void load_regions(const std::string &path) {
 
 // Next quote; AVX2 scan with a memchr tail. End-bounded.
 static inline const char *find_quote(const char *s, const char *end) {
+  for (; s + 64 <= end; s += 64)
+    if (uint64_t m = (uint32_t)MM(s) | ((uint64_t)(uint32_t)MM(s + 32) << 32))
+      return s + __builtin_ctzll(m);
   for (; s + 32 <= end; s += 32)
     if (int m = MM(s))
       return s + __builtin_ctz(m);
@@ -192,7 +215,7 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_max = std::max(st.amount_max, o.cents);
       st.name_bytes += o.name_len, st.note_bytes += o.note_len;
       mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
-      __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
+      __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6], 1); // write intent: fetch the line exclusive, not shared
     }
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
@@ -201,7 +224,10 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       // skip a UTF-8 BOM before a record, then the id field
       const char *s, *e;
       uint32_t esc, name_len = 0, note_len = 0, slot;
-      uint64_t id = (p += 3 * ((uint8_t)*p == 0xEF), num(p, ','));
+      uint64_t id = ({p += 3 * ((uint8_t)*p == 0xEF); // BOM
+                         uint32_t n_ = __builtin_ctz(MM2(p, ',') & 0x1FF);
+                         uint64_t v_ = DIGS(p, n_);
+                         p += n_ + 1, v_;}); // ids < 4e7: <= 8 digits, comma in window
       // name: empty unquoted, or quoted (non-empty names are always quoted)
       QF(name_len);
       // empty names never intern; skip the hash (s is only set by QF)
