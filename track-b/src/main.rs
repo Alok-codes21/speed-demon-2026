@@ -1,14 +1,14 @@
 //! Speed Demon 2026, Track B (Index).
 //!
 //! Query-driven inverted index, std-only, no dependencies:
-//!   1. Parse queries.txt first and collect every distinct term.
+//!   1. Parse queries.txt first; collect every distinct term, flagged by
+//!      whether BOOL doc lists and/or PHRASE positions are needed for it.
 //!   2. Stream docs.txt in blocks (parallel ranges): a byte-exact tokenizer
-//!      per the spec records deduplicated doc ids for query terms and the
-//!      file offset of every doc line.
+//!      per the spec records deduplicated doc ids for BOOL terms and packed
+//!      (doc, position) entries for PHRASE terms only.
 //!   3. BOOL queries merge sorted doc-id lists strictly left to right.
-//!      PHRASE queries intersect their terms' doc lists, then re-tokenize
-//!      each candidate doc straight from the file to verify adjacency.
-//!      No positional index is ever stored.
+//!      PHRASE queries iterate the rarest term's occurrences and binary-search
+//!      the other terms' packed position lists for the expected offsets.
 //!
 //! Reads /data/docs.txt and /data/queries.txt, writes /out/results.txt.
 
@@ -16,10 +16,8 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 
-// ---------------------------------------------------------------------------
 // Tokenizer: fold A-Z to a-z only; a token is a maximal run of [a-z0-9].
 // Every other byte (including all bytes >= 0x80) is a separator.
-// ---------------------------------------------------------------------------
 const SEP: u8 = 0xFF;
 
 const fn build_fold() -> [u8; 256] {
@@ -86,15 +84,15 @@ fn hash_bytes(b: &[u8]) -> u64 {
     hs.finish(b.len() as u64)
 }
 
-// ---------------------------------------------------------------------------
 // Term table: open addressing over single u64 entries
-//   [ hash32 : low 32 | term id : high 32 ]
+//   [ hash32 : low 32 | term id : 24 | flags : 8 ]
 // so a probe touches one cache line before any byte comparison.
 // A 4M-bit summary filter lets the corpus scan skip nearly every miss
 // without touching the table.
-// ---------------------------------------------------------------------------
 const FILTER_BITS: usize = 1 << 22;
 const EMPTY: u64 = u64::MAX;
+const FLAG_DOCS: u8 = 1;
+const FLAG_POS: u8 = 2;
 
 struct Terms {
     slots: Vec<u64>,
@@ -133,9 +131,9 @@ impl Terms {
         let k = (hash as usize) & (FILTER_BITS - 1);
         (self.filter[k >> 6] >> (k & 63)) & 1 == 1
     }
-    /// Full lookup; returns the term id.
+    /// Full lookup; returns the raw entry (hash32 | id | flags).
     #[inline(always)]
-    fn get(&self, hash: u64, bytes: &[u8]) -> Option<u32> {
+    fn get(&self, hash: u64, bytes: &[u8]) -> Option<u64> {
         let h32 = Self::h32(hash);
         let mut i = (h32 as usize) & self.mask();
         loop {
@@ -143,9 +141,8 @@ impl Terms {
             if e == EMPTY {
                 return None;
             }
-            let id = (e >> 32) as u32;
-            if e as u32 == h32 && self.bytes(id) == bytes {
-                return Some(id);
+            if e as u32 == h32 && self.bytes(((e >> 32) & 0xFF_FFFF) as u32) == bytes {
+                return Some(e);
             }
             i = (i + 1) & self.mask();
         }
@@ -168,8 +165,23 @@ impl Terms {
                 self.used += 1;
                 return id;
             }
-            if e as u32 == h32 && self.bytes((e >> 32) as u32) == bytes {
-                return (e >> 32) as u32;
+            if e as u32 == h32 && self.bytes(((e >> 32) & 0xFF_FFFF) as u32) == bytes {
+                return ((e >> 32) & 0xFF_FFFF) as u32;
+            }
+            i = (i + 1) & self.mask();
+        }
+    }
+    fn mark(&mut self, hash: u64, bytes: &[u8], flag: u8) {
+        let h32 = Self::h32(hash);
+        let mut i = (h32 as usize) & self.mask();
+        loop {
+            let e = self.slots[i];
+            if e == EMPTY {
+                return;
+            }
+            if e as u32 == h32 && self.bytes(((e >> 32) & 0xFF_FFFF) as u32) == bytes {
+                self.slots[i] |= (flag as u64) << 56;
+                return;
             }
             i = (i + 1) & self.mask();
         }
@@ -195,9 +207,7 @@ impl Terms {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Queries.
-// ---------------------------------------------------------------------------
 const OP_AND: u8 = 0;
 const OP_OR: u8 = 1;
 const OP_NOT: u8 = 2;
@@ -221,6 +231,7 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
                 if expect_term {
                     let h = hash_bytes(w);
                     t.push(terms.insert(h, w));
+                    terms.mark(h, w, FLAG_DOCS);
                 } else {
                     ops.push(match w {
                         b"AND" => OP_AND,
@@ -238,6 +249,7 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
             for w in inner.split(|&b| b == b' ') {
                 let h = hash_bytes(w);
                 t.push(terms.insert(h, w));
+                terms.mark(h, w, FLAG_POS);
             }
             qs.push(Query::Phrase { terms: t });
         } else {
@@ -247,80 +259,113 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
     qs
 }
 
-// ---------------------------------------------------------------------------
-// Corpus scan (streaming). Per thread: deduplicated ascending doc ids per
-// term, plus (doc id, line offset) for every doc seen.
-// A tiny per-thread cache of recently touched (term, doc) pairs keeps hot
-// vocabulary terms off the posting vectors.
-// ---------------------------------------------------------------------------
-struct Post {
-    docs: Vec<Vec<u32>>,
-    offs: Vec<(u32, u64)>,
-}
-
+// Corpus scan (streaming). Per thread and term:
+//   docs: deduplicated ascending doc ids (BOOL terms)
+//   ents: packed (doc << POS_SHIFT) | pos, ascending (PHRASE terms)
+//   ovf:  (tid, (doc << 32) | pos) for pos >= POS_LIMIT (never in practice)
+// A tiny per-thread (term, doc) recency cache keeps hot vocabulary terms
+// off the posting vectors.
+const POS_SHIFT: u32 = 13;
+const POS_LIMIT: u32 = 1 << POS_SHIFT; // max tokens in any doc is ~7k
+const POS_MASK: u32 = POS_LIMIT - 1;
 const RECENT: usize = 4096;
 
-/// Scans whole lines in `data` (whose first byte sits at `base` in the
-/// file): decimal id, TAB, text, LF.
-fn scan_lines(data: &[u8], base: u64, terms: &Terms, post: &mut Post, recent: &mut [(u32, u32)]) {
+struct Post {
+    docs: Vec<Vec<u32>>,
+    ents: Vec<Vec<u32>>,
+    ovf: Vec<(u32, u64)>,
+}
+
+/// Advances past separators, then folds one token into `tb`; returns the
+/// token length (which may exceed `tb`, in which case it can never be a
+/// query term). Returns 0 when no token remains.
+#[inline(always)]
+fn next_token(data: &[u8], i: &mut usize, tb: &mut [u8]) -> usize {
+    let n = data.len();
+    let mut j = *i;
+    while j < n && FOLD[data[j] as usize] == SEP {
+        j += 1;
+    }
+    let mut tl = 0usize;
+    while j < n {
+        let f = FOLD[data[j] as usize];
+        if f == SEP {
+            break;
+        }
+        if tl < tb.len() {
+            tb[tl] = f;
+        }
+        tl += 1;
+        j += 1;
+    }
+    *i = j;
+    tl
+}
+
+/// Scans whole lines in `data`: decimal id, TAB, text, LF.
+fn scan_lines(data: &[u8], terms: &Terms, post: &mut Post, recent: &mut [(u32, u32)]) {
     let mut tb = [0u8; MAX_TERM + 8];
     let n = data.len();
     let mut i = 0usize;
     while i < n {
-        let line_start = i;
         let mut id: u32 = 0;
         while data[i] != b'\t' {
             id = id * 10 + (data[i] - b'0') as u32;
             i += 1;
         }
         i += 1;
-        post.offs.push((id, base + line_start as u64));
+        let text_start = i;
         while i < n && data[i] != b'\n' {
-            let f = FOLD[data[i] as usize];
-            if f == SEP {
-                i += 1;
-                continue;
-            }
-            let mut hs = Hasher::new();
-            let mut tl = 0usize;
-            while i < n {
-                let f = FOLD[data[i] as usize];
-                if f == SEP {
-                    break;
-                }
-                if tl < tb.len() {
-                    tb[tl] = f;
-                }
-                hs.byte(f);
-                tl += 1;
-                i += 1;
+            i += 1;
+        }
+        let text = &data[text_start..i];
+        let tn = text.len();
+        let mut j = 0usize;
+        let mut pos: u32 = 0;
+        while j < tn {
+            let tl = next_token(text, &mut j, &mut tb);
+            if tl == 0 {
+                break;
             }
             if tl <= MAX_TERM {
-                let h = hs.finish(tl as u64);
+                let h = hash_bytes(&tb[..tl]);
                 if terms.filter_test(h) {
-                    if let Some(t) = terms.get(h, &tb[..tl]) {
-                        let rc = &mut recent[(t as usize) & (RECENT - 1)];
-                        if *rc != (t, id) {
-                            if post.docs[t as usize].last() != Some(&id) {
-                                post.docs[t as usize].push(id);
+                    if let Some(e) = terms.get(h, &tb[..tl]) {
+                        let t = ((e >> 32) & 0xFF_FFFF) as usize;
+                        let fl = (e >> 56) as u8;
+                        if fl & FLAG_DOCS != 0 {
+                            let rc = &mut recent[t & (RECENT - 1)];
+                            if *rc != (t as u32, id) {
+                                if post.docs[t].last() != Some(&id) {
+                                    post.docs[t].push(id);
+                                }
+                                *rc = (t as u32, id);
                             }
-                            *rc = (t, id);
+                        }
+                        if fl & FLAG_POS != 0 {
+                            if pos < POS_LIMIT {
+                                post.ents[t].push((id << POS_SHIFT) | pos);
+                            } else {
+                                post.ovf.push((t as u32, ((id as u64) << 32) | pos as u64));
+                            }
                         }
                     }
                 }
             }
+            pos += 1;
         }
         i += 1; // skip LF
     }
 }
 
-const BLOCK: usize = 1 << 21; // 2 MB streaming blocks
+const BLOCK: usize = 1 << 23; // 8 MB streaming blocks
 
 /// Streams [start, end) of docs.txt; both bounds sit right after an LF.
 fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usize) -> Post {
     let mut post = Post {
         docs: (0..n_terms).map(|_| Vec::new()).collect(),
-        offs: Vec::new(),
+        ents: (0..n_terms).map(|_| Vec::new()).collect(),
+        ovf: Vec::new(),
     };
     let mut recent = vec![(u32::MAX, 0u32); RECENT];
     let f = fs::File::open(path).expect("open docs.txt");
@@ -344,7 +389,7 @@ fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usi
             }
         };
         if cut > 0 {
-            scan_lines(&buf[..cut], (start + (pos - start) - avail) as u64, terms, &mut post, &mut recent);
+            scan_lines(&buf[..cut], terms, &mut post, &mut recent);
             buf.copy_within(cut..avail, 0);
             carry = avail - cut;
         }
@@ -381,14 +426,14 @@ fn chunk_ranges(file_len: usize, path: &str, nthreads: usize) -> Vec<(usize, usi
     ranges
 }
 
-// ---------------------------------------------------------------------------
-// Merged index: one flat doc-id arena with per-term spans, plus the
-// doc id -> line offset table used to re-read docs for phrase checks.
-// ---------------------------------------------------------------------------
+// Merged index: flat arenas with per-term spans.
 struct Index {
     docs: Vec<u32>,
     d_spans: Vec<(u32, u32)>,
-    offsets: Vec<u64>,
+    ents: Vec<u32>, // packed (doc << POS_SHIFT) | pos
+    e_spans: Vec<(u32, u32)>,
+    ovf: Vec<u64>, // (doc << 32) | pos for pos >= POS_LIMIT
+    o_spans: Vec<(u32, u32)>,
 }
 
 impl Index {
@@ -397,36 +442,60 @@ impl Index {
         let (off, len) = self.d_spans[tid as usize];
         &self.docs[off as usize..(off + len) as usize]
     }
+    #[inline(always)]
+    fn ents(&self, tid: u32) -> &[u32] {
+        let (off, len) = self.e_spans[tid as usize];
+        &self.ents[off as usize..(off + len) as usize]
+    }
+    #[inline(always)]
+    fn ovf(&self, tid: u32) -> &[u64] {
+        let (off, len) = self.o_spans[tid as usize];
+        &self.ovf[off as usize..(off + len) as usize]
+    }
 }
 
 fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
     let mut d_spans = vec![(0u32, 0u32); n_terms];
+    let mut e_spans = vec![(0u32, 0u32); n_terms];
+    let mut o_spans = vec![(0u32, 0u32); n_terms];
     let d_total: usize = parts.iter().map(|p| p.docs.iter().map(Vec::len).sum::<usize>()).sum();
+    let e_total: usize = parts.iter().map(|p| p.ents.iter().map(Vec::len).sum::<usize>()).sum();
+    let o_total: usize = parts.iter().map(|p| p.ovf.len()).sum();
     let mut docs: Vec<u32> = Vec::with_capacity(d_total);
+    let mut ents: Vec<u32> = Vec::with_capacity(e_total);
+    let mut ovf: Vec<u64> = Vec::with_capacity(o_total);
+    for p in parts.iter_mut() {
+        p.ovf.sort_unstable();
+    }
     for tid in 0..n_terms {
         let ds = docs.len() as u32;
+        let es = ents.len() as u32;
         for p in parts.iter_mut() {
             docs.extend_from_slice(&std::mem::take(&mut p.docs[tid]));
+            ents.extend_from_slice(&std::mem::take(&mut p.ents[tid]));
         }
         d_spans[tid] = (ds, docs.len() as u32 - ds);
+        e_spans[tid] = (es, ents.len() as u32 - es);
     }
-    let max_id = parts
-        .iter()
-        .flat_map(|p| p.offs.iter().map(|&(id, _)| id))
-        .max()
-        .unwrap_or(0);
-    let mut offsets = vec![u64::MAX; max_id as usize + 1];
-    for p in parts.iter() {
-        for &(id, off) in &p.offs {
-            offsets[id as usize] = off;
+    // Per-term overflow spans (per-thread overflow lists are sorted by
+    // (tid, doc); overflow is normally empty, so a simple scan suffices).
+    if o_total > 0 {
+        for tid in 0..n_terms as u32 {
+            let s = ovf.len() as u32;
+            for p in parts.iter() {
+                for &(t, v) in &p.ovf {
+                    if t == tid {
+                        ovf.push(v);
+                    }
+                }
+            }
+            o_spans[tid as usize] = (s, ovf.len() as u32 - s);
         }
     }
-    Index { docs, d_spans, offsets }
+    Index { docs, d_spans, ents, e_spans, ovf, o_spans }
 }
 
-// ---------------------------------------------------------------------------
 // Boolean merges over sorted doc-id slices.
-// ---------------------------------------------------------------------------
 fn intersect(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     out.clear();
     let (mut i, mut j) = (0usize, 0usize);
@@ -483,9 +552,7 @@ fn difference(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     out.extend_from_slice(&a[i..]);
 }
 
-// ---------------------------------------------------------------------------
 // Evaluation.
-// ---------------------------------------------------------------------------
 fn write_u64(out: &mut Vec<u8>, mut v: u64) {
     let mut b = [0u8; 20];
     let mut i = 20;
@@ -515,85 +582,31 @@ fn emit(out: &mut Vec<u8>, docs: &[u32]) {
     out.push(b'\n');
 }
 
-/// Re-tokenizes doc `d` from the file and checks whether the phrase terms
-/// occur at consecutive token positions. Positions count every token run,
-/// exactly as the corpus scan does. `buf` and `hits` are caller-owned
-/// scratch, reused across candidates.
-fn phrase_doc_match(
-    f: &fs::File,
-    offsets: &[u64],
-    phrase_words: &[&[u8]],
-    d: u32,
-    buf: &mut [u8],
-    hits: &mut Vec<(u8, u32)>,
-) -> bool {
-    let off = offsets[d as usize];
-    if off == u64::MAX {
-        return false;
-    }
-    let n = f.read_at(buf, off).unwrap_or(0);
-    let mut line = &buf[..n];
-    if let Some(p) = line.iter().position(|&b| b == b'\n') {
-        line = &line[..p];
-    }
-    let text = match line.iter().position(|&b| b == b'\t') {
-        Some(p) => &line[p + 1..],
-        None => return false,
-    };
-    let k = phrase_words.len();
-    hits.clear();
-    let mut tb = [0u8; MAX_TERM + 8];
-    let n = text.len();
-    let mut i = 0usize;
-    let mut pos: u32 = 0;
-    while i < n {
-        let f = FOLD[text[i] as usize];
-        if f == SEP {
-            i += 1;
-            continue;
+/// True if the phrase anchored at (d, p) for term order[0] extends through
+/// every other term at its expected offset.
+fn phrase_hit(idx: &Index, terms: &[u32], order: &[usize], a: usize, d: u32, p: i64) -> bool {
+    for &j in &order[1..] {
+        let tp = p + (j as i64 - a as i64);
+        if tp < 0 {
+            return false;
         }
-        let mut tl = 0usize;
-        while i < n {
-            let f = FOLD[text[i] as usize];
-            if f == SEP {
-                break;
-            }
-            if tl < tb.len() {
-                tb[tl] = f;
-            }
-            tl += 1;
-            i += 1;
-        }
-        if tl <= MAX_TERM {
-            let tok = &tb[..tl];
-            for (j, w) in phrase_words.iter().enumerate() {
-                if w.len() == tl && *w == tok {
-                    hits.push((j as u8, pos));
-                }
-            }
-        }
-        pos += 1;
-    }
-    let mut found = false;
-    for &(j0, p0) in hits.iter() {
-        if j0 != 0 {
-            continue;
-        }
-        if (1..k).all(|j| hits.iter().any(|&(jj, pp)| jj as usize == j && pp == p0 + j as u32)) {
-            found = true;
-            break;
+        let ok = if (tp as u32) < POS_LIMIT {
+            idx.ents(terms[j]).binary_search(&((d << POS_SHIFT) | tp as u32)).is_ok()
+        } else {
+            idx.ovf(terms[j]).binary_search(&(((d as u64) << 32) | tp as u64)).is_ok()
+        };
+        if !ok {
+            return false;
         }
     }
-    found
+    true
 }
 
-fn eval_queries(idx: &Index, terms: &Terms, file: &fs::File, qs: &[Query]) -> Vec<u8> {
+fn eval_queries(idx: &Index, qs: &[Query]) -> Vec<u8> {
     let mut out = Vec::with_capacity(qs.len() * 30);
     let mut cur: Vec<u32> = Vec::new();
     let mut tmp: Vec<u32> = Vec::new();
     let mut matched: Vec<u32> = Vec::new();
-    let mut docbuf = vec![0u8; 1 << 14];
-    let mut hits: Vec<(u8, u32)> = Vec::with_capacity(64);
     for q in qs {
         match q {
             Query::Bool { terms, ops } => {
@@ -610,28 +623,30 @@ fn eval_queries(idx: &Index, terms: &Terms, file: &fs::File, qs: &[Query]) -> Ve
                 }
                 emit(&mut out, &cur);
             }
-            Query::Phrase { terms: pterms } => {
+            Query::Phrase { terms } => {
                 matched.clear();
-                let pw: Vec<&[u8]> = pterms.iter().map(|&t| terms.bytes(t)).collect();
-                // Anchor on the term with the shortest doc list; the other
-                // lists are probed by binary search for each candidate doc.
-                let k = pterms.len();
+                // Anchor on the rarest term; check the rest in rising rarity.
+                let k = terms.len();
                 let mut order: [usize; 8] = [0; 8];
                 for j in 0..k {
                     order[j] = j;
                 }
-                order[..k].sort_by_key(|&j| idx.docs(pterms[j]).len());
+                order[..k].sort_by_key(|&j| idx.ents(terms[j]).len());
                 let a = order[0];
-                'cand: for &d in idx.docs(pterms[a]) {
-                    for &j in &order[1..k] {
-                        if idx.docs(pterms[j]).binary_search(&d).is_err() {
-                            continue 'cand;
-                        }
-                    }
-                    if phrase_doc_match(file, &idx.offsets, &pw, d, &mut docbuf, &mut hits) {
+                for &e in idx.ents(terms[a]) {
+                    let d = e >> POS_SHIFT;
+                    if phrase_hit(idx, terms, &order[..k], a, d, (e & POS_MASK) as i64) {
                         matched.push(d);
                     }
                 }
+                for &e in idx.ovf(terms[a]) {
+                    let d = (e >> 32) as u32;
+                    if phrase_hit(idx, terms, &order[..k], a, d, (e & 0xFFFF_FFFF) as i64) {
+                        matched.push(d);
+                    }
+                }
+                matched.sort_unstable();
+                matched.dedup();
                 emit(&mut out, &matched);
             }
         }
@@ -639,7 +654,6 @@ fn eval_queries(idx: &Index, terms: &Terms, file: &fs::File, qs: &[Query]) -> Ve
     out
 }
 
-// ---------------------------------------------------------------------------
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(String::as_str).unwrap_or("/data");
@@ -674,17 +688,14 @@ fn main() {
     let index = build_index(&mut parts, n_terms);
     drop(parts);
 
-    let docs_file = fs::File::open(&docs_path).expect("open docs.txt");
     let mut pieces: Vec<Vec<u8>> = Vec::new();
     std::thread::scope(|s| {
         let nchunks = nthreads.max(1).min(queries.len().max(1));
         let size = queries.len() / nchunks + 1;
         let iref = &index;
-        let tref = &terms;
-        let fref = &docs_file;
         let handles: Vec<_> = queries
             .chunks(size)
-            .map(|qc| s.spawn(move || eval_queries(iref, tref, fref, qc)))
+            .map(|qc| s.spawn(move || eval_queries(iref, qc)))
             .collect();
         for h in handles {
             pieces.push(h.join().expect("eval thread"));
