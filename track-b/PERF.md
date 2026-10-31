@@ -82,7 +82,7 @@ identical to 4d9f7f3.
 | 66d14cf (runtime-first v4) | run-06ed87c66719 | PASS: T=0.886 s, M=477 MB, K=7.96, 45.06 pts |
 | 4d9f7f3 (quota threads v5) | run-8b18b13d78cd (measured at d2793ac, same track-b code) | PASS: T=0.863 s, M=501 MB, K=8.02, 45.22 pts |
 | 7fa17fc (AVX2 tokenizer v6) | run-ddbd7deaacbb | PASS: T=0.723 s, M=501 MB, K=8.46, 46.36 pts |
-| peak-trim v7 (this push) | pending | awaiting board run |
+| (peak-trim v7) | run-61fcc3fc98c9 | PASS: T=0.989 s, M=265 MB, K=8.97, 46.74 pts |
 
 
 ## Step 7: bigram phrase index + query-only postings rewrite (v10)
@@ -102,4 +102,39 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   match the published sha256 (full f86973c2...80927); 1-vCPU dev wall
   3.1 s full dataset, peak RSS 383 MB local (includes the 254 MB corpus
   pages, which the board does not charge).
+- Run: run-8919acd63605 - PASS: T=0.868 s, M=228 MB, S=822, K=9.11,
+  **47.98 pts** (was 46.74 with v7; rank 43/62 at the time)
+
+## Step 8: bloom-gated scan + flat u32 postings arena (v11)
+
+- A 2 Mbit bloom filter over the query-term hash now gates the hash-table
+  probe in the corpus scan: the ~85% of corpus tokens that are not query
+  terms are rejected with one L2-resident bit test instead of a 2 MB table
+  walk. The same gate fronts phrase-verification lookups.
+- The merged postings store changed from delta-varint to a flat u32 arena
+  (84 MB), so query evaluation reads doc-id slices directly instead of
+  re-decoding: measured 417 MB of varint bytes were being decoded per
+  50k-query evaluation (~15x re-decode of the same lists).
+- Deliberate trade: board memory rose 228 -> 280 MB to buy wall time.
+- Board: T 0.868 -> 0.678 s. Run: run-53dc23e73e19 - PASS: T=0.678 s,
+  M=280 MB, S=851, K=9.85, **49.66 pts** (rank 43/63 at the time)
+
+## Step 9: segmented scan + varint streams (v12, this push)
+
+- Gets v11's wall time back at v10's memory: the corpus is scanned in 8
+  sequential segments (12 line-aligned stripes each); each segment's
+  per-thread postings are merged into per-term delta-varint streams
+  immediately and their vectors released (capacity is reused across
+  segments, so there is no reallocation churn).
+- The merge itself is parallel: each merge thread owns a term range and a
+  bigram range, reading every scan thread's stripe lists in order (stripes
+  are contiguous doc ranges, so concatenation is globally sorted without a
+  sort pass).
+- Evaluation decodes term/bigram streams into reused scratch vectors, as in
+  v10; the flat u32 arena (and its 84 MB peak) is gone.
+- Dev sandbox (1 vCPU): wall 2.4 s full dataset (scan+merge 1.45 s,
+  eval 0.95 s), peak RSS 325 MB local including the 254 MB corpus pages the
+  board does not charge (v11 was 436 MB).
+- Verification: spec worked example exact; tiny/sample byte-diff vs Python
+  reference; full sha256 f86973c2...80927 match.
 - Run: PENDING
