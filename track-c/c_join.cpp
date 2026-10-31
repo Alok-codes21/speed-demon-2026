@@ -48,10 +48,12 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
 // names, so the mix is branch-free and the hash value is unchanged.
 #define LENM(k) ((k) > 7 ? ~0ULL : (1ULL << (8 * (k))) - 1)
 static inline uint64_t hs(const char *s, uint32_t len) {
-  uint64_t w0, w1, w2;
-  memcpy(&w0, s, 8), memcpy(&w1, s + 8, 8), memcpy(&w2, s + 16, 8);
-  w0 &= LENM(std::min(len, 8u)), w1 &= LENM(len > 8 ? std::min(len - 8, 8u) : 0),
-  w2 &= LENM(len > 16 ? std::min(len - 16, 8u) : 0);
+  uint64_t w0, w1 = 0, w2 = 0; // short names skip the upper loads entirely
+  memcpy(&w0, s, 8), w0 &= LENM(std::min(len, 8u));
+  if (len > 8)
+    memcpy(&w1, s + 8, 8), w1 &= LENM(std::min(len - 8, 8u));
+  if (len > 16)
+    memcpy(&w2, s + 16, 8), w2 &= LENM(len - 16);
   uint64_t h = w0 ^ w1 * 0x9e3779b97f4a7c15ULL ^ w2 * 0x517cc1b727220a95ULL ^
                len * 0xbf58476d1ce4e5b9ULL;
   __uint128_t r = (__uint128_t)h * 0x9e3779b97f4a7c15ULL;
@@ -112,7 +114,6 @@ void load_regions(const std::string &path) {
 // 32-byte quote mask; the constant hoists out of the loop
 #define MM(s) \
   _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s)), _mm256_set1_epi8('"')))
-
 // Next quote; AVX2 scan with a memchr tail. End-bounded.
 static inline const char *find_quote(const char *s, const char *end) {
   for (; s + 32 <= end; s += 32)
@@ -152,7 +153,6 @@ static uint32_t nready;
     LEN = (uint32_t)(e - 2 - s) - esc, p = e;        \
   } else                                             \
     esc = 0, p++;
-
 __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
   // Pre-populate this thread's share of the shared tables: twelve threads
@@ -177,23 +177,24 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
   } pend[16]; // 16-record deferral ring
   struct Mk { uint32_t c, bnid; } mk[16];
   uint64_t n = 0, last = ~0ULL;
+#define RETIRE(k)                                                        \
+  {                                                                      \
+    Pend &o = pend[k];                                                   \
+    uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;                    \
+    Stats &st = stats[c = c == 255 ? UNMATCHED : c];                     \
+    st.count++, st.id_sum += o.id, st.amount_sum += o.cents,             \
+    st.name_bytes += o.name_len, st.note_bytes += o.note_len,            \
+    st.amount_min = std::min(st.amount_min, o.cents),                    \
+    st.amount_max = std::max(st.amount_max, o.cents);                    \
+    mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};             \
+    __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);                   \
+  }
   auto adv = [&]() __attribute__((always_inline)) {
-    uint32_t k = n & 15;
-    if (n >= 32 && n - 32 < last) {
-      Mk &m2 = mk[k];
-      __atomic_fetch_or(&CB[m2.c][m2.bnid >> 6], 1ULL << (m2.bnid & 63), 0);
-    }
-    if (n >= 16 && n - 16 < last) {
-      Pend &o = pend[k];
-      uint8_t c = (o.reg < 1000000) ? R2C[o.reg] : 255;
-      Stats &st = stats[c = c == 255 ? UNMATCHED : c];
-      st.count++, st.id_sum += o.id, st.amount_sum += o.cents;
-      st.amount_min = std::min(st.amount_min, o.cents),
-      st.amount_max = std::max(st.amount_max, o.cents);
-      st.name_bytes += o.name_len, st.note_bytes += o.note_len;
-      mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
-      __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
-    }
+    uint32_t k = n & 15; // main loop: ring is never draining (last = ~0)
+    if (n >= 32)
+      __atomic_fetch_or(&CB[mk[k].c][mk[k].bnid >> 6], 1ULL << (mk[k].bnid & 63), 0);
+    if (n >= 16)
+      RETIRE(k);
   };
   for (uint32_t g; (g = __atomic_fetch_add(&gn, 1, 0)) < 192;) {
     const char *p = gst[g], *end = gst[g + 1];
@@ -231,8 +232,13 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       pend[n++ & 15] = {nh, id, cents, slot, reg, name_len, note_len};
     }
   }
-  for (last = n; n < last + 32; ++n)
-    adv();
+  for (last = n; n < last + 32; ++n) {
+    uint32_t k = n & 15;
+    if (n - 32 < last)
+      __atomic_fetch_or(&CB[mk[k].c][mk[k].bnid >> 6], 1ULL << (mk[k].bnid & 63), 0);
+    if (n - 16 < last)
+      RETIRE(k);
+  }
   return nullptr;
 }
 
@@ -264,7 +270,6 @@ int main(int argc, char **argv) {
   madvise((void *)data, st.st_size, 2),
       madvise((void *)data, st.st_size, 14), // SEQUENTIAL | HUGEPAGE
       fend = data + st.st_size;
-
   // Split into 192 granules at exact record boundaries; workers pull granules
   // from an atomic counter, so a slow granule cannot leave a tail idle.
   gst[0] = (const char *)memchr(data, '\n', st.st_size) + 1, gst[192] = fend;
@@ -274,7 +279,6 @@ int main(int argc, char **argv) {
                *m = (const char *)memmem(ap, fend - ap, "\r\n", 2);
     gst[i] = m ? m + 2 : fend;
   }
-
   static Worker workers[12];
   pthread_t ths[12];
   for (int i = 0; i < 12; i++)
@@ -283,7 +287,6 @@ int main(int argc, char **argv) {
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   for (int i = 0; i < 12; i++)
     pthread_join(ths[i], nullptr);
-
   // Merge the per-thread aggregates (empty threads merge as zeros).
   Stats final_s[MAX_C];
   for (uint32_t i = 0; i < 12 * NC; i++) {
@@ -293,12 +296,10 @@ int main(int argc, char **argv) {
     f.amount_max = std::max(f.amount_max, w.amount_max);
     f.name_bytes += w.name_bytes, f.note_bytes += w.note_bytes;
   }
-
   // Countries sort by their packed 3-byte key; '_' (UNMATCHED) is last.
   uint32_t order[MAX_C];
   std::iota(order, order + NC, 0u);
   std::sort(order, order + NC, [](auto a, auto b) { return CK[a] < CK[b]; });
-
   mkdir(out_dir.c_str(), 0777);
   FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
   out || (exit(1), 0);

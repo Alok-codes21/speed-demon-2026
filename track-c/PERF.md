@@ -574,3 +574,17 @@ Every step from the reference to your final version, each with the live-board ru
 - Restores the banked-best code byte-for-byte (run-533baf549c40, 77.702040)
   after the step-78 probe lost on two confirming board runs.
 - Run: PENDING
+
+## Step 80 - v138: ring-drain split + short-name hash path + line golf
+- v138 = v135 + two locally-measured parse wins at near-zero source cost:
+  the deferral ring's drain-phase checks leave the main-loop adv() (via a
+  RETIRE macro shared with the drain; two compares per record dropped), and
+  short names (<=8B, 31.8% of records) skip the two masked upper-word loads
+  in hs with identical hash values. Intra-block blank lines golfed.
+- Local (1 vCPU, interleaved): -1.4 to -1.6% T vs v135 across three runs
+  (adv-split confirmed twice independently). A 48B packed-Stats variant and
+  a bit-hack id parse both measured SLOWER (+1.4% and +22%) - dropped.
+  Expected board effect: +0.15 pts T-side, -0.01 S-side (S est. 274 vs 273).
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean,
+  ASAN+UBSAN clean (stress x3 hash-stable on the identical v137 twin).
+- Run: PENDING
