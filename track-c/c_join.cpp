@@ -4,7 +4,11 @@
 // -> merge per-thread aggregates -> one buffered write. Names intern to small
 // ids in a lock-free hash table; each country keeps a bitset over name ids.
 
-#include <bits/stdc++.h>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <numeric>
+#include <string>
 #include <fcntl.h>
 #include <immintrin.h>
 #include <pthread.h>
@@ -144,7 +148,7 @@ struct Worker {
   } else                                             \
     esc = 0, p++;
 
-void *parse_chunk(void *arg) {
+__attribute__((aligned(64))) void *parse_chunk(void *arg) {
   Stats *stats = ((Worker *)arg)->stats;
   uint32_t bnid[16], nb = 0, bc[16];
   // flush n buffered bitsets: prefetch all lines, then set

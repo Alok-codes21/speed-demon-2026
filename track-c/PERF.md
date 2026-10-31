@@ -265,3 +265,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
 - Board T_s/M/S/points: pending
 - Run: pending
+
+## Step 48 (v94b memory cut: drop bits/stdc++.h; pin hot-loop alignment)
+- Change: includes de-consolidated back to 10 individual headers (+4 code lines) - bits/stdc++.h pulls <iostream>, whose static-init pages cost +0.83MB RSS (measured: tiny-dataset maxrss 6.97 vs 6.14MB). parse_chunk marked __attribute__((aligned(64))) (0 lines): without it this exact source landed on an unlucky hot-loop layout at +2% T local; with it T is flat vs v72 (153.2 vs 152.9ms median, 16 interleaved reps).
+- M floor analysis (board ~9.9MB): tables 5.9MB (NT 1 + R2C 1 + CB ~3.9 across three 2MB huge pages) + container/runtime baseline ~3.5MB + stats arrays 0.26MB. This step removes the ~0.8MB libstdc++/iostream chunk -> expected board M ~9.0-9.1MB. 8.0MB is NOT reachable T-neutrally: remaining cuts are dense-id intern (measured dead for T), CB sparsification or dropping THP (TLB-miss T risk), and a libstdc++-free build (~0.2MB for +7 S lines, net wash). Each remaining 0.1-0.2MB costs more in T or S than the M term pays.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample) ✓ TSAN clean (sample) ✓ stress 30x sample / 3x full hash-stable ✓ T flat vs v72 ✓ board S 218 (212 + Dockerfile 6).
+- Board T_s/M/S/points: pending
+- Run: pending
