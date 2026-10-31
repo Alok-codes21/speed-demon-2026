@@ -223,8 +223,8 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 47 (maximal S-golf of the v72 code; 248 -> 214 board lines)
 - Change: same algorithm, same 192 granules; one maximal formatter-safe compression pass: <bits/stdc++.h> replaces four C++ includes, QF macro for the two quoted-field blocks (esc now also reset on the empty-field branch), MM macro for the AVX2 quote mask, bf lambda replaces the bflush function, regions parse reuses num() with a fixed 4-byte row step, intern_name as a for with load in init/increment, merged declarations (bnid/bc, CK/NC/UNMATCHED, fend/gst, merge refs), iota replaces the order fill, %lu output drops the size_t casts, fopen check as an ||-expr, NT[0] seed folded into the table comma-chain. Dockerfile 7 -> 6 (WORKDIR dropped, absolute paths). Measured and rejected: memchr instead of the inlined AVX2 quote scan (-8 lines but +3% T local, net negative); one-expression load8 (flat local but the branch form is board-proven, kept). Formatted scc 208 + Dockerfile 6 = 214 board S (was 248).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v72 (+0.6% median, noise; freshly rebuilt baseline - pre-golf comparisons used a stale binary from a different sandbox host).
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.047099 M=13262848 S=225 points=74.201695 - DECISIVE LOSS. The probe-line inflation (every linear probe touches a new 64B line, ~2.65 probes at 77% load) cost more than merging the dedup RMW saved; with the board bound by random-access throughput, total lines/record went 2.2 -> ~2.65 and T rose 11%. M landed at 13.3MB as predicted. The empty-name crash fix is kept; the fused table is reverted in step-53. Commit 102353e.
+- Run: run-304a4076ca30
 
 ## Step 41 (revert to v58; step-40 PREFETCHW regressed on board)
 - Change: c_join.cpp back to v58. Step-40 (write-intent prefetch on NT + CB lines) scored T_s=0.0448 M=9.9MB S=304 points=75.052 (run-ae31438a7699, -0.34 vs run-7786ec817115, outside the v58 noise band 75.22-75.39). Mechanism: >90% of NT probes are read-only hits; PREFETCHW turns them into exclusive grabs and increases coherence traffic. PREFETCHW dead for read-mostly lines.
@@ -288,13 +288,19 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 51 (v98 revert to v95b + two-digit-per-iteration num())
 - Change: tip reverts step-50 (pipeline dead, see above) back to step-49 code, plus one rider: num() consumes two digits per iteration with a v*100+10a+b fold while the next two bytes are both non-terminator, halving the serial multiply-accumulate chain on id/region/amount. Local flat vs v95b (157.8 vs 157.9ms median - rider class, board judges).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge) ✓ TSAN clean (sample) ✓ stress 3x sample hash-stable ✓.
-- Board T_s/M/S/points: pending
-- Run: pending
+- Board T_s/M/S/points: T_s=0.045856 M=9502720 S=220 points=76.013170 - the two-digit num() loop reads as an 8.5% T regression on the board (flat locally); could be an unlucky run, but it did not beat 76.5, so the rider is dropped in step-53. Best stays run-a2f020e15701 (76.718). Commit 12fa17d.
+- Run: run-9d4fd93a8764
 
 ## Step 52 (v99 redesign: fused 64B hash+bitmap table + empty-name crash fix)
 - Change: the 8B-entry name table and the separate 4MB per-country bitset array merge into one table of 2^17 x 64B cache-line entries {hash, 256-bit country bitmap}: a record's intern probe and its (name, country) dedup RMW land on ONE line instead of two random lines. Distinct-per-country now comes from the dedup RMW return (a bit flipped 0->1 increments a thread-local counter), replacing the end-of-run popcount over 4MB of bitsets. Probes walk consecutive lines, which the streamer prefetcher covers.
 - Crash fix riding along: for an empty name the hash was computed on an UNINITIALIZED field pointer (QF's empty branch never sets s) - latent since the QF macro landed, masked by stack garbage on every board run, SEGV under ASAN. Empty names never intern, so the hash is now skipped for them. Output-identical (all hashes + diffs unchanged).
 - Cost: table 8MB vs 5MB -> board M ~13MB (+1.1 pts penalty). Bet: halved shared-line traffic on the 12-thread board beats it. Local 1-vCPU: +6.6% (169.9 vs 159.4ms median) - expected; the probe-line increase is pure local cost while the contention win is board-only. Judged by the board; reverts if it does not beat 76.5.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (edge, sample, tiny) ✓ TSAN clean (sample) ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: pending
+- Run: pending
+
+## Step 53 (v101 revert to step-49 shape + empty-name crash fix)
+- Change: tip reverts step-51's num() rider and step-52's fused table, back to the step-49 code (best-known, run-a2f020e15701 76.718), keeping the empty-name crash fix from step-52 (skip the name hash when name_len == 0; s is only set by QF's quoted branch).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (sample) ✓ TSAN clean (sample) ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
