@@ -213,7 +213,11 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       // skip a UTF-8 BOM before a record, then the id field
       const char *s, *e;
       uint32_t esc, name_len = 0, note_len = 0, slot;
-      uint64_t id = (p += 3 * ((uint8_t)*p == 0xEF), num(p, ','));
+      // id: <= 8 digits (spec: ids < 4e7), comma inside a 9-bit window
+      uint64_t id = ({p += 3 * ((uint8_t)*p == 0xEF);
+                       uint32_t n_ = __builtin_ctz(MM2(p, ',') & 0x1FF);
+                       uint64_t v_ = DIGS(p, n_);
+                       p += n_ + 1, v_;});
       // name: empty unquoted, or quoted (non-empty names are always quoted)
       QF(name_len);
       // empty names never intern; skip the hash (s is only set by QF)

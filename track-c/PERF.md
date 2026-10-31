@@ -662,4 +662,18 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
   ASAN+UBSAN clean, TSAN clean (region load is single-threaded by
   construction; the worker pool is byte-identical to v140).
+- Run: run-9878440bd80a - CLEAN on the box (all gates pass; the v141 crash
+  class is gone). T=0.038971 vs banked 0.038028: within the +/-16%
+  same-code run noise, so the ~2ms startup saving is below the noise floor;
+  did not re-bank. M=7.91MB, S=283.
+
+## Step 86 - SWAR id decode in the record loop
+
+- The id field (< 8 digits by spec, ids < 4e7) decodes branch-free: AVX2
+  comma mask over a 9-bit window + the existing DIGS word trick, replacing
+  the byte-wise num() scan on the hot path.
+- Zero new concurrency, zero new tables (M unchanged). DIGS is the same
+  primitive already proven in the region/amount parse.
+- Local: full/sample sha256 match, tiny/edge diffs clean, stress x3 stable,
+  ASAN+UBSAN clean, TSAN clean.
 - Run: PENDING
