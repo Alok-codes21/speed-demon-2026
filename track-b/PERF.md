@@ -603,4 +603,19 @@ synthetic single-term suite: 0 matches instead of 144).
   strip; their --data/--out dev scaffolding is removed.
 - Local gates: synthetic/sample/full all byte-exact (sha256
   f86973c2...80927); local wall 2.63 s vs v29's 2.81-2.89 s.
+- Run: run-d780f1a6aaf3 - PASS, NEW BEST: T=0.2332 s, M=51.3 MB, S=663,
+  **69.43 pts** (was 69.11). T lands in the same 0.231-0.233 band the other
+  Cache Me-family teams draw; Lex's own 0.2123 remains the family's outlier.
+
+## Step 32: 4-byte slots on the Lex base + formatting diet (v33, this push)
+
+- The step-30 slot change carried over: 15 hash tag bits above id + 1 in a
+  u32 slot halves the term table's cache footprint (2 MB -> 1 MB on the
+  full queries); on v31 it drew neutral, and the Lex base probes the table
+  once per token just the same.
+- Formatting diet: rustfmt-expanded constructs (multi-line signatures,
+  the SEL table, chained iterators) collapsed - whitespace only, no
+  content change; S 663 -> ~600 expected.
+- Local gates: synthetic/sample/full all byte-exact (sha256
+  f86973c2...80927); local wall 2.32 s vs v32's 2.63 s.
 - Run: run-pending
