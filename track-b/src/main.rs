@@ -2,16 +2,19 @@
 //!
 //! Query-driven inverted index, std-only, no dependencies:
 //!   1. Parse queries.txt first and collect every distinct term.
-//!   2. One pass over docs.txt (parallel chunks): a byte-exact tokenizer per
-//!      the spec records (doc, position) pairs only for query terms.
+//!   2. Stream docs.txt in blocks (parallel ranges): a byte-exact tokenizer
+//!      per the spec records deduplicated doc ids for query terms and the
+//!      file offset of every doc line.
 //!   3. BOOL queries merge sorted doc-id lists strictly left to right.
-//!      PHRASE queries iterate the rarest term's occurrences and binary-search
-//!      the other terms' position lists for the expected offsets.
+//!      PHRASE queries intersect their terms' doc lists, then re-tokenize
+//!      each candidate doc straight from the file to verify adjacency.
+//!      No positional index is ever stored.
 //!
 //! Reads /data/docs.txt and /data/queries.txt, writes /out/results.txt.
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 
 // ---------------------------------------------------------------------------
 // Tokenizer: fold A-Z to a-z only; a token is a maximal run of [a-z0-9].
@@ -38,37 +41,66 @@ static FOLD: [u8; 256] = build_fold();
 /// Query terms are 1..=32 bytes, so a longer token can never match one.
 const MAX_TERM: usize = 32;
 
-#[inline]
-fn hash_bytes(b: &[u8]) -> u64 {
-    // fxhash-style; deterministic across platforms, no libm anywhere.
-    let mut h = b.len() as u64;
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        h = (h.rotate_left(5) ^ u64::from_le_bytes(c.try_into().unwrap()))
-            .wrapping_mul(0x517c_c1b7_2722_0a95);
+// fxhash-style rolling hash; deterministic across platforms, no libm.
+const HMUL: u64 = 0x517c_c1b7_2722_0a95;
+
+struct Hasher {
+    h: u64,
+    block: u64,
+    shift: u32,
+}
+
+impl Hasher {
+    #[inline(always)]
+    fn new() -> Self {
+        Hasher { h: 0, block: 0, shift: 0 }
     }
-    let mut tail = 0u64;
-    let mut s = 0u32;
-    for &x in chunks.remainder() {
-        tail |= (x as u64) << s;
-        s += 8;
+    #[inline(always)]
+    fn byte(&mut self, b: u8) {
+        self.block |= (b as u64) << self.shift;
+        self.shift += 8;
+        if self.shift == 64 {
+            self.h = (self.h.rotate_left(5) ^ self.block).wrapping_mul(HMUL);
+            self.block = 0;
+            self.shift = 0;
+        }
     }
-    h = (h.rotate_left(5) ^ tail).wrapping_mul(0x517c_c1b7_2722_0a95);
-    if h == 0 {
-        1 // 0 is the empty-slot sentinel
-    } else {
-        h
+    #[inline(always)]
+    fn finish(self, len: u64) -> u64 {
+        let mut h = (self.h.rotate_left(5) ^ self.block).wrapping_mul(HMUL);
+        h = (h.rotate_left(5) ^ len).wrapping_mul(HMUL);
+        if h == 0 {
+            1 // reserve 0
+        } else {
+            h
+        }
     }
 }
 
+#[inline(always)]
+fn hash_bytes(b: &[u8]) -> u64 {
+    let mut hs = Hasher::new();
+    for &x in b {
+        hs.byte(x);
+    }
+    hs.finish(b.len() as u64)
+}
+
 // ---------------------------------------------------------------------------
-// Term table: open addressing, hash + full byte comparison on hit.
+// Term table: open addressing over single u64 entries
+//   [ hash32 : low 32 | term id : high 32 ]
+// so a probe touches one cache line before any byte comparison.
+// A 4M-bit summary filter lets the corpus scan skip nearly every miss
+// without touching the table.
 // ---------------------------------------------------------------------------
+const FILTER_BITS: usize = 1 << 22;
+const EMPTY: u64 = u64::MAX;
+
 struct Terms {
-    slots: Vec<u64>, // hash, 0 = empty
-    ids: Vec<u32>,   // term id per slot
+    slots: Vec<u64>,
     arena: Vec<u8>,
     spans: Vec<(u32, u32)>, // (offset, len) into arena, per term id
+    filter: Vec<u64>,
     used: usize,
 }
 
@@ -76,10 +108,10 @@ impl Terms {
     fn new(min_cap: usize) -> Self {
         let cap = (min_cap * 2).next_power_of_two();
         Terms {
-            slots: vec![0; cap],
-            ids: vec![0; cap],
+            slots: vec![EMPTY; cap],
             arena: Vec::new(),
             spans: Vec::new(),
+            filter: vec![0; FILTER_BITS / 64],
             used: 0,
         }
     }
@@ -88,20 +120,32 @@ impl Terms {
         self.slots.len() - 1
     }
     #[inline(always)]
+    fn h32(hash: u64) -> u32 {
+        (hash ^ (hash >> 32)) as u32
+    }
+    #[inline(always)]
     fn bytes(&self, id: u32) -> &[u8] {
         let (off, len) = self.spans[id as usize];
         &self.arena[off as usize..(off + len) as usize]
     }
-    #[inline]
+    #[inline(always)]
+    fn filter_test(&self, hash: u64) -> bool {
+        let k = (hash as usize) & (FILTER_BITS - 1);
+        (self.filter[k >> 6] >> (k & 63)) & 1 == 1
+    }
+    /// Full lookup; returns the term id.
+    #[inline(always)]
     fn get(&self, hash: u64, bytes: &[u8]) -> Option<u32> {
-        let mut i = (hash as usize) & self.mask();
+        let h32 = Self::h32(hash);
+        let mut i = (h32 as usize) & self.mask();
         loop {
-            let h = self.slots[i];
-            if h == 0 {
+            let e = self.slots[i];
+            if e == EMPTY {
                 return None;
             }
-            if h == hash && self.bytes(self.ids[i]) == bytes {
-                return Some(self.ids[i]);
+            let id = (e >> 32) as u32;
+            if e as u32 == h32 && self.bytes(id) == bytes {
+                return Some(id);
             }
             i = (i + 1) & self.mask();
         }
@@ -110,42 +154,41 @@ impl Terms {
         if (self.used + 1) * 2 > self.slots.len() {
             self.grow();
         }
-        let mut i = (hash as usize) & self.mask();
+        let k = (hash as usize) & (FILTER_BITS - 1);
+        self.filter[k >> 6] |= 1u64 << (k & 63);
+        let h32 = Self::h32(hash);
+        let mut i = (h32 as usize) & self.mask();
         loop {
-            let h = self.slots[i];
-            if h == 0 {
+            let e = self.slots[i];
+            if e == EMPTY {
                 let id = self.spans.len() as u32;
-                self.slots[i] = hash;
-                self.ids[i] = id;
+                self.slots[i] = h32 as u64 | (id as u64) << 32;
                 self.spans.push((self.arena.len() as u32, bytes.len() as u32));
                 self.arena.extend_from_slice(bytes);
                 self.used += 1;
                 return id;
             }
-            if h == hash && self.bytes(self.ids[i]) == bytes {
-                return self.ids[i];
+            if e as u32 == h32 && self.bytes((e >> 32) as u32) == bytes {
+                return (e >> 32) as u32;
             }
             i = (i + 1) & self.mask();
         }
     }
     fn grow(&mut self) {
         let ncap = self.slots.len() * 2;
-        let mut ns = vec![0u64; ncap];
-        let mut ni = vec![0u32; ncap];
+        let mut ns = vec![EMPTY; ncap];
         let mask = ncap - 1;
         for i in 0..self.slots.len() {
-            let h = self.slots[i];
-            if h != 0 {
-                let mut j = (h as usize) & mask;
-                while ns[j] != 0 {
+            let e = self.slots[i];
+            if e != EMPTY {
+                let mut j = ((e as u32) as usize) & mask;
+                while ns[j] != EMPTY {
                     j = (j + 1) & mask;
                 }
-                ns[j] = h;
-                ni[j] = self.ids[i];
+                ns[j] = e;
             }
         }
         self.slots = ns;
-        self.ids = ni;
     }
     fn len(&self) -> usize {
         self.spans.len()
@@ -205,29 +248,40 @@ fn parse_queries(data: &[u8], terms: &mut Terms) -> Vec<Query> {
 }
 
 // ---------------------------------------------------------------------------
-// Corpus scan: for every query term, a list of (doc_id << 32) | position,
-// appended in increasing (doc, position) order.
+// Corpus scan (streaming). Per thread: deduplicated ascending doc ids per
+// term, plus (doc id, line offset) for every doc seen.
+// A tiny per-thread cache of recently touched (term, doc) pairs keeps hot
+// vocabulary terms off the posting vectors.
 // ---------------------------------------------------------------------------
-fn scan_chunk(data: &[u8], terms: &Terms, postings: &mut [Vec<u64>]) {
+struct Post {
+    docs: Vec<Vec<u32>>,
+    offs: Vec<(u32, u64)>,
+}
+
+const RECENT: usize = 4096;
+
+/// Scans whole lines in `data` (whose first byte sits at `base` in the
+/// file): decimal id, TAB, text, LF.
+fn scan_lines(data: &[u8], base: u64, terms: &Terms, post: &mut Post, recent: &mut [(u32, u32)]) {
     let mut tb = [0u8; MAX_TERM + 8];
     let n = data.len();
     let mut i = 0usize;
     while i < n {
-        // line: decimal id, TAB, text, LF
+        let line_start = i;
         let mut id: u32 = 0;
         while data[i] != b'\t' {
             id = id * 10 + (data[i] - b'0') as u32;
             i += 1;
         }
         i += 1;
-        let mut pos: u32 = 0;
+        post.offs.push((id, base + line_start as u64));
         while i < n && data[i] != b'\n' {
             let f = FOLD[data[i] as usize];
             if f == SEP {
                 i += 1;
                 continue;
             }
-            // token run starts here
+            let mut hs = Hasher::new();
             let mut tl = 0usize;
             while i < n {
                 let f = FOLD[data[i] as usize];
@@ -237,29 +291,89 @@ fn scan_chunk(data: &[u8], terms: &Terms, postings: &mut [Vec<u64>]) {
                 if tl < tb.len() {
                     tb[tl] = f;
                 }
+                hs.byte(f);
                 tl += 1;
                 i += 1;
             }
             if tl <= MAX_TERM {
-                let b = &tb[..tl];
-                if let Some(tid) = terms.get(hash_bytes(b), b) {
-                    postings[tid as usize].push(((id as u64) << 32) | pos as u64);
+                let h = hs.finish(tl as u64);
+                if terms.filter_test(h) {
+                    if let Some(t) = terms.get(h, &tb[..tl]) {
+                        let rc = &mut recent[(t as usize) & (RECENT - 1)];
+                        if *rc != (t, id) {
+                            if post.docs[t as usize].last() != Some(&id) {
+                                post.docs[t as usize].push(id);
+                            }
+                            *rc = (t, id);
+                        }
+                    }
                 }
             }
-            pos += 1;
         }
-        i += 1; // skip LF (or fall off the end)
+        i += 1; // skip LF
     }
 }
 
-fn chunk_ranges(data: &[u8], nthreads: usize) -> Vec<(usize, usize)> {
+const BLOCK: usize = 1 << 21; // 2 MB streaming blocks
+
+/// Streams [start, end) of docs.txt; both bounds sit right after an LF.
+fn thread_scan(path: &str, start: usize, end: usize, terms: &Terms, n_terms: usize) -> Post {
+    let mut post = Post {
+        docs: (0..n_terms).map(|_| Vec::new()).collect(),
+        offs: Vec::new(),
+    };
+    let mut recent = vec![(u32::MAX, 0u32); RECENT];
+    let f = fs::File::open(path).expect("open docs.txt");
+    let mut buf = vec![0u8; BLOCK + (1 << 16)];
+    let mut carry = 0usize; // leading partial line in buf
+    let mut pos = start;
+    while pos < end {
+        let want = BLOCK.min(end - pos);
+        let n = f.read_at(&mut buf[carry..carry + want], pos as u64).expect("read docs.txt");
+        if n == 0 {
+            break;
+        }
+        pos += n;
+        let avail = carry + n;
+        let cut = if pos >= end {
+            avail
+        } else {
+            match buf[..avail].iter().rposition(|&b| b == b'\n') {
+                Some(p) => p + 1,
+                None => 0,
+            }
+        };
+        if cut > 0 {
+            scan_lines(&buf[..cut], (start + (pos - start) - avail) as u64, terms, &mut post, &mut recent);
+            buf.copy_within(cut..avail, 0);
+            carry = avail - cut;
+        }
+    }
+    debug_assert!(carry == 0);
+    post
+}
+
+fn chunk_ranges(file_len: usize, path: &str, nthreads: usize) -> Vec<(usize, usize)> {
+    // Probe a small window around each nominal split for the next LF.
+    let f = fs::File::open(path).expect("open docs.txt");
     let mut ranges = Vec::with_capacity(nthreads);
-    let size = data.len() / nthreads + 1;
+    let size = file_len / nthreads + 1;
     let mut start = 0usize;
-    while start < data.len() {
-        let mut end = (start + size).min(data.len());
-        while end < data.len() && data[end - 1] != b'\n' {
-            end += 1;
+    while start < file_len {
+        let mut end = (start + size).min(file_len);
+        if end < file_len {
+            let mut probe = vec![0u8; 1 << 16];
+            let mut at = end;
+            loop {
+                let n = f.read_at(&mut probe, at as u64).expect("read docs.txt");
+                match probe[..n].iter().position(|&b| b == b'\n') {
+                    Some(p) => {
+                        end = at + p + 1;
+                        break;
+                    }
+                    None => at += n,
+                }
+            }
         }
         ranges.push((start, end));
         start = end;
@@ -268,53 +382,46 @@ fn chunk_ranges(data: &[u8], nthreads: usize) -> Vec<(usize, usize)> {
 }
 
 // ---------------------------------------------------------------------------
-// Merged index: flat arenas, spans per term.
+// Merged index: one flat doc-id arena with per-term spans, plus the
+// doc id -> line offset table used to re-read docs for phrase checks.
 // ---------------------------------------------------------------------------
 struct Index {
-    entries: Vec<u64>,        // (doc<<32)|pos, sorted, per term
-    entry_spans: Vec<(u32, u32)>,
-    docs: Vec<u32>,           // deduplicated doc ids per term, ascending
-    doc_spans: Vec<(u32, u32)>,
+    docs: Vec<u32>,
+    d_spans: Vec<(u32, u32)>,
+    offsets: Vec<u64>,
 }
 
 impl Index {
     #[inline(always)]
-    fn entries(&self, tid: u32) -> &[u64] {
-        let (off, len) = self.entry_spans[tid as usize];
-        &self.entries[off as usize..(off + len) as usize]
-    }
-    #[inline(always)]
     fn docs(&self, tid: u32) -> &[u32] {
-        let (off, len) = self.doc_spans[tid as usize];
+        let (off, len) = self.d_spans[tid as usize];
         &self.docs[off as usize..(off + len) as usize]
     }
 }
 
-fn build_index(parts: &mut [Vec<Vec<u64>>], n_terms: usize) -> Index {
-    let mut entry_spans = vec![(0u32, 0u32); n_terms];
-    let mut doc_spans = vec![(0u32, 0u32); n_terms];
-    let total: usize = parts.iter().map(|p| p.iter().map(Vec::len).sum::<usize>()).sum();
-    let mut entries: Vec<u64> = Vec::with_capacity(total);
-    let mut docs: Vec<u32> = Vec::with_capacity(total / 2 + 16);
+fn build_index(parts: &mut Vec<Post>, n_terms: usize) -> Index {
+    let mut d_spans = vec![(0u32, 0u32); n_terms];
+    let d_total: usize = parts.iter().map(|p| p.docs.iter().map(Vec::len).sum::<usize>()).sum();
+    let mut docs: Vec<u32> = Vec::with_capacity(d_total);
     for tid in 0..n_terms {
-        let start = entries.len() as u32;
-        let dstart = docs.len() as u32;
-        let mut last = u32::MAX;
+        let ds = docs.len() as u32;
         for p in parts.iter_mut() {
-            let v = std::mem::take(&mut p[tid]);
-            for &x in &v {
-                let d = (x >> 32) as u32;
-                if d != last {
-                    docs.push(d);
-                    last = d;
-                }
-            }
-            entries.extend_from_slice(&v);
+            docs.extend_from_slice(&std::mem::take(&mut p.docs[tid]));
         }
-        entry_spans[tid] = (start, entries.len() as u32 - start);
-        doc_spans[tid] = (dstart, docs.len() as u32 - dstart);
+        d_spans[tid] = (ds, docs.len() as u32 - ds);
     }
-    Index { entries, entry_spans, docs, doc_spans }
+    let max_id = parts
+        .iter()
+        .flat_map(|p| p.offs.iter().map(|&(id, _)| id))
+        .max()
+        .unwrap_or(0);
+    let mut offsets = vec![u64::MAX; max_id as usize + 1];
+    for p in parts.iter() {
+        for &(id, off) in &p.offs {
+            offsets[id as usize] = off;
+        }
+    }
+    Index { docs, d_spans, offsets }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,11 +515,85 @@ fn emit(out: &mut Vec<u8>, docs: &[u32]) {
     out.push(b'\n');
 }
 
-fn eval_queries(idx: &Index, qs: &[Query]) -> Vec<u8> {
+/// Re-tokenizes doc `d` from the file and checks whether the phrase terms
+/// occur at consecutive token positions. Positions count every token run,
+/// exactly as the corpus scan does. `buf` and `hits` are caller-owned
+/// scratch, reused across candidates.
+fn phrase_doc_match(
+    f: &fs::File,
+    offsets: &[u64],
+    phrase_words: &[&[u8]],
+    d: u32,
+    buf: &mut [u8],
+    hits: &mut Vec<(u8, u32)>,
+) -> bool {
+    let off = offsets[d as usize];
+    if off == u64::MAX {
+        return false;
+    }
+    let n = f.read_at(buf, off).unwrap_or(0);
+    let mut line = &buf[..n];
+    if let Some(p) = line.iter().position(|&b| b == b'\n') {
+        line = &line[..p];
+    }
+    let text = match line.iter().position(|&b| b == b'\t') {
+        Some(p) => &line[p + 1..],
+        None => return false,
+    };
+    let k = phrase_words.len();
+    hits.clear();
+    let mut tb = [0u8; MAX_TERM + 8];
+    let n = text.len();
+    let mut i = 0usize;
+    let mut pos: u32 = 0;
+    while i < n {
+        let f = FOLD[text[i] as usize];
+        if f == SEP {
+            i += 1;
+            continue;
+        }
+        let mut tl = 0usize;
+        while i < n {
+            let f = FOLD[text[i] as usize];
+            if f == SEP {
+                break;
+            }
+            if tl < tb.len() {
+                tb[tl] = f;
+            }
+            tl += 1;
+            i += 1;
+        }
+        if tl <= MAX_TERM {
+            let tok = &tb[..tl];
+            for (j, w) in phrase_words.iter().enumerate() {
+                if w.len() == tl && *w == tok {
+                    hits.push((j as u8, pos));
+                }
+            }
+        }
+        pos += 1;
+    }
+    let mut found = false;
+    for &(j0, p0) in hits.iter() {
+        if j0 != 0 {
+            continue;
+        }
+        if (1..k).all(|j| hits.iter().any(|&(jj, pp)| jj as usize == j && pp == p0 + j as u32)) {
+            found = true;
+            break;
+        }
+    }
+    found
+}
+
+fn eval_queries(idx: &Index, terms: &Terms, file: &fs::File, qs: &[Query]) -> Vec<u8> {
     let mut out = Vec::with_capacity(qs.len() * 30);
     let mut cur: Vec<u32> = Vec::new();
     let mut tmp: Vec<u32> = Vec::new();
     let mut matched: Vec<u32> = Vec::new();
+    let mut docbuf = vec![0u8; 1 << 14];
+    let mut hits: Vec<(u8, u32)> = Vec::with_capacity(64);
     for q in qs {
         match q {
             Query::Bool { terms, ops } => {
@@ -429,31 +610,25 @@ fn eval_queries(idx: &Index, qs: &[Query]) -> Vec<u8> {
                 }
                 emit(&mut out, &cur);
             }
-            Query::Phrase { terms } => {
+            Query::Phrase { terms: pterms } => {
                 matched.clear();
-                // Anchor on the rarest term; check the rest in rising rarity.
-                let k = terms.len();
+                let pw: Vec<&[u8]> = pterms.iter().map(|&t| terms.bytes(t)).collect();
+                // Anchor on the term with the shortest doc list; the other
+                // lists are probed by binary search for each candidate doc.
+                let k = pterms.len();
                 let mut order: [usize; 8] = [0; 8];
                 for j in 0..k {
                     order[j] = j;
                 }
-                order[..k].sort_by_key(|&j| idx.entries(terms[j]).len());
+                order[..k].sort_by_key(|&j| idx.docs(pterms[j]).len());
                 let a = order[0];
-                let anchor = idx.entries(terms[a]);
-                'next: for &e in anchor {
-                    let d = (e >> 32) as u32;
-                    let p = (e & 0xFFFF_FFFF) as i64;
+                'cand: for &d in idx.docs(pterms[a]) {
                     for &j in &order[1..k] {
-                        let tp = p + (j as i64 - a as i64);
-                        if tp < 0 || tp > u32::MAX as i64 {
-                            continue 'next;
-                        }
-                        let target = ((d as u64) << 32) | (tp as u64);
-                        if idx.entries(terms[j]).binary_search(&target).is_err() {
-                            continue 'next;
+                        if idx.docs(pterms[j]).binary_search(&d).is_err() {
+                            continue 'cand;
                         }
                     }
-                    if d != matched.last().copied().unwrap_or(u32::MAX) {
+                    if phrase_doc_match(file, &idx.offsets, &pw, d, &mut docbuf, &mut hits) {
                         matched.push(d);
                     }
                 }
@@ -469,6 +644,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(String::as_str).unwrap_or("/data");
     let out_dir = args.get(2).map(String::as_str).unwrap_or("/out");
+    let docs_path = format!("{data_dir}/docs.txt");
 
     let qdata = fs::read(format!("{data_dir}/queries.txt")).expect("read queries.txt");
     let mut terms = Terms::new(1 << 16);
@@ -476,41 +652,39 @@ fn main() {
     drop(qdata);
     let n_terms = terms.len();
 
-    let ddata = fs::read(format!("{data_dir}/docs.txt")).expect("read docs.txt");
+    let file_len = fs::metadata(&docs_path).expect("stat docs.txt").len() as usize;
     let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let ranges = chunk_ranges(&ddata, nthreads.max(1));
+    let ranges = chunk_ranges(file_len, &docs_path, nthreads.max(1));
 
-    let mut parts: Vec<Vec<Vec<u64>>> = Vec::with_capacity(ranges.len());
+    let mut parts: Vec<Post> = Vec::with_capacity(ranges.len());
     std::thread::scope(|s| {
         let tref = &terms;
         let handles: Vec<_> = ranges
             .iter()
             .map(|&(st, en)| {
-                let data = &ddata[st..en];
-                s.spawn(move || {
-                    let mut p: Vec<Vec<u64>> = (0..n_terms).map(|_| Vec::new()).collect();
-                    scan_chunk(data, tref, &mut p);
-                    p
-                })
+                let path = &docs_path;
+                s.spawn(move || thread_scan(path, st, en, tref, n_terms))
             })
             .collect();
         for h in handles {
             parts.push(h.join().expect("scan thread"));
         }
     });
-    drop(ddata);
 
     let index = build_index(&mut parts, n_terms);
     drop(parts);
 
+    let docs_file = fs::File::open(&docs_path).expect("open docs.txt");
     let mut pieces: Vec<Vec<u8>> = Vec::new();
     std::thread::scope(|s| {
         let nchunks = nthreads.max(1).min(queries.len().max(1));
         let size = queries.len() / nchunks + 1;
         let iref = &index;
+        let tref = &terms;
+        let fref = &docs_file;
         let handles: Vec<_> = queries
             .chunks(size)
-            .map(|qc| s.spawn(move || eval_queries(iref, qc)))
+            .map(|qc| s.spawn(move || eval_queries(iref, tref, fref, qc)))
             .collect();
         for h in handles {
             pieces.push(h.join().expect("eval thread"));
