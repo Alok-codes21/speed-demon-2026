@@ -77,6 +77,11 @@ static uint64_t hl(const char *s, const char *e) {
   return h | (1ULL << 63);
 }
 
+// 32-byte mask of byte c at p
+#define MM2(p, c) (_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(p)), _mm256_set1_epi8(c))))
+// branch-free conversion of n (1..8) known digit bytes; reads 8 bytes at s
+#define DIGS(s, n) ({uint64_t v_; memcpy(&v_, (s), 8); v_ <<= 64 - 8 * (n); v_ -= 0x3030303030303030ULL & (~0ULL << (64 - 8 * (n))); v_ = v_ * 2561 >> 8, v_ = (v_ & 0x00FF00FF00FF00FFULL) * 6553601 >> 16; (uint32_t)((v_ & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);})
+
 // field-width integer ending at term; consumes the terminator
 static inline uint64_t num(const char *&p, char term) {
   uint64_t v = 0;
@@ -176,13 +181,23 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
                         : 0;
       __builtin_prefetch(&NT[slot = nh & HM]);
       QF(note_len); // note: only its unescaped byte length is needed
-      uint32_t reg = num(p, ',');
+      // region + amount from one 32B delimiter window; scalar on long/tail
+      uint32_t reg, mc, mn, c3, nl, ae, a0;
+      int64_t cents, neg;
+      if (p + 32 <= end && (mc = MM2(p, ',')) && (mn = MM2(p, '\n')) &&
+          (c3 = __builtin_ctz(mc)) - 1 < 8 &&
+          (nl = __builtin_ctz(mn)) >= (a0 = c3 + 1 + (p[c3 + 1] == '-')) + 4 &&
+          p[(ae = nl - (p[nl - 1] == '\r')) - 3] == '.' && ae - 3 - a0 - 1 < 8)
+        reg = DIGS(p, c3), neg = p[c3 + 1] == '-',
+        cents = DIGS(p + a0, ae - 3 - a0) * 100 + (p[ae - 2] - '0') * 10 + (p[ae - 1] - '0'),
+        cents = neg ? -cents : cents, p += nl + 1;
+      else
+        reg = num(p, ','), neg = *p == '-',
+        cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0'),
+        p += 2, cents = neg ? -cents : cents,
+        p += p < end ? 1 + (*p == '\r') : 0;
       uint8_t c = (reg < 1000000) ? R2C[reg] : 255;
       __builtin_prefetch(&CB[c == 255 ? 0 : c][slot >> 6]);
-      int64_t neg = *p == '-';
-      int64_t cents = num(p += neg, '.') * 100 + (p[0] - '0') * 10 + (p[1] - '0');
-      p += 2, cents = neg ? -cents : cents; // two fraction digits consumed
-      p += p < end ? 1 + (*p == '\r') : 0;  // "\r\n" or "\n", bare at eof
 
       // join and aggregate
       Stats &st = stats[c = c == 255 ? UNMATCHED : c];

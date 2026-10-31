@@ -375,3 +375,9 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 60: revert to step-53 code (best-known, 76.718)
 - Run: PENDING
+
+## Step 61: S-golfed mask parse (region + amount)
+- Step-58's delimiter-mask parse re-expressed: MM2/DIGS as one-line macros,
+  the fast path as one &&-chain + comma-expression. Est. S ~231 (vs 255).
+  Local: -9.7% vs step-53 code (1 vCPU).
+- Run: PENDING
