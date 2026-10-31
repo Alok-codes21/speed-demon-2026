@@ -132,5 +132,12 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 27 (revert to step-23 code)
 - Change: c_join.cpp back to v39 (step 23: batch-16 code + MADV_HUGEPAGE); steps 24-26 all board-measured regressions or flat-and-costly.
+- Board T_s/M/S/points: re-run of step-23 code (noise-band sample)
+- Run: pending
+
+
+## Step 28 (v46 bitset batch 32)
+- Change: v39 + bitset write batch 16 -> 32 (more MLP in bflush). Batch 8 was flat, 16 was the big win; 32 is the untested end of the ring.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ stress 15x sample ✓.
 - Board T_s/M/S/points: pending
 - Run: pending
