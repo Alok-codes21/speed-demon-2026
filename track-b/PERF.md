@@ -580,4 +580,8 @@ synthetic single-term suite: 0 matches instead of 144).
 - Local gates: synthetic/sample/full all byte-exact (sha256
   f86973c2...80927); local A/B vs v29 neutral (+/-2%, dev box noise
   bound). The board decides, as with steps 23/25/28.
-- Run: run-pending
+- Run: run-d703f2e7fdf2 - PASS: T=0.2476 s, M=53.5 MB, S=631, 68.76 pts.
+  Neutral draw inside the v29 band; the best stays run-fe8181c1fbf8 (69.11).
+  Kept: the 4-byte slots cost nothing and help on some workers. The S count
+  came back 631, not the 617 the line count suggests - the harness counts
+  differently; noted for future diets.
