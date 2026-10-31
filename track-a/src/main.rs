@@ -42,6 +42,7 @@ const PROT_WRITE: i32 = 2;
 const MAP_SHARED: i32 = 0x01;
 const MAP_PRIVATE: i32 = 0x02;
 const MAP_FIXED: i32 = 0x10;
+const MAP_POPULATE: i32 = 0x8000;
 const MAP_ANON: i32 = 0x20;
 const MADV_DONTNEED: i32 = 4;
 const PR_SET_THP_DISABLE: i32 = 41;
@@ -226,6 +227,7 @@ struct Parser {
     arena: *mut u32, // chunk chain storage, carved forward
     next_chunk: usize,
     heads: [u32; HOURS],     // chunk index + 1, 0 when the hour is empty
+    hour_of_chunk: Vec<u8>,  // owning hour per carved chunk
     wide: [Vec<u32>; HOURS], // (latency, key) pairs that overflow the packing
 }
 
@@ -242,6 +244,7 @@ impl Parser {
             arena,
             next_chunk: 0,
             heads: [0; HOURS],
+            hour_of_chunk: Vec::new(),
             wide: std::array::from_fn(|_| Vec::new()),
         }
     }
@@ -274,6 +277,7 @@ impl Parser {
             if ci == 0 || *self.arena.add((ci - 1) * CHUNK_WORDS + 1) as usize == CHUNK_CAP {
                 let nci = self.next_chunk;
                 self.next_chunk += 1;
+                self.hour_of_chunk.push(h as u8);
                 *self.arena.add(nci * CHUNK_WORDS) = *head; // link to previous
                 *self.arena.add(nci * CHUNK_WORDS + 1) = 0; // record count
                 ci = nci + 1;
@@ -346,18 +350,27 @@ fn width(v: u32) -> u64 {
     }
 }
 
+static DIGIT_PAIRS: [u8; 200] = *b"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+
 #[inline(always)]
 unsafe fn write_u32(o: *mut u8, v: u32) -> *mut u8 {
     let mut buf = [0u8; 10];
     let mut i = 10;
     let mut v = v;
-    loop {
+    while v >= 100 {
+        let d = (v % 100) as usize * 2;
+        v /= 100;
+        i -= 2;
+        buf[i] = DIGIT_PAIRS[d];
+        buf[i + 1] = DIGIT_PAIRS[d + 1];
+    }
+    if v < 10 {
         i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
+        buf[i] = b'0' + v as u8;
+    } else {
+        i -= 2;
+        buf[i] = DIGIT_PAIRS[v as usize * 2];
+        buf[i + 1] = DIGIT_PAIRS[v as usize * 2 + 1];
     }
     let n = 10 - i;
     std::ptr::copy_nonoverlapping(buf.as_ptr().add(i), o, n);
@@ -441,6 +454,7 @@ fn main() {
     cut[nt] = size;
 
     let log_addr = log as usize;
+    let input_fd = input.as_raw_fd();
     let parsers: Vec<Share<Parser>> = (0..nt).map(|t| Share(std::cell::UnsafeCell::new(Parser::new(cut[t + 1] - cut[t])))).collect();
     let ranks: Vec<Share<Vec<u32>>> = (0..nt).map(|_| Share(std::cell::UnsafeCell::new(Vec::new()))).collect();
     let gnames = Share(std::cell::UnsafeCell::new(Vec::<Name>::new()));
@@ -466,6 +480,21 @@ fn main() {
             let cut = &cut;
             s.spawn(move || {
                 let log = log_addr as *const u8;
+                // Prefault this worker's share of the log in parallel, instead
+                // of 5k soft faults dribbling in while it parses.
+                unsafe {
+                    let base = cut[t] & !4095usize;
+                    if cut[t + 1] > base {
+                        mmap(
+                            log.add(base) as *mut u8,
+                            cut[t + 1] - base,
+                            PROT_READ,
+                            MAP_PRIVATE | MAP_FIXED | MAP_POPULATE,
+                            input_fd,
+                            base as i64,
+                        );
+                    }
+                }
                 let me = unsafe { &mut *parsers[t].get() };
                 let (p0, p1) = unsafe { (log.add(cut[t]), log.add(cut[t + 1])) };
                 if simd {
@@ -541,6 +570,21 @@ fn main() {
                             *latency.get_unchecked_mut(*c as usize) = l;
                             *c += 1;
                         });
+                    }
+
+                    // The hour's records are all copied out; give the chunk
+                    // pages back so peak memory tracks live data, not history.
+                    for psc in parsers.iter() {
+                        let ps = unsafe { &mut *psc.get() };
+                        let mut ci = ps.heads[h] as usize;
+                        while ci != 0 {
+                            let base = (ci - 1) * CHUNK_WORDS;
+                            unsafe {
+                madvise(ps.arena.add(base) as *mut u8, CHUNK_WORDS * 4, MADV_DONTNEED);
+                                ci = *ps.arena.add(base) as usize;
+                            }
+                        }
+                        ps.heads[h] = 0;
                     }
 
                     let mut size = 0u64;
