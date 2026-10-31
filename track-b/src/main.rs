@@ -442,7 +442,7 @@ struct Units {
 impl Units {
     fn push(&mut self, x: u16) {
         if self.chunks.last().map_or(true, |c| c.len() == c.capacity()) {
-            self.chunks.push(Vec::with_capacity(1 << 13));
+            self.chunks.push(Vec::with_capacity(1 << 15));
         }
         self.chunks.last_mut().unwrap().push(x);
     }
