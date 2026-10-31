@@ -586,5 +586,18 @@ Every step from the reference to your final version, each with the live-board ru
   a bit-hack id parse both measured SLOWER (+1.4% and +22%) - dropped.
   Expected board effect: +0.15 pts T-side, -0.01 S-side (S est. 274 vs 273).
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean,
-  ASAN+UBSAN clean (stress x3 hash-stable on the identical v137 twin).
+  3x parallel stress stable, ASAN+UBSAN clean.
+- Run: first board run T=0.038305, S=282, pts=77.450 (run-df8707a481e8) -
+  inside v135's 4-run T band (0.0378-0.0442); verdict deferred to more
+  re-rolls. Board S counter reads 282 vs v135's 273: the RETIRE-macro
+  machinery costs 9 counted lines, recovered in step 81.
+
+## Step 81 - v139: blank-line golf (S 282 -> ~266)
+- Same semantics as v138; removes 17 blank lines the board S counter
+  charges for (whole-line comments are free, blanks are not - decoded from
+  v135's S=273 exactly matching total-minus-comment-lines). S is
+  deterministic, T is byte-for-byte the v138 family, so this is a strict
+  improvement over step 80 with no verdict ambiguity.
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
+  parallel stress stable, ASAN+UBSAN clean.
 - Run: PENDING
