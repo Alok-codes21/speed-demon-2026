@@ -374,7 +374,7 @@ fn find_byte(buf: &Map, mut i: usize, byte: u8) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn handle_token(
     buf: &Map, s: usize, len: usize, q: &Queries,
-    posts: &mut [Vec<u32>], bposts: &mut [Vec<u32>],
+    log: &mut Vec<u64>, n_terms: usize,
     last_doc: &mut [u32], blast: &mut [u32], docid: u32, prev: &mut u32,
 ) {
     unsafe {
@@ -402,13 +402,13 @@ fn handle_token(
         let tid = q.terms.probe(p, len, h);
         if tid != NONE {
             if q.terms.flags[tid as usize] & 1 != 0 && last_doc[tid as usize] != docid {
-                posts[tid as usize].push(docid);
+                log.push(((tid as u64) << 32) | docid as u64);
                 last_doc[tid as usize] = docid;
             }
             if *prev != NONE {
                 let bid = q.bigrams.probe(*prev, tid);
                 if bid != NONE && blast[bid as usize] != docid {
-                    bposts[bid as usize].push(docid);
+                    log.push((((n_terms + bid as usize) as u64) << 32) | docid as u64);
                     blast[bid as usize] = docid;
                 }
             }
@@ -422,7 +422,7 @@ fn handle_token(
 #[allow(clippy::too_many_arguments)]
 fn scan_tokens_scalar(
     buf: &Map, start: usize, end: usize, q: &Queries,
-    posts: &mut [Vec<u32>], bposts: &mut [Vec<u32>],
+    log: &mut Vec<u64>, n_terms: usize,
     last_doc: &mut [u32], blast: &mut [u32], docid: u32,
 ) -> u32 {
     let mut prev = NONE;
@@ -434,7 +434,7 @@ fn scan_tokens_scalar(
             while i < end && is_tok(buf.b(i)) {
                 i += 1;
             }
-            handle_token(buf, s, i - s, q, posts, bposts, last_doc, blast, docid, &mut prev);
+            handle_token(buf, s, i - s, q, log, n_terms, last_doc, blast, docid, &mut prev);
         } else {
             i += 1;
         }
@@ -443,8 +443,7 @@ fn scan_tokens_scalar(
 }
 
 struct ScanRes {
-    posts: Vec<Vec<u32>>,  // per tid (only BOOL terms fill)
-    bposts: Vec<Vec<u32>>, // per bid
+    log: Vec<u64>, // (key << 32) | docid; key = tid, or n_terms + bid for bigrams
     last_doc: Vec<u32>,
     blast: Vec<u32>,
     offs: Vec<u32>,
@@ -452,8 +451,8 @@ struct ScanRes {
 }
 
 fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes) {
-    let posts = &mut st.posts;
-    let bposts = &mut st.bposts;
+    let log = &mut st.log;
+    let n_terms = q.n_terms;
     let last_doc = &mut st.last_doc;
     let blast = &mut st.blast;
     let offs = &mut st.offs;
@@ -472,7 +471,7 @@ fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes)
         offs.push(line_start as u32);
         // tokenize until the newline (a separator itself)
         let line_end = find_byte(buf, i, b'\n');
-        scan_tokens_scalar(buf, i, line_end, q, posts, bposts, last_doc, blast, docid);
+        scan_tokens_scalar(buf, i, line_end, q, log, n_terms, last_doc, blast, docid);
         i = line_end + 1;
         docid += 1;
     }
@@ -493,6 +492,26 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
 struct Stream {
     buf: Vec<u8>,
     last: u32,
+}
+
+/// Append one key's partitioned runs (per scan thread, ascending) to its stream.
+/// Pass A computes the exact added bytes so the buffer never over-allocates.
+fn encode_runs(st8: &mut Stream, key: usize, base: &[u32], part: &[u32], nthreads: usize) {
+    let n = (base[key * nthreads + nthreads] - base[key * nthreads]) as usize;
+    if n == 0 {
+        return;
+    }
+    // ~2 bytes/entry estimate; reserve once so the buffer does not double-grow
+    st8.buf.reserve(n * 2 + 8);
+    let mut last = st8.last;
+    for t in 0..nthreads {
+        let (a, b) = (base[key * nthreads + t] as usize, base[key * nthreads + t + 1] as usize);
+        for &d in &part[a..b] {
+            put_varint(&mut st8.buf, d - last);
+            last = d;
+        }
+    }
+    st8.last = last;
 }
 
 /// Forward cursor over a delta-varint doc list.
@@ -789,7 +808,7 @@ fn main() {
 
     eprintln!("[t +{:6.3}] mmap", t0.elapsed().as_secs_f64());
     let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).min(16);
-    const SEG: usize = 8; // scan segments; each merged+released before the next
+    const SEG: usize = 16; // scan segments; each partitioned+merged+released before the next
     // chunk starts aligned to line boundaries: nthreads stripes per segment
     let nchunks = nthreads * SEG;
     let mut bounds = Vec::with_capacity(nchunks + 1);
@@ -808,14 +827,17 @@ fn main() {
     let br = &bounds;
     let mut states: Vec<ScanRes> = (0..nthreads)
         .map(|_| ScanRes {
-            posts: (0..n_terms).map(|_| Vec::new()).collect(),
-            bposts: (0..n_bids).map(|_| Vec::new()).collect(),
+            log: Vec::new(),
             last_doc: vec![NONE; n_terms],
             blast: vec![NONE; n_bids],
             offs: Vec::new(),
             ndocs: 0,
         })
         .collect();
+    let nkeys = n_terms + n_bids;
+    let mut cnt: Vec<u32> = vec![0; nthreads * nkeys]; // per-seg: thread-major counts, then scatter cursors
+    let mut base: Vec<u32> = vec![0; nthreads * nkeys + 1]; // key-major run starts in `part`, + total sentinel
+    let mut part: Vec<u32> = Vec::new(); // partitioned docids for this segment
     let mut tstreams: Vec<Stream> = (0..n_terms).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
     let mut bstreams: Vec<Stream> = (0..n_bids).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
     let mut offs: Vec<u32> = Vec::with_capacity(1_200_000);
@@ -840,8 +862,68 @@ fn main() {
             offs.extend_from_slice(&s2.offs);
             s2.offs.clear();
         }
-        // parallel stream merge: each thread owns a term range + bigram range
+        // partition this segment's pair logs by key (counting sort, stable per
+        // thread, threads in doc order) then parallel-encode into streams.
         let st_ref: &Vec<ScanRes> = &states;
+        for c in cnt.iter_mut() {
+            *c = 0;
+        }
+        let cntp = cnt.as_mut_ptr() as usize;
+        std::thread::scope(|scope| {
+            for (t, st2) in st_ref.iter().enumerate() {
+                let lg = &st2.log;
+                std::thread::Builder::new()
+                    .stack_size(256 << 10)
+                    .spawn_scoped(scope, move || {
+                        // each thread touches only its own row [t*nkeys, (t+1)*nkeys)
+                        let row = unsafe { std::slice::from_raw_parts_mut((cntp as *mut u32).add(t * nkeys), nkeys) };
+                        for &e in lg {
+                            row[(e >> 32) as usize] += 1;
+                        }
+                    })
+                    .unwrap();
+            }
+        });
+        // key-major prefix sums; cnt becomes the thread-major scatter cursors
+        let mut acc = 0u32;
+        for key in 0..nkeys {
+            for t in 0..nthreads {
+                let c = cnt[t * nkeys + key];
+                base[key * nthreads + t] = acc;
+                cnt[t * nkeys + key] = acc;
+                acc += c;
+            }
+        }
+        base[nthreads * nkeys] = acc;
+        part.clear();
+        part.resize(acc as usize, 0u32);
+        let curp = cnt.as_mut_ptr() as usize;
+        let outp = part.as_mut_ptr() as usize;
+        let plen = part.len();
+        std::thread::scope(|scope| {
+            for (t, st2) in st_ref.iter().enumerate() {
+                let lg = &st2.log;
+                std::thread::Builder::new()
+                    .stack_size(256 << 10)
+                    .spawn_scoped(scope, move || {
+                        // each thread touches only cursor slots [t*nkeys + key]
+                        // and writes only its own runs' positions in `part`
+                        let crow = unsafe { std::slice::from_raw_parts_mut((curp as *mut u32).add(t * nkeys), nkeys) };
+                        let out = unsafe { std::slice::from_raw_parts_mut(outp as *mut u32, plen) };
+                        for &e in lg {
+                            let key = (e >> 32) as usize;
+                            let pos = crow[key] as usize;
+                            out[pos] = e as u32;
+                            crow[key] = pos as u32 + 1;
+                        }
+                    })
+                    .unwrap();
+            }
+        });
+        // parallel encode: each thread owns a term range + bigram range;
+        // pass A sizes the varint bytes exactly, pass B encodes (no doubling slack)
+        let baser: &Vec<u32> = &base;
+        let part_ref: &Vec<u32> = &part;
         let mut t_it = tstreams.chunks_mut(tsz);
         let mut b_it = bstreams.chunks_mut(bsz);
         std::thread::scope(|scope| {
@@ -854,32 +936,20 @@ fn main() {
                     .stack_size(256 << 10)
                     .spawn_scoped(scope, move || {
                     for (l, st8) in tc.iter_mut().enumerate() {
-                        let tid = tbase + l;
-                        for sc in st_ref.iter() {
-                            for &d in &sc.posts[tid] {
-                                put_varint(&mut st8.buf, d - st8.last);
-                                st8.last = d;
-                            }
-                        }
+                        let key = tbase + l;
+                        encode_runs(st8, key, baser, part_ref, nthreads);
                     }
                     for (l, st8) in bc.iter_mut().enumerate() {
-                        let bid = bbase + l;
-                        for sc in st_ref.iter() {
-                            for &d in &sc.bposts[bid] {
-                                put_varint(&mut st8.buf, d - st8.last);
-                                st8.last = d;
-                            }
-                        }
+                        let key = n_terms + bbase + l;
+                        encode_runs(st8, key, baser, part_ref, nthreads);
                     }
                     })
                     .unwrap();
             }
         });
-        // release segment postings but keep capacity for the next segment
+        // release segment logs but keep capacity for the next segment
         for s2 in states.iter_mut() {
-            for v in s2.posts.iter_mut().chain(s2.bposts.iter_mut()) {
-                v.clear();
-            }
+            s2.log.clear();
         }
     }
     drop(states);
