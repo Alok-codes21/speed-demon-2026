@@ -551,4 +551,18 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: 130.1 ms vs 131.6 ms interleaved (wash). Gates: full d8088b1c...,
   sample 9035fed3..., tiny/edge diffs clean, 3x parallel stress stable,
   ASAN+UBSAN clean.
+- Run: run-533baf549c40 = 77.702040 pts - NEW BEST (was 77.667446). S=273,
+  T=0.038176 s (ties v132's best reading), M=8.66 MB. Note: a later run of
+  the identical track-c code (teammate's track-d commit; runner re-scores
+  every branch push) read T=0.0442 = 76.245 pts, so board T noise reaches
+  +/-16%; single-run deltas inside that band are not decisive.
+
+## Step 78 - six parse threads (SMT contention probe)
+- Hypothesis: 12 threads on 6 P-cores + SMT may thrash L1/L2 and queue on
+  the page-table lock during populate; 6 threads (one per P-core) could cut
+  T. If SMT was instead hiding our random-access stalls, T rises and we
+  revert. One constant: worker/thread/merge counts 12 -> 6.
+- Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x
+  parallel stress stable, ASAN+UBSAN clean. (Local thread-count timing is
+  meaningless on the 1-vCPU sandbox; board decides.)
 - Run: PENDING
