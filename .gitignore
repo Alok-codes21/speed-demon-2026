@@ -13,3 +13,6 @@ inspect_*.py
 count_*.py
 test_engine.*
 monitor_*.py
+
+rank_check.py
+show_b.py
