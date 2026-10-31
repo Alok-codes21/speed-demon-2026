@@ -137,4 +137,19 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   board does not charge (v11 was 436 MB).
 - Verification: spec worked example exact; tiny/sample byte-diff vs Python
   reference; full sha256 f86973c2...80927 match.
+- Run: run-a5a8728c736a - PASS: T=0.793 s, M=149.5 MB, S=892, K=10.25,
+  **50.54 pts** (rank 42/63 at the time). Memory 280 -> 149.5 MB as designed.
+  A same-code re-run (run-c3ce03fe455f, triggered by a teammate pushing
+  another track) measured T=0.857 s / 49.64 pts, so board wall time carries
+  roughly +/-8% run-to-run noise.
+
+## Step 10: PGO build on the allowlisted llvm-tools image (v13, this push)
+
+- Dockerfile gains a generator stage (published b_index.py, byte-identical,
+  free on the S axis) producing seed-1 sample, seed-7 sample and seed-1 tiny
+  datasets, then builds twice on halloumee/speed-demon-rust
+  (rust:1-trixie + llvm-tools): -Cprofile-generate, three instrumented runs,
+  llvm-profdata merge, -Cprofile-use. Build-time training on generator
+  output is explicitly allowed; /data is not mounted at build time.
+- No source changes vs v12.
 - Run: PENDING
