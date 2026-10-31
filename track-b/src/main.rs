@@ -277,6 +277,7 @@ struct Queries {
     phr_bids: Vec<u32>,
     terms: Terms,
     bigrams: Bigrams,
+    big1: Vec<u64>, // bitset: term id starts at least one query bigram
     n_terms: usize,
     n_bids: usize,
 }
@@ -287,6 +288,7 @@ fn parse_queries(data: &[u8]) -> Queries {
     let mut qs = Vec::with_capacity(50_000);
     let mut phr_tids: Vec<u32> = Vec::with_capacity(80_000);
     let mut phr_bids: Vec<u32> = Vec::with_capacity(70_000);
+    let mut big1 = vec![0u64; 2048]; // covers up to 131k term ids
     let mut pos = 0usize;
     while pos < data.len() {
         let eol = data[pos..].iter().position(|&b| b == b'\n').map(|d| pos + d).unwrap_or(data.len());
@@ -324,6 +326,7 @@ fn parse_queries(data: &[u8]) -> Queries {
                 let tid = terms.insert(w, 0);
                 phr_tids.push(tid);
                 if prev != NONE {
+                    big1[prev as usize >> 6] |= 1u64 << (prev & 63);
                     let bid = bigrams.insert(prev, tid);
                     phr_bids.push(bid);
                 }
@@ -348,7 +351,7 @@ fn parse_queries(data: &[u8]) -> Queries {
             has_len1 = true;
         }
     }
-    Queries { qs, phr_tids, phr_bids, terms, bigrams, n_terms, n_bids, pfx, has_len1 }
+    Queries { qs, phr_tids, phr_bids, terms, bigrams, big1, n_terms, n_bids, pfx, has_len1 }
 }
 
 
@@ -375,7 +378,7 @@ fn find_byte(buf: &Map, mut i: usize, byte: u8) -> usize {
 fn handle_token(
     buf: &Map, s: usize, len: usize, q: &Queries,
     log: &mut Vec<u64>, n_terms: usize,
-    last_doc: &mut [u32], blast: &mut [u32], docid: u32, prev: &mut u32,
+    docid: u32, prev: &mut u32,
 ) {
     unsafe {
         if len > 32 {
@@ -401,15 +404,13 @@ fn handle_token(
         }
         let tid = q.terms.probe(p, len, h);
         if tid != NONE {
-            if q.terms.flags[tid as usize] & 1 != 0 && last_doc[tid as usize] != docid {
+            if q.terms.flags[tid as usize] & 1 != 0 {
                 log.push(((tid as u64) << 32) | docid as u64);
-                last_doc[tid as usize] = docid;
             }
-            if *prev != NONE {
+            if *prev != NONE && q.big1[*prev as usize >> 6] >> (*prev & 63) & 1 != 0 {
                 let bid = q.bigrams.probe(*prev, tid);
-                if bid != NONE && blast[bid as usize] != docid {
+                if bid != NONE {
                     log.push((((n_terms + bid as usize) as u64) << 32) | docid as u64);
-                    blast[bid as usize] = docid;
                 }
             }
             *prev = tid;
@@ -423,7 +424,7 @@ fn handle_token(
 fn scan_tokens_scalar(
     buf: &Map, start: usize, end: usize, q: &Queries,
     log: &mut Vec<u64>, n_terms: usize,
-    last_doc: &mut [u32], blast: &mut [u32], docid: u32,
+    docid: u32,
 ) -> u32 {
     let mut prev = NONE;
     let mut i = start;
@@ -434,7 +435,7 @@ fn scan_tokens_scalar(
             while i < end && is_tok(buf.b(i)) {
                 i += 1;
             }
-            handle_token(buf, s, i - s, q, log, n_terms, last_doc, blast, docid, &mut prev);
+            handle_token(buf, s, i - s, q, log, n_terms, docid, &mut prev);
         } else {
             i += 1;
         }
@@ -444,8 +445,6 @@ fn scan_tokens_scalar(
 
 struct ScanRes {
     log: Vec<u64>, // (key << 32) | docid; key = tid, or n_terms + bid for bigrams
-    last_doc: Vec<u32>,
-    blast: Vec<u32>,
     offs: Vec<u32>,
     ndocs: u32,
 }
@@ -453,8 +452,6 @@ struct ScanRes {
 fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes) {
     let log = &mut st.log;
     let n_terms = q.n_terms;
-    let last_doc = &mut st.last_doc;
-    let blast = &mut st.blast;
     let offs = &mut st.offs;
     // first line's doc id (ids are dense and ascending); peek, do not advance
     let mut docid: u32 = 0;
@@ -471,7 +468,7 @@ fn scan_into(buf: &Map, mut i: usize, end: usize, q: &Queries, st: &mut ScanRes)
         offs.push(line_start as u32);
         // tokenize until the newline (a separator itself)
         let line_end = find_byte(buf, i, b'\n');
-        scan_tokens_scalar(buf, i, line_end, q, log, n_terms, last_doc, blast, docid);
+        scan_tokens_scalar(buf, i, line_end, q, log, n_terms, docid);
         i = line_end + 1;
         docid += 1;
     }
@@ -488,14 +485,18 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
     out.push(v as u8);
 }
 
-/// One term's (or bigram's) postings as a growing delta-varint stream.
+/// One term's (or bigram's) postings as a growing delta-varint stream,
+/// plus a skip table (every 32nd entry: absolute docid + byte offset of the
+/// cursor state AFTER it) for galloping probes.
 struct Stream {
     buf: Vec<u8>,
+    skip: Vec<u64>,
     last: u32,
+    n: u32,
 }
 
-/// Append one key's partitioned runs (per scan thread, ascending) to its stream.
-/// Pass A computes the exact added bytes so the buffer never over-allocates.
+/// Append one key's partitioned runs (per scan thread, ascending) to its stream,
+/// recording a skip entry every 32 docs (cursor state after that entry).
 fn encode_runs(st8: &mut Stream, key: usize, base: &[u32], part: &[u32], nthreads: usize) {
     let n = (base[key * nthreads + nthreads] - base[key * nthreads]) as usize;
     if n == 0 {
@@ -503,15 +504,72 @@ fn encode_runs(st8: &mut Stream, key: usize, base: &[u32], part: &[u32], nthread
     }
     // ~2 bytes/entry estimate; reserve once so the buffer does not double-grow
     st8.buf.reserve(n * 2 + 8);
+    let mut r = st8.n; // running entry index across segments
     let mut last = st8.last;
+    let mut prev_d = u32::MAX; // adjacent-dup filter (per-doc dedup moved here from the scan)
     for t in 0..nthreads {
         let (a, b) = (base[key * nthreads + t] as usize, base[key * nthreads + t + 1] as usize);
         for &d in &part[a..b] {
-            put_varint(&mut st8.buf, d - last);
+            if d == prev_d {
+                continue;
+            }
+            prev_d = d;
+            put_varint(&mut st8.buf, d.wrapping_sub(last));
             last = d;
+            r += 1;
+            if r & 31 == 0 {
+                st8.skip.push(((last as u64) << 32) | st8.buf.len() as u64);
+            }
         }
     }
+    st8.n = r;
     st8.last = last;
+}
+
+/// Membership probe against a stream via its skip table: jump to the last
+/// skip entry below x, then decode forward. Used when the other side of the
+/// op is much shorter than this stream.
+fn probe(buf: &[u8], skip: &[u64], x: u32) -> bool {
+    let (mut v, mut i) = if skip.is_empty() {
+        (0u32, 0usize)
+    } else {
+        // last skip entry with docid < x (skip docids ascend)
+        let mut lo = 0usize;
+        let mut hi = skip.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if (skip[mid] >> 32) as u32 >= x {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo == 0 {
+            (0u32, 0usize)
+        } else {
+            let e = skip[lo - 1];
+            ((e >> 32) as u32, e as u32 as usize)
+        }
+    };
+    // decode at least one entry before comparing (the skip state is strictly < x)
+    while i < buf.len() {
+        let mut d = 0u32;
+        let mut sh = 0;
+        loop {
+            let b = buf[i];
+            i += 1;
+            d |= ((b & 0x7f) as u32) << sh;
+            if b < 0x80 {
+                break;
+            }
+            sh += 7;
+        }
+        v = v.wrapping_add(d);
+        if v >= x {
+            return v == x;
+        }
+    }
+    false
 }
 
 /// Forward cursor over a delta-varint doc list.
@@ -580,21 +638,16 @@ fn decode_into(bytes: &[u8], out: &mut Vec<u32>) {
 
 // ------------------------------------------------------- sorted set ops ----
 #[inline(always)]
-fn contains(hay: &[u32], x: u32) -> bool {
-    // galloping search; good when probing a long list with a short one
-    let mut step = 1usize;
-    let mut lo = 0usize;
-    while lo + step <= hay.len() && hay[lo + step - 1] < x {
-        lo += step;
-        step *= 2;
-    }
-    let hi = (lo + step).min(hay.len());
-    hay[lo..hi].binary_search(&x).is_ok()
-}
 
 #[inline(always)]
-fn intersect_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
+fn intersect_stream(a: &[u32], l: &Stream, out: &mut Vec<u32>) {
     out.clear();
+    if (a.len() as u64) * 24 < l.n as u64 {
+        // heavy skew: probe the long stream per accumulator element
+        out.extend(a.iter().copied().filter(|&x| probe(&l.buf, &l.skip, x)));
+        return;
+    }
+    let mut cur = Cur::new(&l.buf);
     for &x in a {
         cur.seek(x);
         if cur.v == x {
@@ -630,8 +683,13 @@ fn union_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
 }
 
 #[inline(always)]
-fn diff_stream(a: &[u32], cur: &mut Cur, out: &mut Vec<u32>) {
+fn diff_stream(a: &[u32], l: &Stream, out: &mut Vec<u32>) {
     out.clear();
+    if (a.len() as u64) * 24 < l.n as u64 {
+        out.extend(a.iter().copied().filter(|&x| !probe(&l.buf, &l.skip, x)));
+        return;
+    }
+    let mut cur = Cur::new(&l.buf);
     for &x in a {
         cur.seek(x);
         if cur.v != x {
@@ -682,74 +740,8 @@ fn union_ss(mut x: Cur, mut y: Cur, out: &mut Vec<u32>) {
     }
 }
 
-fn intersect_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    if s.len() * 8 < l.len() {
-        out.extend(s.iter().copied().filter(|&x| contains(l, x)));
-    } else {
-        let (mut i, mut j) = (0, 0);
-        while i < a.len() && j < b.len() {
-            match a[i].cmp(&b[j]) {
-                std::cmp::Ordering::Less => i += 1,
-                std::cmp::Ordering::Greater => j += 1,
-                std::cmp::Ordering::Equal => {
-                    out.push(a[i]);
-                    i += 1;
-                    j += 1;
-                }
-            }
-        }
-    }
-}
 
-fn union_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    out.reserve(a.len() + b.len());
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                out.push(b[j]);
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                out.push(a[i]);
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
-}
 
-fn diff_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
-    out.clear();
-    if a.len() * 8 < b.len() {
-        out.extend(a.iter().copied().filter(|&x| !contains(b, x)));
-        return;
-    }
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&a[i..]);
-}
 
 // -------------------------------------------------------------- output ----
 #[inline(always)]
@@ -828,8 +820,6 @@ fn main() {
     let mut states: Vec<ScanRes> = (0..nthreads)
         .map(|_| ScanRes {
             log: Vec::new(),
-            last_doc: vec![NONE; n_terms],
-            blast: vec![NONE; n_bids],
             offs: Vec::new(),
             ndocs: 0,
         })
@@ -838,8 +828,8 @@ fn main() {
     let mut cnt: Vec<u32> = vec![0; nthreads * nkeys]; // per-seg: thread-major counts, then scatter cursors
     let mut base: Vec<u32> = vec![0; nthreads * nkeys + 1]; // key-major run starts in `part`, + total sentinel
     let mut part: Vec<u32> = Vec::new(); // partitioned docids for this segment
-    let mut tstreams: Vec<Stream> = (0..n_terms).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
-    let mut bstreams: Vec<Stream> = (0..n_bids).map(|_| Stream { buf: Vec::new(), last: 0 }).collect();
+    let mut tstreams: Vec<Stream> = (0..n_terms).map(|_| Stream { buf: Vec::new(), skip: Vec::new(), last: 0, n: 0 }).collect();
+    let mut bstreams: Vec<Stream> = (0..n_bids).map(|_| Stream { buf: Vec::new(), skip: Vec::new(), last: 0, n: 0 }).collect();
     let mut offs: Vec<u32> = Vec::with_capacity(1_200_000);
     let tsz = n_terms.div_ceil(nthreads);
     let bsz = n_bids.max(1).div_ceil(nthreads);
@@ -1000,6 +990,13 @@ struct State<'a> {
 
 impl<'a> State<'a> {
     #[inline(always)]
+    fn tstream(&self, tid: u32) -> &'a Stream {
+        &self.tstreams[tid as usize]
+    }
+    fn bstream(&self, bid: u32) -> &'a Stream {
+        &self.bstreams[bid as usize]
+    }
+    #[inline(always)]
     fn tlist(&self, tid: u32) -> &'a [u8] {
         &self.tstreams[tid as usize].buf
     }
@@ -1032,7 +1029,17 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
             Q::Bool(bq) => {
                 let mut k0 = 1usize;
                 if bq.n >= 2 && bq.ops[0] == 0 {
-                    intersect_ss(Cur::new(st.tlist(bq.tids[0])), Cur::new(st.tlist(bq.tids[1])), &mut a);
+                    let s0 = st.tstream(bq.tids[0]);
+                    let s1 = st.tstream(bq.tids[1]);
+                    if (s0.n as u64) * 24 < (s1.n as u64) {
+                        decode_into(&s0.buf, &mut a);
+                        a.retain(|&x| probe(&s1.buf, &s1.skip, x));
+                    } else if (s1.n as u64) * 24 < (s0.n as u64) {
+                        decode_into(&s1.buf, &mut a);
+                        a.retain(|&x| probe(&s0.buf, &s0.skip, x));
+                    } else {
+                        intersect_ss(Cur::new(&s0.buf), Cur::new(&s1.buf), &mut a);
+                    }
                     k0 = 2;
                 } else if bq.n >= 2 && bq.ops[0] == 1 {
                     union_ss(Cur::new(st.tlist(bq.tids[0])), Cur::new(st.tlist(bq.tids[1])), &mut a);
@@ -1041,28 +1048,28 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                     decode_into(st.tlist(bq.tids[0]), &mut a);
                 }
                 for k in k0..bq.n as usize {
-                    let l = st.tlist(bq.tids[k]);
+                    let l = st.tstream(bq.tids[k]);
                     match bq.ops[k - 1] {
                         0 => {
-                            if a.is_empty() || l.is_empty() {
+                            if a.is_empty() || l.buf.is_empty() {
                                 a.clear();
                                 continue;
                             }
-                            intersect_stream(&a, &mut Cur::new(l), &mut c);
+                            intersect_stream(&a, l, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         1 => {
-                            if l.is_empty() {
+                            if l.buf.is_empty() {
                                 continue;
                             }
-                            union_stream(&a, &mut Cur::new(l), &mut c);
+                            union_stream(&a, &mut Cur::new(&l.buf), &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                         _ => {
-                            if a.is_empty() || l.is_empty() {
+                            if a.is_empty() || l.buf.is_empty() {
                                 continue;
                             }
-                            diff_stream(&a, &mut Cur::new(l), &mut c);
+                            diff_stream(&a, l, &mut c);
                             std::mem::swap(&mut a, &mut c);
                         }
                     }
@@ -1079,13 +1086,13 @@ fn eval_range(st: &State, lo: usize, hi: usize) -> Vec<u8> {
                 if ok && k > 2 {
                     // intersect the remaining bigram lists
                     for &bid in &bids[1..] {
-                        let l = st.blist(bid);
-                        if l.is_empty() {
+                        let l = st.bstream(bid);
+                        if l.buf.is_empty() {
                             a.clear();
                             ok = false;
                             break;
                         }
-                        intersect_stream(&a, &mut Cur::new(l), &mut c);
+                        intersect_stream(&a, l, &mut c);
                         std::mem::swap(&mut a, &mut c);
                         if a.is_empty() {
                             ok = false;
