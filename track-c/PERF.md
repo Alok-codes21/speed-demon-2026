@@ -126,5 +126,11 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 26 (v45 parallel regions, lock-free read path)
 - Change: step-25 code with the regions code-table probe split: lock-free atomic read path (codes repeat ~4000x each, so nearly all rows never lock) and a spinlocked insert path with re-probe for new codes only. Release/acquire ordering on slot_of publishes CK. TSAN-clean, all-atomic CK/slot_of access.
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓.
+- Board T_s/M/S/points: T_s=0.045064 M=10407936 S=315 points=74.638 - T FLAT vs step 23 (0.0449), so parallelizing regions bought nothing: the serial regions load was never on the board's critical path (overlapped by record page faults/readahead). The +20 S lines then cost 0.43 pts outright. Hypothesis dead; reverted to step-23 code (step 27).
+- Run: run-7d62d41c27ff
+
+
+## Step 27 (revert to step-23 code)
+- Change: c_join.cpp back to v39 (step 23: batch-16 code + MADV_HUGEPAGE); steps 24-26 all board-measured regressions or flat-and-costly.
 - Board T_s/M/S/points: pending
 - Run: pending

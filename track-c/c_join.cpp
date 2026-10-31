@@ -30,10 +30,8 @@ struct Stats {
 static uint64_t (*CB)[BITS_W];
 static uint8_t *R2C;
 // packed 3-letter code per slot; '_' for _UNMATCHED
-static uint32_t NC = 0, CK[MAX_C];
-static int16_t slot_of[1024]; // country code -> slot, by first appearance
-static int ck_lock;
-static pthread_barrier_t rbar;
+static uint32_t CK[MAX_C];
+static uint32_t NC = 0, UNMATCHED = 0;
 
 // slot 0 stays reserved: id 0 is the empty name
 static uint64_t *NT;
@@ -87,12 +85,15 @@ static uint64_t hash_long(const char *s, const char *e) {
 
 // ---------------------------------------------------------------- regions.csv
 
-struct Worker {
-  const char *start, *end, *rstart, *rend; Stats stats[MAX_C];
-};
-
-void load_regions(const Worker *w) {
-  const char *p = w->rstart, *end = w->rend;
+void load_regions(const std::string &path) {
+  int fd = open(path.c_str(), O_RDONLY);
+  struct stat st; fstat(fd, &st);
+  auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  const char *p = data, *end = data + st.st_size;
+  p = (const char *)memchr(p, '\n', end - p) + 1; // skip the header line
+  int16_t slot_of[1024]; // country code -> slot, by first appearance
+  memset(slot_of, -1, sizeof(slot_of));
+  memset(R2C, 255, 1000000);
   while (p < end) {
     // SWAR rid parse: comma index = digit count, branch-free convert
     uint64_t rid = 0, n = 0, zm = 0;
@@ -107,26 +108,16 @@ void load_regions(const Worker *w) {
         rid = (uint32_t)((v & 0x0000FFFF0000FFFFULL) * 42949672960001ULL >> 32);
     }
     while (zm == 0 && p[n] != ',') rid = rid * 10 + (p[n++] - '0'); // tail
-    uint32_t w2, key = (memcpy(&w2, p + n + 1, 4), __builtin_bswap32(w2) >> 8);
-    // lock-free read path (codes repeat ~4000x each); lock only on a new code
+    uint32_t w, key = (memcpy(&w, p + n + 1, 4), __builtin_bswap32(w) >> 8);
     uint32_t h = (key * 0x9E3779B1u) >> 22;
-    int16_t sl;
-    while ((sl = __atomic_load_n(&slot_of[h], __ATOMIC_ACQUIRE)) >= 0 &&
-           __atomic_load_n(&CK[sl], __ATOMIC_RELAXED) != key)
-      h = (h + 1) & 1023;
-    if (sl < 0) {
-      while (__sync_lock_test_and_set(&ck_lock, 1)) {}
-      while ((sl = __atomic_load_n(&slot_of[h], __ATOMIC_RELAXED)) >= 0 &&
-             __atomic_load_n(&CK[sl], __ATOMIC_RELAXED) != key)
-        h = (h + 1) & 1023;
-      if (sl < 0)
-        __atomic_store_n(&CK[sl = (int16_t)NC++], key, __ATOMIC_RELAXED),
-        __atomic_store_n(&slot_of[h], sl, __ATOMIC_RELEASE);
-      __sync_lock_release(&ck_lock);
-    }
-    if (rid < 1000000) R2C[rid] = (uint8_t)sl;
+    while (slot_of[h] >= 0 && CK[slot_of[h]] != key) h = (h + 1) & 1023;
+    if (slot_of[h] < 0) CK[slot_of[h] = (int16_t)NC++] = key;
+    if (rid < 1000000) R2C[rid] = (uint8_t)slot_of[h];
     p += n + 5;
   }
+  CK[UNMATCHED = NC++] = 0x5F0000; // '_' sorts after every [A-Z] code
+  munmap((void *)data, st.st_size);
+  close(fd);
 }
 
 // -------------------------------------------------------------------- parsing
@@ -156,6 +147,10 @@ quoted_end(const char *s, const char *end, uint32_t *esc) {
   return q ? q + 2 : nullptr;
 }
 
+struct Worker {
+  const char *start, *end; Stats stats[MAX_C];
+};
+
 // flush up to n buffered bitsets: prefetch all lines, then set
 static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
   for (uint32_t j = 0; j < n; j++) __builtin_prefetch(&CB[bc[j]][bnid[j] >> 6]);
@@ -170,8 +165,6 @@ static inline void bflush(uint32_t *bnid, uint8_t *bc, uint32_t n) {
 // chunks cut exactly on record boundaries. Rows have no embedded newlines.
 void *parse_chunk(void *arg) {
   Worker *w = (Worker *)arg;
-  load_regions(w);
-  pthread_barrier_wait(&rbar);
   const char *p = w->start, *end = w->end;
   Stats *stats = w->stats;
   uint32_t bnid[16], nb = 0; uint8_t bc[16];
@@ -211,12 +204,15 @@ void *parse_chunk(void *arg) {
     cents = cents * 100 + (p[1] - '0') * 10 + (p[2] - '0');
     p += 3; // '.' and two fraction digits
     if (neg) cents = -cents;
-    while (p < end && (*p == '\r' || *p == '\n')) p++;
+    p += (p < end && *p == '\r'); p += (p < end && *p == '\n');
 
-    // join and aggregate (unmapped slots stay 255 = UNMATCHED)
+    // join and aggregate
+    if (__builtin_expect(c == 255, 0)) c = UNMATCHED;
     Stats &s = stats[c]; s.count++; s.id_sum += id; s.amount_sum += cents;
-    s.amount_min = std::min(s.amount_min, cents);
-    s.amount_max = std::max(s.amount_max, cents);
+    if (cents < s.amount_min)
+      s.amount_min = cents;
+    if (cents > s.amount_max)
+      s.amount_max = cents;
     s.name_bytes += name_len; s.note_bytes += note_len;
     uint32_t nid = name_len ? intern_name(name_hash) : 0;
     bnid[nb] = nid; bc[nb] = c;
@@ -244,12 +240,7 @@ int main(int argc, char **argv) {
   R2C = (uint8_t *)(al + (1 << 20)); // 1 MB
   CB = (uint64_t(*)[BITS_W])(al + (2 << 20));
   NT[0] = 1; // reserve id 0: real hashes all have bit 63 set
-  int rfd = open((data_dir + "/regions.csv").c_str(), O_RDONLY);
-  struct stat rst; fstat(rfd, &rst);
-  auto rdata = (const char *)mmap(0, rst.st_size, PROT_READ, MAP_PRIVATE, rfd, 0);
-  memset(slot_of, -1, sizeof(slot_of));
-  memset(R2C, 255, 1000000);
-  CK[255] = 0x5F0000; // '_' sorts after every [A-Z] code
+  load_regions(data_dir + "/regions.csv");
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -267,17 +258,10 @@ int main(int argc, char **argv) {
     c_starts[i] = m ? m + 2 : fend;
   }
 
-  const char *r0 = (const char *)memchr(rdata, '\n', rst.st_size) + 1;
-  size_t rtot = rdata + rst.st_size - r0;
   static Worker workers[nth];
   pthread_t ths[nth];
-  pthread_barrier_init(&rbar, 0, nth);
   for (int i = 0; i < nth; i++) {
     workers[i].start = c_starts[i]; workers[i].end = c_starts[i + 1];
-    const char *ra = r0 + (i * rtot) / nth;
-    workers[i].rstart = i ? (const char *)memchr(ra, '\n', rdata + rst.st_size - ra) + 1 : r0;
-    const char *rb = r0 + ((i + 1) * rtot) / nth;
-    workers[i].rend = i + 1 < nth ? (const char *)memchr(rb, '\n', rdata + rst.st_size - rb) + 1 : rdata + rst.st_size;
     pthread_create(&ths[i], nullptr, parse_chunk, &workers[i]);
   }
   for (int i = 0; i < nth; i++)
@@ -285,9 +269,9 @@ int main(int argc, char **argv) {
 
   // Merge the per-thread aggregates (empty threads merge as zeros).
   Stats final_s[MAX_C];
-  for (uint32_t i = 0; i < (uint32_t)(nth * MAX_C); i++) {
-      const Stats &ws = workers[i / MAX_C].stats[i % MAX_C];
-      Stats &fs = final_s[i % MAX_C];
+  for (uint32_t i = 0; i < (uint32_t)(nth * NC); i++) {
+      const Stats &ws = workers[i / NC].stats[i % NC];
+      Stats &fs = final_s[i % NC];
       fs.count += ws.count; fs.id_sum += ws.id_sum; fs.amount_sum += ws.amount_sum;
       fs.amount_min = std::min(fs.amount_min, ws.amount_min);
       fs.amount_max = std::max(fs.amount_max, ws.amount_max);
@@ -295,21 +279,20 @@ int main(int argc, char **argv) {
     }
 
   // Countries sort by their packed 3-byte key; '_' (UNMATCHED) is last.
-  uint32_t order[MAX_C];
-  for (uint32_t i = 0; i <= NC; i++) order[i] = i < NC ? i : 255;
-  std::sort(order, order + NC + 1, [](auto a, auto b) { return CK[a] < CK[b]; });
+  uint32_t order[MAX_C]; for (uint32_t i = 0; i < NC; i++) order[i] = i;
+  std::sort(order, order + NC, [](auto a, auto b) { return CK[a] < CK[b]; });
 
   mkdir(out_dir.c_str(), 0777);
   FILE *out = fopen((out_dir + "/aggregates.txt").c_str(), "w");
   if (!out) return 1;
-  for (uint32_t oi = 0; oi <= NC; oi++) {
+  for (uint32_t oi = 0; oi < NC; oi++) {
     uint32_t c = order[oi];
     const Stats &g = final_s[c];
     if (g.count == 0) continue;
     uint32_t d = 0;
     for (uint32_t i = 0; i < BITS_W; i++) d += __builtin_popcountll(CB[c][i]);
     char code[4] = {(char)(CK[c] >> 16), (char)(CK[c] >> 8), (char)CK[c], 0};
-    const char *nm = c == 255 ? "_UNMATCHED" : code;
+    const char *nm = c == UNMATCHED ? "_UNMATCHED" : code;
     fprintf(out, "%s %zu %zu ", nm, (size_t)g.count, (size_t)g.id_sum);
     pr_money(out, g.amount_sum, ' ');
     pr_money(out, g.amount_min, ' ');
