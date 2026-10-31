@@ -492,3 +492,11 @@ Every step from the reference to your final version, each with the live-board ru
   before any further pipeline attempt.
 ## Step 72: revert to step-61 v111 (best-known, 77.191)
 - Run: PENDING
+## Step 73: pipeline + populate with THP off (v128)
+- Step-70 (ring+populate) read M 11.2 MB, step-71 (ring, no populate) read
+  M 29.6 MB, v111 reads 9.9 MB - the deferred-touch ring destabilizes the
+  box's THP accounting and the populate partly tamed it. This variant keeps
+  ring + populate, disables THP process-wide (PR_SET_THP_DISABLE) and drops
+  the pool MADV_HUGEPAGE: with 4 KB pages the populate faults exactly the
+  used set, no 2 MB rounding. populate now covers NT + R2C + used CB fully.
+- Run: PENDING
