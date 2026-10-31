@@ -1,4 +1,4 @@
-
+﻿
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
@@ -111,31 +111,64 @@ fn main() -> io::Result<()> {
         line.clear();
     }
 
-    // Numeric sort: group ID first, then latency.
-    values.sort_unstable();
+    
+    // Experiment: counting-based grouping + independent group sorts.
 
-    // Read exact nearest-rank percentiles from each group's sorted segment.
-    let mut cursor = 0usize;
+    // Calculate each group's starting and ending offsets.
+    let mut offsets = vec![0usize; GROUPS + 1];
 
-    for group in &mut stats {
-        let count = group.count as usize;
+    for group_id in 0..GROUPS {
+        offsets[group_id + 1] =
+            offsets[group_id] + stats[group_id].count as usize;
+    }
 
-        if count == 0 {
+    debug_assert_eq!(offsets[GROUPS], values.len());
+
+    // Allocate one contiguous array for all latency values.
+    let mut grouped_latencies = vec![0u32; values.len()];
+
+    // Distribute each packed value into its group's segment.
+    let mut write_positions = offsets[..GROUPS].to_vec();
+
+    for packed in values.drain(..) {
+        let group_id = (packed >> 32) as usize;
+        let latency = packed as u32;
+
+        let position = write_positions[group_id];
+        grouped_latencies[position] = latency;
+        write_positions[group_id] += 1;
+    }
+
+    // Release the original packed-value allocation.
+    drop(values);
+
+    // Sort each group's latency values independently.
+    for group_id in 0..GROUPS {
+        let start = offsets[group_id];
+        let end = offsets[group_id + 1];
+
+        if start == end {
             continue;
         }
+
+        let latencies = &mut grouped_latencies[start..end];
+        latencies.sort_unstable();
+
+        let count = latencies.len();
 
         let p50_rank = (50 * count + 99) / 100 - 1;
         let p95_rank = (95 * count + 99) / 100 - 1;
         let p99_rank = (99 * count + 99) / 100 - 1;
 
-        group.p50 = values[cursor + p50_rank] as u32;
-        group.p95 = values[cursor + p95_rank] as u32;
-        group.p99 = values[cursor + p99_rank] as u32;
+        let group = &mut stats[group_id];
 
-        cursor += count;
+        group.p50 = latencies[p50_rank];
+        group.p95 = latencies[p95_rank];
+        group.p99 = latencies[p99_rank];
     }
 
-    debug_assert_eq!(cursor, values.len());
+    
+
 
     // Endpoint IDs are assigned by first appearance, not byte order.
     // Sort IDs once, then emit endpoints bytewise.
