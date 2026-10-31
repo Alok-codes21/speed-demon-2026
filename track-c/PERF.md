@@ -218,3 +218,9 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: c_join.cpp back to v58. Step-40 (write-intent prefetch on NT + CB lines) scored T_s=0.0448 M=9.9MB S=304 points=75.052 (run-ae31438a7699, -0.34 vs run-7786ec817115, outside the v58 noise band 75.22-75.39). Mechanism: >90% of NT probes are read-only hits; PREFETCHW turns them into exclusive grabs and increases coherence traffic. PREFETCHW dead for read-mostly lines.
 - Board T_s/M/S/points: pending (same code as steps 37/39)
 - Run: pending
+
+## Step 42 (v68 source golf for the S axis; 304 -> 247 board lines)
+- Change: same algorithm, rewritten so clang-format emits fewer physical lines: ternaries/comma-exprs for short ifs (min/max stats, region assign, pr_money sign), merged decls, num() helper for the three digit loops, scalar regions parse replaces the SWAR block, if-init in intern_name, granule counter folded into the for, dead munmap/close dropped, <emmintrin.h> folded into <immintrin.h>. Formatted scc 240 + Dockerfile 7 = 247 board S (was 304). One measured trap: load8 as a variable-size memcpy ternary cost +3% local (real memcpy call on the hot path) - kept the explicit branch there.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean (all 4 datasets) ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ timing flat vs v58 (+0.3% med, noise).
+- Board T_s/M/S/points: pending (expected S 304->247 = +0.68 pts at constant T/M)
+- Run: pending
