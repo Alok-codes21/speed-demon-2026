@@ -355,4 +355,17 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
   comments do not count on the S axis).
 - Expected M ~46-48 MB (M axis +~0.55 pts). Verification: spec exact;
   tiny/sample byte-diff; full sha256 f86973c2...80927 unchanged.
+- Run: run-3c8c5780fa4a - PASS but REGRESSION: T=0.259 s (flat), M=76.7 MB
+  (+16.8!), S=634, **66.69 pts**. Root cause: the 64 KB chunk size was
+  load-bearing - mallopt(M_MMAP_THRESHOLD, 64 KB) sends 64 KB allocations
+  through mmap, so they return to the kernel on free; 16 KB chunks are
+  retained in glibc arenas instead. The waste model ignored allocator
+  behaviour and was exactly wrong.
+
+## Step 20: revert chunk size, keep threshold + borrow (v23)
+
+- Buckets back to 64 KB chunks (mmap-threshold sized, kernel-returned).
+- Kept: bitmap threshold N/16 (net -1.6 MB by the posting/bitmap
+  break-even), borrowed bitmap operands in eval (eval transient churn).
+- Expected M ~57-58 MB, T flat.
 - Run: run-pending
