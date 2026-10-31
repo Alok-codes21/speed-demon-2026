@@ -168,5 +168,8 @@ Every step from the reference to your final version, each with the live-board ru
 
 ## Step 33 (revert to step-23 code)
 - Change: c_join.cpp back to v39 (step 23); step-32 2^18 tables were a net regression.
+## Step 34 (v53 thread count 12 -> 10)
+- Change: worker threads 12 -> 10. Board history: 12 > 6 > 16, peak location between 7-15 unknown; 10 probes the contention-vs-SMT tradeoff (atomics on shared CB lines + NT probes argue fewer threads; SMT throughput argues more).
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ (1-CPU sandbox cannot measure thread-count effects; board is the measurement).
 - Board T_s/M/S/points: pending
 - Run: pending
