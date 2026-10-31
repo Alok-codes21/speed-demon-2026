@@ -641,4 +641,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Gates: full d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 8x
   stress hash-stable, ASAN+UBSAN clean (sample/edge/tiny), TSAN CLEAN (0
   warnings; the pre-fix build showed the barrier races, now gone).
-- Run: PENDING
+- Run: CRASHED on the board (run-e42f6157ef83): exit -1 signal 11 at
+  T=2.6ms, correctness gate failed, no score. Locally the same code passed
+  full/sample/tiny/edge hashes, 8x stress, ASAN/UBSAN and TSAN - but the
+  sandbox runs 1 vCPU, so a defect that needs true 12-way parallel execution
+  (or gcc-16 codegen; local gcc is 11) was invisible here. The lock-free
+  country-slot insertion is the only new concurrency. Tip reverted to v140
+  (step 84 revert); the win is being resubmitted as a single-threaded SWAR
+  region load (no new concurrency) in step 85.
