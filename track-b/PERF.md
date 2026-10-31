@@ -618,4 +618,9 @@ synthetic single-term suite: 0 matches instead of 144).
   content change; S 663 -> ~600 expected.
 - Local gates: synthetic/sample/full all byte-exact (sha256
   f86973c2...80927); local wall 2.32 s vs v32's 2.63 s.
-- Run: run-pending
+- Runs: the step-31 PERF push re-rolled v32 (run-6620cf8b4ffc): T=0.2290 s,
+  M=51.0 MB, S=666, **69.65 pts - new best**. This push (run-0c5d10d2b531):
+  T=0.2428 s, M=54.6 MB, S=666, 68.71 pts - a below-band draw, inside noise;
+  local timing still favours the 4-byte slots, so one more re-roll decides.
+  (S barely reacts to comment or formatting diets: 663 -> 666 here. Diet
+  experiments closed; T and re-rolls are the levers.)
