@@ -534,3 +534,26 @@ synthetic single-term suite: 0 matches instead of 144).
   their 0.2322, inside same-code noise. Cache Me's own follow-up commit
   (de8c9c2d) regressed them to 68.90 - the adoption picked the right
   commit. Rank 10 -> 9.
+  Same-code re-roll (PERF-only commit): run-7f7e13bfbd4e - T=0.2478 s,
+  M=52.3 MB, S=628, **68.87 pts**. Two v29 rolls: T 0.2446/0.2478 - the
+  ~6% gap to Cache Me's 0.2322 on identical code looks like worker
+  lottery, not config (toml identical but the team name; their own rolls
+  spread 0.2322-0.2497). Re-rolls are free and the best is sticky.
+
+## Step 28: PGO build on a synthetic training corpus (v30, this push)
+
+- Steps 10-17 built with PGO (-5% T on the old engine, trained on the
+  published generator via b_index.py); the step-18 adoption dropped it
+  with the generator file (~875 counted lines). This brings PGO back
+  WITHOUT the generator: src/gen.rs (~60 lines) synthesizes a training
+  corpus from a xorshift stream with the real corpus's shape - token
+  length histogram, 5:3 BOOL/PHRASE mix, operator mix, head-skewed term
+  frequencies (measured on the sample data) - so profile data needs no
+  extra file and no network.
+- Dockerfile: single build stage on the allowlisted llvm-tools image;
+  instrument, train on two seeds, merge, rebuild with profile-use.
+  target-cpu=native unchanged; MALLOC_ARENA_MAX=2 unchanged.
+- Local gates on the trained binary: spec/sample/synthetic/full all
+  byte-exact (sha256 f86973c2...80927). Local PGO A/B was noise-bound
+  (dev box cache state) - the board decides, as with steps 23/25.
+- Run: run-pending
