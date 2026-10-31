@@ -244,7 +244,7 @@ int main(int argc, char **argv) {
   int fd = open((data_dir + "/records.csv").c_str(), O_RDONLY);
   struct stat st; fstat(fd, &st);
   auto data = (const char *)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  madvise((void *)data, st.st_size, MADV_SEQUENTIAL); fend = data + st.st_size;
+  madvise((void *)data, st.st_size, MADV_SEQUENTIAL); madvise((void *)data, st.st_size, MADV_HUGEPAGE); fend = data + st.st_size;
 
   // Split into 12 chunks at exact record boundaries.
   const int nth = 12;

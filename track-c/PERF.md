@@ -96,5 +96,12 @@ Every step from the reference to your final version, each with the live-board ru
 - Change: statement-count golf of the step-17 batch-16 code, same algorithm and outputs: dropped dead open-failure checks (regions + records), folded UNMATCHED/CK init, folded the quoted_end escape counter into one declaration, intern_name for-header loop, inlined the single-use setbit helper into bflush, if(zm) comma-chain in the regions SWAR parse, hash_long now hashes the raw CSV span instead of the decoded name (exact for distinct-count: CSV escaping is injective, same name => same raw bytes; verified on all four datasets).
 - Source: 304 -> 288 scc code lines (board S expected 311 -> ~295).
 - Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ ASAN/UBSAN clean ✓ TSAN clean ✓ stress 30x sample / 15x edge / 3x full hash-stable ✓ bench parity vs v31a (min 0.302 vs 0.308, hot loop unchanged).
+- Board T_s/M/S/points: T_s=0.044863 (fastest yet) M=9719808 S=295 points=75.206 - new best (was 74.671); T also improved, likely the raw-span name hashing
+- Run: run-b431420bbd7e
+
+
+## Step 23 (v39 MADV_HUGEPAGE on records.csv)
+- Change: v38 + madvise(MADV_HUGEPAGE) on the 202MB records.csv mapping. If the runner's kernel/filesystem backs the file with 2MB folios, page-fault count and dTLB pressure drop ~512x on the dominant input stream. One variable, hash-neutral.
+- Local: hashes full d8088b1cd42ba133 ✓ sample 9035fed36823232d ✓ tiny diff ✓ edge diff ✓ (sandbox cannot show the fault benefit; board is the measurement). S 289 local (~296 board).
 - Board T_s/M/S/points: pending
 - Run: pending
