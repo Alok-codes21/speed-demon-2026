@@ -325,32 +325,27 @@ unsafe fn bit_sums(b: &[u64]) -> (u64, u64) {
     let (ones8, ones16) = (_mm256_set1_epi8(1), _mm256_set1_epi16(1));
     // byte k of each 64-bit lane gets weight 8*(k%8): 0,8,16,...,56
     let w8 = _mm256_set1_epi64x(0x3830_2820_1810_0800);
-    let four = _mm256_set1_epi64x(4);
     let (mut cnt, mut wsum, mut pos) = (z, z, z);
-    let mut word = _mm256_setr_epi64x(0, 1, 2, 3);
     for q in b.chunks_exact(4) {
         let v = _mm256_loadu_si256(q.as_ptr().cast());
         let lo = _mm256_and_si256(v, low);
         let hi = _mm256_and_si256(_mm256_srli_epi16::<4>(v), low);
-        // per-byte popcount and per-byte sum of set-bit positions (0..7)
         let pcb = _mm256_add_epi8(_mm256_shuffle_epi8(pc, lo), _mm256_shuffle_epi8(pc, hi));
         let fb = _mm256_add_epi8(_mm256_shuffle_epi8(flo, lo), _mm256_shuffle_epi8(fhi, hi));
-        // in-word position sum: 8*byte_index*popcount + in-byte positions
         let s = _mm256_add_epi16(
             _mm256_maddubs_epi16(pcb, w8),
             _mm256_maddubs_epi16(fb, ones8),
         );
         pos = _mm256_add_epi32(pos, _mm256_madd_epi16(s, ones16));
-        // per-word popcount, weighted by word index for the 64*word term
-        let c = _mm256_sad_epu8(pcb, z);
-        cnt = _mm256_add_epi64(cnt, c);
-        wsum = _mm256_add_epi64(wsum, _mm256_mul_epu32(c, word));
-        word = _mm256_add_epi64(word, four);
+        cnt = _mm256_add_epi64(cnt, _mm256_sad_epu8(pcb, z));
+        wsum = _mm256_add_epi64(wsum, cnt); // running prefix: S = sum_j c_j * (N - j)
     }
-
-    let t64 = |x: __m256i| -> u64 { std::mem::transmute::<_, [u64; 4]>(x).iter().sum() };
+    let lanes = |x: __m256i| std::mem::transmute::<_, [u64; 4]>(x);
+    let (c, s, n) = (lanes(cnt), lanes(wsum), (b.len() / 4) as u64);
+    // word index = 4*j + lane, and sum_j j*c_j = N*C - S
+    let ws: u64 = (0..4).map(|l| 4 * (n * c[l] - s[l]) + l as u64 * c[l]).sum();
     let in_word: u64 = std::mem::transmute::<_, [u32; 8]>(pos).iter().map(|&x| x as u64).sum();
-    (t64(cnt), 64 * t64(wsum) + in_word)
+    (c.iter().sum(), 64 * ws + in_word)
 }
 
 fn line(out: &mut String, docs: &Docs) {
