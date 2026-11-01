@@ -45,6 +45,21 @@ T* zeroed(size_t n) {
     return static_cast<T*>(p);
 }
 
+// A table on whole 2 MB pages: aligned, advised, and touched by one thread
+// before THP is disabled for the process, so its later random reads miss the
+// TLB once per table, not once per 4 KB page. (AVENGERS step 3, MIT: worth
+// 5 ms to them on this box; Cache Me measured noise for the bitsets alone.)
+template <class T>
+T* zeroed_huge(size_t n) {
+    size_t bytes = (n * sizeof(T) + (2 << 20) - 1) & ~size_t((2 << 20) - 1);
+    char* raw = static_cast<char*>(mmap(nullptr, bytes + (2 << 20), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (raw == MAP_FAILED) { perror("mmap"); _exit(1); }
+    char* p = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(raw) + (2 << 20) - 1) & ~uintptr_t((2 << 20) - 1));
+    madvise(p, bytes, MADV_HUGEPAGE);
+    for (size_t i = 0; i < bytes; i += 2 << 20) p[i] = 0;
+    return reinterpret_cast<T*>(p);
+}
+
 // A table that every thread writes all over is populated up front: faulting
 // it in page by page from twelve threads at once made the threads queue on
 // the kernel's page-table locks (about 12% of all cycles), and each page was
@@ -209,7 +224,7 @@ public:
     void populate(int t, int n) const { populate_share(slots_, SLOTS, t, n); }
 
 private:
-    std::atomic<u64>* slots_ = zeroed<std::atomic<u64>>(SLOTS);
+    std::atomic<u64>* slots_ = zeroed_huge<std::atomic<u64>>(SLOTS);
 };
 
 // One country's running aggregates (per thread, summed at the end).
@@ -365,6 +380,10 @@ void put_money(std::string& out, i64 cents) {
 // hardcodes them), so the candidate can be gated against local fixtures.
 
 int main(int argc, char** argv) {
+    // The name table is built first so its huge pages fault in while THP is
+    // still on; then THP is disabled so nothing part-written rounds up.
+    NameTable names;
+    NamesSeen seen;
     // With transparent huge pages, a block written only in part can be backed
     // by a whole 2 MB page; plain pages keep memory to what is written.
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
@@ -397,8 +416,6 @@ int main(int argc, char** argv) {
     const int pieces = 8 * nthreads;
     std::vector<size_t> cut = split(records, start, size, pieces, "\r\n");
     std::vector<std::array<Totals, 256>> totals(nthreads);
-    NameTable names;
-    NamesSeen seen;
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
