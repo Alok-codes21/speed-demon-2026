@@ -553,7 +553,7 @@ struct Side {
   }
 };
 struct Worker {
-  static constexpr size_t PROBE = 64;
+  static constexpr size_t PROBE = 0;
   Side fwd, bwd;
   explicit Worker(const Graph &g) : fwd(*g.fwd), bwd(*g.rev) {}
   int64_t solve(u32 s, u32 t) {
