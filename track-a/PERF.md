@@ -39,3 +39,4 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-b61e165cf6e3 | e3756792 | 0.020224 | 21.28 | 575 | 82.505861 | Format-compressed source (step 17); S reads 575 as engineered |
 | run-d44bc91e0ff7 | f6ec3e55 | 0.016734 | 20.79 | 574 | 84.669038 | Dockerfile fold live (step 18); S reads 574; new best |
 | run-5b9129f3eab6 | 688668e9 | 0.018534 | 20.74 | 574 | 83.571243 | Re-run on unchanged Track A source |
+| run-12ce5cdf895b | 955885d7 | 0.016766 | 20.44 | 574 | 84.721537 | Re-run on unchanged Track A source; new best |
