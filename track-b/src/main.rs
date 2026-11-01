@@ -515,7 +515,7 @@ fn main() {
     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
-    let mut terms = Terms { slot: vec![0; (qtext.len() / 8).next_power_of_two()], n: 0 };
+    let mut terms = Terms { slot: vec![0; (qtext.len() / 16).next_power_of_two()], n: 0 }; // half the table: 1 MB fits a P-core's L2, a probe costs L2 not L3
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
