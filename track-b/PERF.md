@@ -965,3 +965,12 @@ the fault theory is dead and B is at its plateau.
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
 - Bench (1 vCPU, 4-pair ABBA interleaved mins): v109 min 411 ms vs v111 min 391 ms (-4.9%).
 - +13 lines (658 vs 645). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v109 (74.919244, run-4121048f5831) is the current banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+
+## Step 69: post-scan corpus page drop + one-term phrase pre-compare + hand-written answer numbers (Cache Me steps 75+78+80, MIT)
+
+- Each scan thread drops its share of the mapped docs.txt (MADV_DONTNEED, page-rounded) when its scan ends, so the process's exit does not tear down the whole 254 MB mapping on one thread (their board 0.1437 -> 0.1412).
+- Phrase-anchor windows compare one term other than the anchor first (the last if the anchor leads, else the first); the slice compare (libc bcmp, 6.2% of all cycles in their profile) runs only when it matches (their board -> 0.1397, 75.57 their best).
+- The 600,000 answer numbers are written by a small digit loop instead of write! (2.1% of cycles were in the formatting machinery; 42M fewer instructions).
+- Step 74 (inline phrase records) REGRESSED 0.144 -> 0.189 on the board for them; not adopted.
+- Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites. Local bench neutral (page-drop and bcmp effects need the 12-thread box).
+- +22 lines (680 vs 658). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
