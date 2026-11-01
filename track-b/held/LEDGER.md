@@ -192,3 +192,22 @@ T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
   Alok 10:40, not staged, not pushed.
 - HighVelocity C++ engine: gated byte-exact locally but 2.3x our CPU
   work - not worth a board reading. Not staged.
+
+- v52 (staged 11:45 IST, file track-b/held/v52_main.rs): two-phase find +
+  key-prefetch pipeline in the scanner. Terms::find split into probe
+  (hash, slot lookup, prefetch keys[i0]) and resolve (key compare +
+  value). The scanner keeps a 2-stage ring of LAG=8 tokens: token n's key
+  prefetch is issued ~8 tokens before its compare, so the ~150-200 cycle
+  L3/DRAM latency overlaps 8 tokens of tokenizer work. Ring2 is solved
+  BEFORE each new probe write (solve-ahead ordering; a single LAG-deep
+  ring suffices). Motivation: the board is latency-bound (~273
+  cycles/token vs ~53 on a big-L3 EPYC locally), and the keys[] compare
+  is the only unprefetched dependent miss left in the scan. Gates: full
+  corpus sha f86973c2... OK, sample cmp vs refout OK, all 6 adversarial
+  suites byte-exact vs v34test_bin. Local t8 timing ~10% SLOWER than v42
+  (expected: this box already hides the latency; the win exists only
+  board-side). S cost: +~37 lines (652 -> ~689 board est, -0.18 pts) - a
+  board T gain of ~2% covers it. Expected: if the keys miss is the
+  dominant stall, +1 to +3 pts; unvalidatable locally. Original work on
+  the MIT-attributed base; header unchanged. AWAITING Alok's go for a
+  board probe on speed-demon.
