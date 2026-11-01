@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <emmintrin.h>
@@ -812,8 +813,15 @@ int main() {
              }
            });
   std::string text;
-  for (int64_t x : answers)
-    text += std::to_string(x) + '\n';
+  text.reserve(queries.size() * 12);
+  char number[32];
+  for (int64_t x : answers) {
+    auto result = std::to_chars(number, number + sizeof number, x);
+    if (result.ec != std::errc())
+      fail("format distance");
+    text.append(number, result.ptr);
+    text.push_back('\n');
+  }
   FILE *f = fopen((out + "/distances.txt").c_str(), "wb");
   if (!f || fwrite(text.data(), 1, text.size(), f) != text.size() || fclose(f))
     fail("distances");
