@@ -446,7 +446,10 @@ fn main() {
         groups.push((start, end));
         start = end;
     }
-    let sides = [(&off[..], &adj[..], &heavy2[..]), (&roff[..], &radj[..], &rheavy[..])];
+    let sides = [
+        (&off[..], &adj[..], &heavy2[..], &heavy2_index[..]),
+        (&roff[..], &radj[..], &rheavy[..], &rheavy_index[..]),
+    ];
     let mut ans = vec![INF; ends.len()];
     let ansr = Raw::of(&mut ans);
     let next = AtomicUsize::new(0);
@@ -480,7 +483,7 @@ fn main() {
                     break;
                 }
                 let k = (queue[1].0[0].0 < queue[0].0[0].0) as usize;
-                let (go, ga, gh) = sides[k];
+                let (go, ga, gh, gi) = sides[k];
                 let (a, b) = dist.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
                 let (d, u) = queue[k].pop();
@@ -492,7 +495,7 @@ fn main() {
                 for e in lo..hi {
                     let x = unsafe { *ga.get_unchecked(e as usize) };
                     let (v, w) = (x & hmask, x >> hb);
-                    let w = if w == big { heavy_weight(gh, if k == 0 { &heavy2_index } else { &rheavy_index }, e) } else { w };
+                    let w = if w == big { heavy_weight(gh, gi, e) } else { w };
                     let nd = d + w as u64;
                     if nd < best {
                         let slot = mine[0].at(v);
