@@ -171,7 +171,7 @@ struct Text {
 // past, and eight slots share a cache line, so a probe rarely leaves it.
 class NameTable {
 public:
-    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;  // the pool holds 100,000 names
+    static constexpr u32 BITS = 18, SLOTS = 1 << BITS;  // the pool holds 100,000 names
 
     static u64 key(const char* s, u32 len) {
         static constexpr char KEEP[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
@@ -194,7 +194,7 @@ public:
     // hashes to: one 32-byte compare finds the key, or the first free slot,
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
-        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
+        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) & (SLOTS - 1)) {
             __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(&slots_[i]));
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
             if (__builtin_expect(hit != 0, 1)) return i + __builtin_ctz(hit);
@@ -425,8 +425,12 @@ int main(int argc, char** argv) {
                 }
             });
             parse.run([&](int k) {
+                uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
+                madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
+                uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
+                if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
         });
     for (auto& th : pool) th.join();

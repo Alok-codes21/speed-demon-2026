@@ -1127,3 +1127,13 @@ Every step from the reference to your final version, each with the live-board ru
   4. Preserved rock-solid C++20 atomic Phase barrier (done.wait / done.notify_all)
      guaranteeing 100% hash correctness across all worker threads.
 - Target: T ~0.023s, M ~8.9MB, S=403 -> ~81.5 - 82.5 pts (+2.1 - +3.1 pts).
+
+## Step 110 - v170: NickTrapp architecture: BITS=18, bitwise wrap, hit-first probe
+- Matching leader NickTrapp's memory and hashing configuration:
+  1. BITS = 18 (262,144 slots): drops load factor to 38%, eliminating linear probing
+     chains and reducing lookup to a single AVX2 vector hit.
+  2. Bitwise slot wrapping: (i + 4) & (SLOTS - 1) replaces integer division/modulo.
+  3. Fast-path hit check in NameTable::id before free mask evaluation.
+  4. Parallel piece MADV_POPULATE_READ and MADV_DONTNEED preserved across 12 threads.
+  5. Coalesced 32-byte vector load in parse_records.
+- Target: T <= 0.020s, M ~12.75MB, S=403 -> ~83.0 - 83.8 pts.
