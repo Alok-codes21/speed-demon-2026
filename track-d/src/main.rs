@@ -188,8 +188,27 @@ impl Filed {
         })
     }
 }
-fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
-    heavy[heavy.partition_point(|h| h.0 < e)].1
+const HEAVY_BLOCK_BITS: usize = 8;
+fn heavy_index(heavy: &[(u32, u32)], m: usize) -> Vec<u32> {
+    let blocks = m.div_ceil(1 << HEAVY_BLOCK_BITS);
+    let mut index = vec![0u32; blocks + 1];
+    let mut j = 0usize;
+    for (b, slot) in index.iter_mut().take(blocks).enumerate() {
+        *slot = j as u32;
+        let end = ((b + 1) << HEAVY_BLOCK_BITS) as u32;
+        while j < heavy.len() && heavy[j].0 < end {
+            j += 1;
+        }
+    }
+    index[blocks] = j as u32;
+    index
+}
+#[inline(always)]
+fn heavy_weight(heavy: &[(u32, u32)], index: &[u32], e: u32) -> u32 {
+    let b = (e as usize) >> HEAVY_BLOCK_BITS;
+    let lo = index[b] as usize;
+    let hi = index[b + 1] as usize;
+    heavy[lo..hi].partition_point(|h| h.0 < e).checked_add(lo).map_or(0, |i| heavy[i].1)
 }
 fn main() {
     unsafe {
@@ -379,6 +398,7 @@ fn main() {
     })
     .concat();
     heavy2.sort_unstable();
+    let heavy2_index = heavy_index(&heavy2, m);
     let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
     std::thread::spawn(move || drop((heavy, first_v, link_v, id_v)));
     let adj = &adj;
@@ -410,6 +430,7 @@ fn main() {
     })
     .concat();
     rheavy.sort_unstable();
+    let rheavy_index = heavy_index(&rheavy, m);
     roff.copy_within(0..n, 1);
     roff[0] = 0;
     let mut order: Vec<usize> = (0..ends.len()).collect();
@@ -471,7 +492,7 @@ fn main() {
                 for e in lo..hi {
                     let x = unsafe { *ga.get_unchecked(e as usize) };
                     let (v, w) = (x & hmask, x >> hb);
-                    let w = if w == big { heavy_weight(gh, e) } else { w };
+                    let w = if w == big { heavy_weight(gh, if k == 0 { &heavy2_index } else { &rheavy_index }, e) } else { w };
                     let nd = d + w as u64;
                     if nd < best {
                         let slot = mine[0].at(v);
