@@ -23,7 +23,7 @@
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Barrier, Mutex, Once, OnceLock};
 
 extern "C" {
@@ -365,10 +365,10 @@ fn main() {
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
     // from the last one's unclaimed frontier, so consecutive ids are close on
     // the map.
-    let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
+    let claimed: Vec<AtomicU64> = (0..n.div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
     let claim = |v: u32| {
-        let c = &claimed[v as usize];
-        c.load(Relaxed) == 0 && c.compare_exchange(0, 1, Relaxed, Relaxed).is_ok()
+        let (i, bit) = (v as usize / 64, 1u64 << (v % 64));
+        claimed[i].fetch_or(bit, Relaxed) & bit == 0
     };
     let (first_v, link_v) = (first, link);
     let (first, link) = (&first_v[..], &link_v[..]);
@@ -413,7 +413,7 @@ fn main() {
                 let u = ord[i] as usize;
                 for e in first[u]..first[u + 1] {
                     let v = link[e as usize] & hmask;
-                    if claimed[v as usize].load(Relaxed) == 0 {
+                    if claimed[v as usize / 64].load(Relaxed) & (1u64 << (v % 64)) == 0 {
                         seeds.push(v);
                     }
                 }
