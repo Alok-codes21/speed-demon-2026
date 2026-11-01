@@ -395,9 +395,9 @@ int main(int argc, char** argv) {
     // records.csv: skip the BOM and header, then split after CRLFs into eight
     // pieces per thread, claimed in turn, so a thread whose pieces are slow
     // (more first sightings of names) is evened out by the others.
+    size_t start = size ? static_cast<const char*>(memchr(records, '\n', size)) - records + 1 : 0;
     const int pieces = 8 * nthreads;
-    size_t start = 0;
-    std::vector<size_t> cut;
+    std::vector<size_t> cut = split(records, start, size, pieces, "\r\n");
     std::vector<std::array<Totals, 256>> totals(nthreads);
     NameTable names;
     NamesSeen seen;
@@ -405,16 +405,9 @@ int main(int argc, char** argv) {
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
     Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
-    // Step 105: a spawner thread creates the pool while main finishes the
-    // setup below (records.csv split), so the serial pthread_create cost
-    // overlaps it instead of delaying the last workers. Workers hold on go
-    // until the setup they read is done.
-    std::atomic<bool> go{false};
     std::vector<std::thread> pool;
-    std::thread spawner([&] {
-        for (int t = 0; t < nthreads; ++t)
-            pool.emplace_back([&, t] {
-                go.wait(false, std::memory_order_acquire);
+    for (int t = 0; t < nthreads; ++t)
+        pool.emplace_back([&, t] {
             flag.run([&](int k) {
                 populate_share(country_of, nregions, k, nthreads);
                 names.populate(k, nthreads);
@@ -442,12 +435,6 @@ int main(int argc, char** argv) {
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
         });
-    });
-    start = size ? static_cast<const char*>(memchr(records, '\n', size)) - records + 1 : 0;
-    cut = split(records, start, size, pieces, "\r\n");
-    go.store(true, std::memory_order_release);
-    go.notify_all();
-    spawner.join();
     for (auto& th : pool) th.join();
 
     std::string out;
