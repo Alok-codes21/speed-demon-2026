@@ -838,9 +838,9 @@ struct Side {
 };
 
 // Exact forward probe, then bidirectional Dijkstra balancing settled vertices;
-// stops once f + b >= best.
+// stops once f + b >= best. The probe limit is configurable with SD_PROBE.
+static size_t PROBE = 128;
 struct Worker {
-  static constexpr size_t PROBE = 256;
   Side fwd, bwd;
   explicit Worker(const Graph &g) : fwd(*g.fwd), bwd(*g.rev) {}
   int64_t solve(u32 s, u32 t) {
@@ -881,6 +881,10 @@ int main() {
   const char *env_out = getenv("SD_OUT");
   std::string data = env_data ? env_data : "/data",
               out = env_out ? env_out : "/out";
+  // A smaller probe can reduce wasted one-sided work on long queries.
+  // Set SD_PROBE=0 to skip it, or try 64, 128, 256 and 512 when benchmarking.
+  if (const char *p = getenv("SD_PROBE"))
+    PROBE = std::min<size_t>(1000000, std::strtoull(p, nullptr, 10));
   unsigned threads =
       std::min(12u, std::max(1u, std::thread::hardware_concurrency()));
   if (getenv("SD_THREADS"))
