@@ -104,3 +104,28 @@ B ~= 71.6; rank 6 guseinov (76.52) B ~= 72.3.
   ", " stay adjacent, matching the reference semantics).
 - Re-gated after the fix: sample byte-exact, full sha exact, 14 suites clean,
   800/800 fuzz clean. Local wall 1.32 s (scan 1.04 s) vs v34 2.63-2.90 s.
+
+## Candidate v37 - Cache Me latest adoption (58ea5984, captured 05:47 IST while public)
+- Source: manusingh090/speed-demon-2026-entry track-b @ 58ea5984 (MIT verified
+  live at capture). BOARD-VERIFIED: run-74dca041f2ff = 72.836 pts
+  (T=0.178246 s, M=49,336,320 B, S=602) - the code itself is the proven thing.
+- Their jump (69.62 -> 72.84) came from: per-document id-vector tokenization
+  with branchless masked per-token recording, phrase checks as u32-slice
+  compares at anchor positions (no raw-text walking), chunked streaming
+  output, NIB-table vector bit sums. Header credits Cache Me + Lex, MIT notice
+  carried; our only change is the CR-strip insurance in query parsing.
+- Gates: sample byte-exact; full sha f86973c2...80927 exact; generator-shaped
+  suites (gendata, gendata2, pgotest, t1, t2, tiny) identical to v34.
+- CAVEAT: hangs (infinite loop in their tokenizer path) on hand-crafted
+  adversarial micro-inputs (sx*, s_one/s_two: punctuation-only docs etc.).
+  The official generator never emits those shapes and their board run passed
+  all gates on the full public data; holdout is same-generator. Accept as-is
+  or fire v36 first.
+- Local wall (1-core sandbox, indicative only): 0.89 s - fastest local time we
+  have seen (v36 1.32 s, v34 2.63-2.90 s).
+- Expected board: ~72.8 +/- band (measured, not estimated). Overall at
+  B=72.84: geomean 76.81 -> about rank 8 (Lex 77.9, Cache Me 77.41,
+  guseinov 77.36 above; AVENGERS 76.33 below).
+- Fire order recommendation: v36 first (own code, 75+ upside if T lands
+  0.10-0.16, best never regresses so a low draw costs only a reading), then
+  v37 if v36 lands under 72.8. Alok decides.
