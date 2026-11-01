@@ -24,7 +24,7 @@ use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
-use std::sync::Mutex;
+use std::sync::{Barrier, Mutex, Once, OnceLock};
 
 extern "C" {
     fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
@@ -109,13 +109,34 @@ fn cuts(text: &[u8], from: usize, k: usize) -> Vec<usize> {
     c
 }
 
-/// Runs f(t) on nt threads and collects what each returns.
+type Job = &'static (dyn Fn(usize) + Sync);
+static POOL: OnceLock<(Mutex<Option<Job>>, Barrier)> = OnceLock::new();
+static STARTED: Once = Once::new();
+
+/// Runs f(t) on nt threads and collects what each returns. Worker threads
+/// are started once and reused across all parallel phases.
 fn on_threads<R: Send>(nt: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let f = &f;
-    std::thread::scope(|s| {
-        let hs: Vec<_> = (0..nt).map(|t| s.spawn(move || f(t))).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    })
+    let (job, gate) = POOL.get_or_init(|| (Mutex::new(None), Barrier::new(nt)));
+    STARTED.call_once(|| {
+        for t in 1..nt {
+            std::thread::spawn(move || loop {
+                let (job, gate) = POOL.get().unwrap();
+                gate.wait();
+                let f = job.lock().unwrap().unwrap();
+                f(t);
+                gate.wait();
+            });
+        }
+    });
+    let out: Vec<Mutex<Option<R>>> = (0..nt).map(|_| Mutex::new(None)).collect();
+    let run = |t: usize| *out[t].lock().unwrap() = Some(f(t));
+    let run: &(dyn Fn(usize) + Sync) = &run;
+    // The second barrier wait ensures the borrowed job remains alive.
+    *job.lock().unwrap() = Some(unsafe { std::mem::transmute::<_, Job>(run) });
+    gate.wait();
+    run(0);
+    gate.wait();
+    out.into_iter().map(|r| r.into_inner().unwrap().unwrap()).collect()
 }
 
 /// Thread t's share of 0..n.
