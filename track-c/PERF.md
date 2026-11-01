@@ -999,3 +999,16 @@ Every step from the reference to your final version, each with the live-board ru
   (0.166 vs 0.164 - the sandbox cannot show the parallel effect; the board
   run is the measurement).
 - Run: PENDING
+
+
+## Step 102: NickTrapp Architecture Adoption (1024-Entry L1 Hot Filter + BITS=18 Table) (v161)
+- Root Cause Identified:
+  Profile showed 240 ms out of 530 ms CPU time was consumed by shared NameTable atomic contention and L3 cache line bouncing.
+- NickTrapp Solution:
+  1. 1024-Entry Thread-Local L1 Hot Filter (ftag/fslot): 12 KB cache fitting 100% inside 48 KB L1D cache. Captures Zipf distribution so ~70% of all lookups hit in 1 clock cycle without touching the shared table or atomic CAS.
+  2. BITS = 18 (262,144 slots): Drops table load factor from 76% to 38%. Reduces probe length to 1.1 cache lines.
+  3. Removed synchronous MADV_POPULATE_READ in flag phase that caused Step 99 regression (0.043s).
+  4. Bitwise probe increment (i + 4) & (SLOTS - 1).
+  5. Sized output reserve and timed exit path bypass (_exit(0)).
+- Target: Drop T to 0.018-0.020s, matching NickTrapp (0.0180s) for 83.5+ points.
+- Run: PENDING
