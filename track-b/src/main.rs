@@ -107,13 +107,58 @@ struct Terms {
 
 impl Terms {
     fn find(&self, h: u64) -> u32 {
-        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
-        loop {
-            let s = unsafe { *self.slot.get_unchecked(i) };
-            if s == 0 || s >> ID_BITS == h >> ID_BITS {
-                return ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32);
+        let mask = self.slot.len() - 1;
+        let tag = h >> ID_BITS;
+        let tagv = unsafe { _mm256_set1_epi64x(tag as i64) };
+        let zero = unsafe { _mm256_setzero_si256() };
+        let mut i = h as usize & mask;
+
+        unsafe {
+            // Preserve the common one-probe case without SIMD overhead.
+            let first = *self.slot.get_unchecked(i);
+            if first == 0 || first >> ID_BITS == tag {
+                return ((first & ID_MASK) as u32)
+                    .wrapping_sub(1)
+                    .min(self.n as u32);
             }
+
             i = (i + 1) & mask;
+
+            loop {
+                // Check four consecutive probe slots, preserving probe order.
+                if i + 4 <= self.slot.len() {
+                    let ptr = self.slot.as_ptr().add(i);
+                    let slots = _mm256_loadu_si256(ptr.cast());
+
+                    let tags = _mm256_srli_epi64::<{ ID_BITS as i32 }>(slots);
+                    let matches = _mm256_cmpeq_epi64(tags, tagv);
+                    let empty = _mm256_cmpeq_epi64(slots, zero);
+                    let events = _mm256_or_si256(matches, empty);
+
+                    let lanes =
+                        _mm256_movemask_pd(_mm256_castsi256_pd(events)) as u32;
+
+                    if lanes != 0 {
+                        let lane = lanes.trailing_zeros() as usize;
+                        let s = *ptr.add(lane);
+
+                        return ((s & ID_MASK) as u32)
+                            .wrapping_sub(1)
+                            .min(self.n as u32);
+                    }
+
+                    i = (i + 4) & mask;
+                } else {
+                    // Handle the end of the table before wrapping to slot zero.
+                    let s = *self.slot.get_unchecked(i);
+                    if s == 0 || s >> ID_BITS == tag {
+                        return ((s & ID_MASK) as u32)
+                            .wrapping_sub(1)
+                            .min(self.n as u32);
+                    }
+                    i = (i + 1) & mask;
+                }
+            }
         }
     }
 
