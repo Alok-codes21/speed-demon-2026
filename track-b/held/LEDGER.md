@@ -211,3 +211,18 @@ T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
   dominant stall, +1 to +3 pts; unvalidatable locally. Original work on
   the MIT-attributed base; header unchanged. AWAITING Alok's go for a
   board probe on speed-demon.
+
+- v53 (staged 11:46 IST, file track-b/held/v53_main.rs): P-core pinning
+  for hybrid Intel. Detects core types at runtime (per-cpu CPUID.1A via
+  temporary affinity; 0x40 = P, 0x20 = E), pins each scan thread to its
+  own P-core cpu, and is a full no-op on non-hybrid boxes or when
+  affinity is denied (EPERM) - output and gates unaffected. Gates: full
+  sha OK, sample OK, 6 suites byte-exact vs v34test_bin. Inert on the
+  local AMD box (no hybrid detected). Motivation: the board i5-13500 is
+  6 P + 8 E; if scan threads land on E-cores (~2x slower, higher
+  latency) that explains the 0.187 slow rolls. Guess: +5-10% T if the
+  scheduler was the problem, zero if threads already land on P-cores.
+  S cost ~+45 lines (652 -> ~700 board est, -0.25 pts). Residual risk:
+  if the sandbox answers sched_setaffinity with SIGSYS instead of EPERM
+  the probe run fails - best stays sticky, one reading lost. AWAITING
+  Alok's go (queued behind v52's probe).
