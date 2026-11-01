@@ -484,9 +484,13 @@ fn main() {
                 for &j in group { unsafe { *ansr.at(j) = 0 }; }
                 continue;
             }
-            if roff[t as usize + 1] == roff[t as usize] {
-                for &j in group { unsafe { *ansr.at(j) = INF }; }
-                continue; // no in-edge: unreachable
+            if off[s as usize + 1] == off[s as usize]
+                || roff[t as usize + 1] == roff[t as usize]
+            {
+                for &j in group {
+                    unsafe { *ansr.at(j) = INF };
+                }
+                continue; // no outgoing source edge or no incoming target edge
             }
             let mut best = INF;
             *dist[0].at(s) = 0;
