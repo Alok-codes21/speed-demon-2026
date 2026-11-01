@@ -894,3 +894,11 @@ the fault theory is dead and B is at its plateau.
 
 - v90 runs: run-9bd9b932424c T 0.165647, M 45,768,704 B, pts 74.095673 (banked best, #9 on B); run-91f25be45625 T 0.166093, M 45,867,008 B, pts 74.057161. Both T draws beat v62's best (0.168961) - the step-57 engine is genuinely faster.
 - This PERF-only commit re-rolls the M lottery; code unchanged from step 56.
+
+## Step 58: v92 - ChatGPT-written AVX2 grouped probe in Terms::find (ONE variable)
+
+- ChatGPT loop round 2 (minimal-diff demand). Only Terms::find changed vs v90 (diff-verified, 55 lines, one hunk): scalar first-slot fast path, then 4-slot AVX2 probe groups on collision, same termination rule.
+- Local build protocol fix: board Dockerfile builds with RUSTFLAGS="-C target-cpu=native"; off-flag local builds fake a 5x regression on VEX-256 code (AVX/SSE transition stalls). All benches now native-flagged.
+- Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites. Local native-flag bench (full dataset): v92 median 0.470 s vs v90 0.521 s (~10% faster).
+- v91 (ChatGPT full rewrite) staged on speed-demon-held (track-b/held/v91_main.rs): byte-exact but a true regression (threading infra rewrite; 2.5s locally even accounting for flags context). Held, not live.
+- Revert rule: if board T regresses >3% vs v90 (0.165647/0.166093) on two runs, restore step-56 file.
