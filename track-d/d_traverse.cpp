@@ -913,8 +913,14 @@ int main() {
     groups.push_back({begin, end});
     begin = end;
   }
+  // Search workers each own forward/reverse distance pages and queues.
+  // Cap query concurrency independently from graph-build threads to reduce
+  // per-query memory while keeping graph construction fully parallel.
+  unsigned query_threads = std::min(8u, threads);
+  if (const char *p = getenv("SD_QUERY_THREADS"))
+    query_threads = std::max(1u, std::min(64u, unsigned(std::strtoul(p, nullptr, 10))));
   std::atomic<size_t> next{0};
-  parallel(std::min<size_t>(threads, std::max<size_t>(1, groups.size())),
+  parallel(std::min<size_t>(query_threads, std::max<size_t>(1, groups.size())),
            [&](unsigned) {
              Worker worker(g);
              for (size_t task;
