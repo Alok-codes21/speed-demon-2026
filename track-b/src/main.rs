@@ -396,6 +396,18 @@ fn push_u64(out: &mut String, mut v: u64) {
     out.push_str(unsafe { std::str::from_utf8_unchecked(&buf[i..]) });
 }
 
+/// One result line: count, sum, then up to ten document ids.
+fn emit(out: &mut String, count: u64, sum: u64, first: &[u32]) {
+    push_u64(out, count);
+    out.push(' ');
+    push_u64(out, sum);
+    for d in first {
+        out.push(' ');
+        push_u64(out, *d as u64);
+    }
+    out.push('\n');
+}
+
 /// "count sum id1 ... id10" for a set of documents.
 fn line(out: &mut String, docs: &Docs) {
     let (mut count, mut sum, mut first, mut nfirst) = (0u64, 0u64, [0u32; 10], 0usize);
@@ -420,14 +432,7 @@ fn line(out: &mut String, docs: &Docs) {
             }
         }
     }
-    push_u64(out, count);
-    out.push(' ');
-    push_u64(out, sum);
-    for d in &first[..nfirst] {
-        out.push(' ');
-        push_u64(out, *d as u64);
-    }
-    out.push('\n');
+    emit(out, count, sum, &first[..nfirst]);
 }
 
 /// Calls f(doc, ids) with the token ids of each line in text, the first
@@ -758,14 +763,7 @@ fn main() {
                         nfirst += 1;
                     }
                 }
-                push_u64(&mut out, (end - at) as u64);
-                out.push(' ');
-                push_u64(&mut out, sum);
-                for d in &first[..nfirst] {
-                    out.push(' ');
-                    push_u64(&mut out, *d as u64);
-                }
-                out.push('\n');
+                emit(&mut out, (end - at) as u64, sum, &first[..nfirst]);
                 continue;
             }
             let (cur, steps) = (docs(tids[0]), ops.iter().zip(&tids[1..]));
