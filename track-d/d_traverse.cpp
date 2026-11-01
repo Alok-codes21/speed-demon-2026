@@ -917,7 +917,9 @@ int main() {
   // Search workers each own forward/reverse distance pages and queues.
   // Cap query concurrency independently from graph-build threads to reduce
   // per-query memory while keeping graph construction fully parallel.
-  unsigned query_threads = std::min(3u, threads);
+  // The board provides 12 hardware threads; use them for independent query tasks.
+  // SD_QUERY_THREADS remains available for measured tuning on the live board.
+  unsigned query_threads = std::min(12u, threads);
   if (const char *p = getenv("SD_QUERY_THREADS"))
     query_threads = std::max(1u, std::min(64u, unsigned(std::strtoul(p, nullptr, 10))));
   std::atomic<size_t> next{0};
