@@ -171,7 +171,7 @@ struct Text {
 // past, and eight slots share a cache line, so a probe rarely leaves it.
 class NameTable {
 public:
-    static constexpr u32 BITS = 18, SLOTS = 1 << BITS;  // the pool holds 100,000 names
+    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;  // the pool holds 100,000 names
 
     static u64 key(const char* s, u32 len) {
         static constexpr char KEEP[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
