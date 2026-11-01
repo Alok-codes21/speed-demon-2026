@@ -364,11 +364,21 @@ struct Phase {
 };
 
 // Cuts of [from, size) into n ranges, each starting just after a delimiter.
-template <size_t N> std::vector<size_t> split(const char* data, size_t from, size_t size, int n, const char (&delim)[N]) {
+// With guided set (n a multiple of 4), the first half of the ranges are 1.5
+// times the average size, the next quarter 0.75 and the last quarter 0.25:
+// threads claiming them in turn then finish close together.
+template <size_t N>
+std::vector<size_t> split(const char* data, size_t from, size_t size, int n, const char (&delim)[N], bool guided = false) {
     std::vector<size_t> cut(n + 1, size);
     cut[0] = from;
+    auto at = [&](int t) {  // the share of the work before range t, in units of 1/(8n)
+        if (!guided) return u64(8 * t);
+        if (t <= n / 2) return u64(12 * t);
+        if (t <= 3 * n / 4) return u64(6 * n + 6 * (t - n / 2));
+        return u64(6 * n + 6 * (n / 4) + 2 * (t - 3 * n / 4));
+    };
     for (int t = 1; t < n; ++t) {
-        size_t c = std::max(cut[t - 1], from + (size - from) * t / n);
+        size_t c = std::max(cut[t - 1], from + size_t((size - from) * at(t) / (8 * u64(n))));
         auto* hit = static_cast<const char*>(memmem(data + c, size - c, delim, N - 1));
         cut[t] = hit ? hit - data + N - 1 : size;
     }
@@ -419,7 +429,7 @@ int main(int argc, char** argv) {
     // (more first sightings of names) is evened out by the others.
     size_t start = size ? static_cast<const char*>(memchr(records, '\n', size)) - records + 1 : 0;
     const int pieces = 8 * nthreads;
-    std::vector<size_t> cut = split(records, start, size, pieces, "\r\n");
+    std::vector<size_t> cut = split(records, start, size, pieces, "\r\n", true);
     std::vector<std::array<Totals, 256>> totals(nthreads);
     NameTable names;
     NamesSeen seen;
