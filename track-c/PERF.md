@@ -910,3 +910,22 @@ Every step from the reference to your final version, each with the live-board ru
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
 - Run: PENDING
+
+## Step 96 - v158: teardown skip (1BRC winners' exit trick)
+- Alok's 1BRC-techniques audit found C already has: SWAR delimiter scan,
+  branchless SWAR int/money parse, direct region array (better than a perfect
+  hash), tight 8-byte open-addressing keys, work-stealing 2 MB granules, a
+  16-record software pipeline (deeper than ILP 2-4), MADV_HUGEPAGE + 2 KB
+  prefetch on data. Cache Me's public head converged on the same per-field
+  word-op design (their step-1 full structural scan was replaced).
+- clang: SKIPPED, borderline-rule - only pinned allowlisted base images pass
+  the Dockerfile check (gcc:16, debian:13-slim) and RUN apt-get would need
+  build-time network. PGO: skipped, Cache Me measured it within noise.
+  perf stat: unavailable in this sandbox.
+- Change (one variable vs v157): flush the output buffer explicitly, then
+  _exit(0) - straight to exit_group, skipping stdio cleanup, atexit handlers
+  and static destructors on the timed path (threads already joined).
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
+- Run: PENDING
