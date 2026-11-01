@@ -237,7 +237,7 @@ public:
     std::sort(heavy_.begin(), heavy_.end());
   }
   u32 weight(const Entry &e) const {
-    if (__builtin_expect(e.w != 0xFFFF, 1))
+    if (e.w != 0xFFFF)
       return e.w;
     return std::lower_bound(heavy_.begin(), heavy_.end(),
                             std::make_pair(&e, 0u))
@@ -276,7 +276,7 @@ struct Rows {
   }
   u32 head(u32 e) const { return e >> wbits; }
   u64 weight(u32 e, size_t i) const {
-    if (__builtin_expect((e & mask) != mask, 1))
+    if ((e & mask) != mask)
       return e & mask;
     return std::lower_bound(escapes.begin(), escapes.end(),
                             std::make_pair(u32(i), u64(0)))
@@ -713,10 +713,9 @@ struct Queue {
     cur = near = 0;
   }
   void push(u64 d, u32 v, bool take = true) {
-    if (!take)
-      return;
-    if (__builtin_expect((d >> shift) - cur >= B, 0)) {
-      far.push({d, v});
+    if ((d >> shift) - cur >= B) {
+      if (take)
+        far.push({d, v});
       return;
     }
     unsigned b = (d >> shift) & (B - 1);
@@ -816,15 +815,14 @@ struct Side {
       }
       u32 u = bk.data[k] & mask;
       u64 d = base | bk.data[k] >> queue.node_bits;
-      if (__builtin_expect(dist.get(u) != d, 0))
+      if (dist.get(u) != d)
         continue;
       ++count;
       g.each(u, [&](u32 e, size_t i) {
         u32 v = g.head(e);
-        u64 nd = d + g.weight(e, i), old = dist.get(v);
+        u64 nd = d + g.weight(e, i), *x = dist.slot(v), old = *x;
         bool take = nd < old;
-        if (take)
-          *dist.slot(v) = nd;
+        *x = take ? nd : old;
         queue.push(nd, v, take);
         best = std::min(best, nd + other.dist.get(v));
       });
@@ -838,9 +836,9 @@ struct Side {
 };
 
 // Exact forward probe, then bidirectional Dijkstra balancing settled vertices;
-// stops once f + b >= best. The probe limit is configurable with SD_PROBE.
-static size_t PROBE = 256;
+// stops once f + b >= best.
 struct Worker {
+  static constexpr size_t PROBE = 256;
   Side fwd, bwd;
   explicit Worker(const Graph &g) : fwd(*g.fwd), bwd(*g.rev) {}
   int64_t solve(u32 s, u32 t) {
@@ -849,20 +847,19 @@ struct Worker {
     if (fwd.g.slot[size_t(s) * 4] == Rows::EMPTY ||
         bwd.g.slot[size_t(t) * 4] == Rows::EMPTY)
       return -1;
-    // Start both sides before probing: drain() consults reverse labels, so
-    // they must not contain distances left by the previous query.
+    bwd.dist.reset();
     fwd.start(s);
-    bwd.start(t);
     u64 best = INF;
     size_t fs = 0, bs = 0;
     while (fs < PROBE) {
       u64 f = fwd.queue.lower_bound(), known = fwd.dist.get(t);
-      if (known != INF && known <= f)
+      if (known < f)
         return int64_t(known);
       if (f == INF)
         return -1;
       fs += fwd.drain(bwd, best);
     }
+    bwd.start(t);
     best = std::min(best, fwd.dist.get(t));
     for (;;) {
       u64 f = fwd.queue.lower_bound(), b = bwd.queue.lower_bound();
@@ -882,10 +879,6 @@ int main() {
   const char *env_out = getenv("SD_OUT");
   std::string data = env_data ? env_data : "/data",
               out = env_out ? env_out : "/out";
-  // A smaller probe can reduce wasted one-sided work on long queries.
-  // Set SD_PROBE=0 to skip it, or try 64, 128, 256 and 512 when benchmarking.
-  if (const char *p = getenv("SD_PROBE"))
-    PROBE = std::min<size_t>(1000000, std::strtoull(p, nullptr, 10));
   unsigned threads =
       std::min(12u, std::max(1u, std::thread::hardware_concurrency()));
   if (getenv("SD_THREADS"))
@@ -896,45 +889,16 @@ int main() {
   std::vector<int64_t> answers(queries.size(), -1);
   std::vector<u32> order(queries.size());
   std::iota(order.begin(), order.end(), 0);
-  // Sort by both endpoints so identical shortest-path queries are adjacent.
-  std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
-    if (queries[a].from != queries[b].from)
-      return queries[a].from < queries[b].from;
-    return queries[a].to < queries[b].to;
-  });
-  // Compact duplicate queries into independent tasks. Workers claim only
-  // unique (source, target) groups, then scatter one answer to original slots.
-  std::vector<std::pair<size_t, size_t>> groups;
-  for (size_t begin = 0; begin < order.size();) {
-    size_t end = begin + 1;
-    const Query &q = queries[order[begin]];
-    while (end < order.size() && queries[order[end]].from == q.from &&
-           queries[order[end]].to == q.to)
-      ++end;
-    groups.push_back({begin, end});
-    begin = end;
-  }
-  // Search workers each own forward/reverse distance pages and queues.
-  // Cap query concurrency independently from graph-build threads to reduce
-  // per-query memory while keeping graph construction fully parallel.
-  // The board provides 12 hardware threads; use them for independent query tasks.
-  // SD_QUERY_THREADS remains available for measured tuning on the live board.
-  unsigned query_threads = std::min(12u, threads);
-  if (const char *p = getenv("SD_QUERY_THREADS"))
-    query_threads = std::max(1u, std::min(64u, unsigned(std::strtoul(p, nullptr, 10))));
+  std::sort(order.begin(), order.end(),
+            [&](u32 a, u32 b) { return queries[a].from < queries[b].from; });
   std::atomic<size_t> next{0};
-  parallel(std::min<size_t>(query_threads, std::max<size_t>(1, groups.size())),
+  parallel(std::min<size_t>(threads, std::max<size_t>(1, queries.size())),
            [&](unsigned) {
              Worker worker(g);
-             for (size_t task;
-                  (task = next.fetch_add(1, std::memory_order_relaxed)) <
-                  groups.size();) {
-               const auto [begin, end] = groups[task];
-               const Query &q = queries[order[begin]];
-               const int64_t answer = worker.solve(q.from, q.to);
-               for (size_t j = begin; j < end; ++j)
-                 answers[order[j]] = answer;
-             }
+             for (size_t k; (k = next.fetch_add(1, std::memory_order_relaxed)) <
+                            queries.size();)
+               answers[order[k]] =
+                   worker.solve(queries[order[k]].from, queries[order[k]].to);
            });
   std::string text;
   for (int64_t x : answers)
