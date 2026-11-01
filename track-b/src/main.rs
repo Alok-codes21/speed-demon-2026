@@ -100,84 +100,61 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
+// Slots are probed four at a time from the start of the aligned group of four
+// the hash points into: a 32-byte compare finds the term or the first free
+// slot, which is where it would have been inserted.
 struct Terms {
     slot: Vec<u64>,
+    base: usize,
+    len: usize,
     n: usize,
 }
 
 impl Terms {
     fn find(&self, h: u64) -> u32 {
-        let mask = self.slot.len() - 1;
-        let tag = h >> ID_BITS;
-        let tagv = unsafe { _mm256_set1_epi64x(tag as i64) };
-        let zero = unsafe { _mm256_setzero_si256() };
-        let mut i = h as usize & mask;
-
+        let (mask, mut i) = (self.len - 1, h as usize & (self.len - 4));
         unsafe {
-            // Preserve the common one-probe case without SIMD overhead.
-            let first = *self.slot.get_unchecked(i);
-            if first == 0 || first >> ID_BITS == tag {
-                return ((first & ID_MASK) as u32)
-                    .wrapping_sub(1)
-                    .min(self.n as u32);
-            }
-
-            i = (i + 1) & mask;
-
+            let p = self.base as *const u64;
+            let (tag, keep) = (
+                _mm256_set1_epi64x((h & !ID_MASK) as i64),
+                _mm256_set1_epi64x(!ID_MASK as i64),
+            );
             loop {
-                // Check four consecutive probe slots, preserving probe order.
-                if i + 4 <= self.slot.len() {
-                    let ptr = self.slot.as_ptr().add(i);
-                    let slots = _mm256_loadu_si256(ptr.cast());
-
-                    let tags = _mm256_srli_epi64::<{ ID_BITS as i32 }>(slots);
-                    let matches = _mm256_cmpeq_epi64(tags, tagv);
-                    let empty = _mm256_cmpeq_epi64(slots, zero);
-                    let events = _mm256_or_si256(matches, empty);
-
-                    let lanes =
-                        _mm256_movemask_pd(_mm256_castsi256_pd(events)) as u32;
-
-                    if lanes != 0 {
-                        let lane = lanes.trailing_zeros() as usize;
-                        let s = *ptr.add(lane);
-
-                        return ((s & ID_MASK) as u32)
-                            .wrapping_sub(1)
-                            .min(self.n as u32);
-                    }
-
-                    i = (i + 4) & mask;
-                } else {
-                    // Handle the end of the table before wrapping to slot zero.
-                    let s = *self.slot.get_unchecked(i);
-                    if s == 0 || s >> ID_BITS == tag {
-                        return ((s & ID_MASK) as u32)
-                            .wrapping_sub(1)
-                            .min(self.n as u32);
-                    }
-                    i = (i + 1) & mask;
+                let v = _mm256_load_si256(p.add(i).cast());
+                let hit = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag);
+                let found = _mm256_or_si256(hit, _mm256_cmpeq_epi64(v, _mm256_setzero_si256()));
+                let m = _mm256_movemask_pd(_mm256_castsi256_pd(found)) as usize;
+                if m != 0 {
+                    let s = *p.add(i + m.trailing_zeros() as usize);
+                    return ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32);
                 }
+                i = (i + 4) & mask;
             }
         }
     }
 
     fn renumber(&mut self, new: &[u32]) {
-        for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+        for i in 0..self.len {
+            let s = unsafe { &mut *(self.base as *mut u64).add(i) };
+            if *s != 0 {
+                *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+            }
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
         let h = unsafe { hash(term.as_ptr(), term.len()) };
-        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
-        while self.slot[i] != 0 {
-            if self.slot[i] >> ID_BITS == h >> ID_BITS {
-                return (self.slot[i] & ID_MASK) as u32 - 1;
+        let (mask, mut i) = (self.len - 1, h as usize & (self.len - 4));
+        let p = self.base as *mut u64;
+        unsafe {
+            while *p.add(i) != 0 {
+                if *p.add(i) >> ID_BITS == h >> ID_BITS {
+                    return (*p.add(i) & ID_MASK) as u32 - 1;
+                }
+                i = (i + 1) & mask;
             }
-            i = (i + 1) & mask;
+            (self.n += 1, *p.add(i) = (h & !ID_MASK) | self.n as u64);
         }
-        (self.n += 1, self.slot[i] = (h & !ID_MASK) | self.n as u64);
         self.n as u32 - 1
     }
 }
@@ -199,7 +176,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [0u64; LAG];
-    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
+    let (mut n, mut out, mask) = (0usize, ids.len(), t.len - 1);
     loop {
         (ids.set_len(out), ids.reserve(32 + LAG));
         let buf = ids.as_mut_ptr();
@@ -228,7 +205,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             }
             m &= m.wrapping_add(m & m.wrapping_neg());
             let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { 0 };
-            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            _mm_prefetch::<_MM_HINT_T0>((t.base as *const u8).add((h as usize & mask) << 3).cast());
             if n >= LAG {
                 look(&ring[n % LAG]);
             }
@@ -433,8 +410,11 @@ impl Units {
 fn main() {
     unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
     let qtext = map("/data/queries.txt");
-    let slot = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot, n: 0 };
+    let mut slot = vec![0u64; (qtext.len() / 8).next_power_of_two() + 8];
+    let len = slot.len() - 8;
+    let addr = slot.as_mut_ptr() as usize;
+    let base = addr + (32 - (addr & 31) & 31);
+    let mut terms = Terms { slot, base, len, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let (phrase, from) = (q[0] == b'P', ids.len() as u32);
