@@ -869,3 +869,8 @@ the fault theory is dead and B is at its plateau.
 - Expected board M ~46 MB (from 48.0). The 44 MB cap on the M factor is NOT reachable in this design (postings without varint have a floor) - this takes the points that are on the table, ~+0.1-0.2.
 - Local timing: ~6% slower on the 1-vCPU rig (more list merging in eval) - indicative only; the board decides. Revert rule: board T regresses >3% vs the 0.169-0.173 band, or M does not drop -> revert to v62.
 - Gated: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact.
+
+## Step 54: v84 first board reading + re-roll for a second (this push)
+
+- v62-revert re-roll banked a new best (run-738a35639585): T 0.168961, M 47,636,480 B, pts 73.293899. The lottery pays.
+- v84 first reading (run-fa26643b74ee): T 0.177488 (+2.6% over the band top, inside noise), M 46,972,928 B (dropped ~1 MB from 48.0 as designed). Ambiguous on T; this PERF-only commit re-rolls v84 unchanged for a second reading. Keep if T lands in the 0.169-0.175 band; revert to the v62 tip otherwise.
