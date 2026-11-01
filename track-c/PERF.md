@@ -909,7 +909,11 @@ Every step from the reference to your final version, each with the live-board ru
 - Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
-- Run: PENDING
+- Run: two scored runs today (2026-11-01, drifted box): 76.459 (T 0.040826,
+  S 335) and 75.672, both below the banked 77.91; the box T band had drifted
+  to 0.0406-0.0411 for every config this hour (the banked v135 code re-rolled
+  74.777-77.694 the same morning). Run IDs rotated out before capture - the
+  board keeps only best+latest per team.
 
 ## Step 96 - v158: teardown skip (1BRC winners' exit trick)
 - Alok's 1BRC-techniques audit found C already has: SWAR delimiter scan,
@@ -928,7 +932,10 @@ Every step from the reference to your final version, each with the live-board ru
 - Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
-- Run: PENDING
+- Run: no scored run. A runner-side docker build outage ~05:08-05:38Z (3
+  consecutive build failures on byte-identical known-good inputs, tracks
+  A/B/D unaffected on the same commits) swallowed every C run; this step was
+  superseded by step 98 before the runner recovered.
 
 ## Step 97 - v159: source-size pass (S axis; zero behavior change)
 - scc counts code lines (no blanks/comments) after canonical formatting, over
@@ -942,7 +949,7 @@ Every step from the reference to your final version, each with the live-board ru
 - Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
-- Run: PENDING
+- Run: no scored run - same runner outage as step 96; superseded by step 98.
 
 ## Step 98 - CM-PORT: Cache Me full-design port (research-derived, promoted from held)
 - Source: github.com/manusingh090/speed-demon-2026-entry track-c, MIT licence
@@ -966,4 +973,10 @@ Every step from the reference to your final version, each with the live-board ru
   reference; ASAN+UBSAN clean; TSAN clean.
 - Staged on speed-demon-held 2026-11-01 ~05:20 UTC; promoted to speed-demon
   on Alok's go (11:05 IST).
-- Run: PENDING
+- Run: run-637415ac3449 on 1b3af2c68db898ec146b796993a1d3f64c93de85:
+  T 0.032336, M 8.59MB, S 400, 78.299604 pts - NEW BANKED BEST (was 77.91,
+  run-cb6df21089fd). Reproduces Cache Me's own board T on the same box
+  (their run-babda5443fbb T 0.033409 today). A second roll run-48e2d50844c2
+  on 9d5cb696a6a79bb570e76978a97213a642cf5c59 scored 76.827523 with the same
+  T (0.032032) but M measured 12.34MB - an M-measurement outlier (the same
+  code measured 8.59MB the same hour), costing ~1.5 pts on that roll.
