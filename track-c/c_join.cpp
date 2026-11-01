@@ -26,6 +26,7 @@
 #include <immintrin.h>
 #include <string>
 #include <mutex>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <thread>
@@ -340,6 +341,202 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         advance();
 }
 
+// One producer/consumer thread pair per physical core (the box's twelve
+// hyperthreads are six P-core pairs, and a core's two hyperthreads share its
+// L1). The producer scans and decodes records, hashes each name and
+// prefetches its table slot and region row into a small per-pair ring; the
+// consumer sibling resolves the name id, updates the totals and marks the
+// name's bitset word (prefetched a few records ahead) while the producer's
+// scan runs ahead. The scan's sequential work fills the core's ports while
+// the consumer waits on the name table's random reads, and the producer's
+// prefetched lines are warm in the L1 they share.
+struct alignas(64) PairQueue {
+    struct Entry {
+        u64 key;
+        i64 cents;
+        u32 id, region, name_bytes, note_bytes;
+    };
+    static constexpr u64 CAP = 128;  // a short lead: prefetched lines must still be in L1
+    alignas(64) std::atomic<u64> head{0};       // entries published, by the producer
+    alignas(64) std::atomic<u64> tail{0};       // entries consumed, by the consumer
+    alignas(64) std::atomic<u64> piece_end{0};  // head value at the current piece's end, 0 between pieces
+    Entry ring[CAP];
+};
+
+// The physical cores' hyperthread pairs among the allowed CPUs, from sysfs
+// topology (fallback: the first half of the list paired with the second).
+std::vector<std::pair<int, int>> core_pairs() {
+    cpu_set_t set;
+    std::vector<int> cpus;
+    if (sched_getaffinity(0, sizeof(set), &set) == 0)
+        for (int c = 0; c < CPU_SETSIZE; ++c)
+            if (CPU_ISSET(c, &set)) cpus.push_back(c);
+    std::vector<std::pair<int, int>> pairs;
+    std::vector<bool> used(cpus.size(), false);
+    for (size_t i = 0; i < cpus.size(); ++i) {
+        if (used[i]) continue;
+        int sib = -1;
+        char path[80], buf[128] = {0};
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpus[i]);
+        if (FILE* f = fopen(path, "r")) {
+            if (fread(buf, 1, sizeof buf - 1, f)) {
+                for (const char* s = buf; *s && sib < 0;)
+                    if (isdigit(u8(*s))) {
+                        int v = atoi(s);
+                        while (isdigit(u8(*s))) ++s;
+                        if (*s == '-') {  // a range a-b
+                            ++s;
+                            int w = atoi(s);
+                            while (isdigit(u8(*s))) ++s;
+                            for (int x = 0; x < (int)cpus.size() && sib < 0; ++x)
+                                if (cpus[x] >= v && cpus[x] <= w && cpus[x] != cpus[i]) sib = cpus[x];
+                        } else if (v != cpus[i]) {
+                            for (int x = 0; x < (int)cpus.size() && sib < 0; ++x)
+                                if (cpus[x] == v) sib = v;
+                        }
+                    } else {
+                        ++s;
+                    }
+            }
+            fclose(f);
+        }
+        if (sib < 0 && cpus.size() % 2 == 0) {  // fallback: first half with second half
+            size_t j = i < cpus.size() / 2 ? i + cpus.size() / 2 : i - cpus.size() / 2;
+            if (!used[j]) sib = cpus[j];
+        }
+        if (sib >= 0) {
+            for (size_t x = 0; x < cpus.size(); ++x)
+                if (cpus[x] == sib) used[x] = true;
+            used[i] = true;
+            pairs.push_back({cpus[i], sib});
+        }
+    }
+    return pairs;
+}
+
+// Parse every record that starts in [p, end), pushing each decoded record to
+// the pair's ring for the consumer sibling. Same chunk scanner as
+// parse_records; the name slot and region row are prefetched here so the
+// consumer finds them in the L1 the pair shares.
+void produce_records(const char* p, const char* end, const char* file_end, PairQueue& q, const u8* country_of,
+                     size_t regions, NameTable& names) {
+    u64 h = q.head.load(std::memory_order_relaxed);
+    auto produce = [&](u64 key, u32 r, u32 id, u32 name_bytes, u32 note_bytes, i64 cents) __attribute__((always_inline)) {
+        while (h - q.tail.load(std::memory_order_acquire) >= PairQueue::CAP) _mm_pause();
+        q.ring[h % PairQueue::CAP] = {key, cents, id, r, name_bytes, note_bytes};
+        q.head.store(h + 1, std::memory_order_release);
+        ++h;
+    };
+    constexpr u32 CHUNK = 64;
+    u32 at[CHUNK * 64 + 9];  // separator offsets from the chunk's start
+    u64 qmask[CHUNK];
+    u32 qbefore[CHUNK];
+    while (p < end) {
+        const u32 blocks = std::min<u64>(CHUNK, (end - p + 63) / 64);
+        u32 seps = 0, quotes = 0;
+        u64 inside = 0;
+        for (u32 b = 0; b < blocks; ++b) {
+            const char* block = p + 64 * b;
+            _mm_prefetch(block + 2048, _MM_HINT_T0);
+            __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block));
+            __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block + 32));
+            u64 q = mask64(lo, hi, '"');
+            u64 in = _mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_cvtsi64_si128(q), _mm_set1_epi8(-1), 0)) ^ inside;
+            inside = u64(i64(in) >> 63);
+            const __m256i comma = _mm256_set1_epi8(','), lf = _mm256_set1_epi8('\n');
+            u64 m = (u32(_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(lo, comma), _mm256_cmpeq_epi8(lo, lf)))) |
+                     u64(u32(_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(hi, comma), _mm256_cmpeq_epi8(hi, lf)))))
+                        << 32) &
+                    ~in;
+            qmask[b] = q;
+            qbefore[b] = quotes;
+            quotes += __builtin_popcountll(q);
+            u32 count = __builtin_popcountll(m), *out = at + seps;
+            for (int k = 0; k < 8; ++k) out[k] = 64 * b + __builtin_ctzll(m), m = _blsr_u64(m);
+            for (int k = 8; m; ++k) out[k] = 64 * b + __builtin_ctzll(m), m = _blsr_u64(m);
+            seps += count;
+        }
+        // The final record may end at end of file without a terminator.
+        if (p + 64 * blocks >= file_end) at[seps++] = file_end - p;
+        auto quotes_before = [&](u32 x) { return qbefore[x / 64] + __builtin_popcountll(_bzhi_u64(qmask[x / 64], x % 64)); };
+        const char* chunk = p;
+        for (u32 i = 0; i + 5 <= seps && p < end; i += 5) {
+            if (u8(*p) == 0xEF) p += 3;  // a byte order mark before the id
+            const char *f1 = chunk + at[i], *f2 = chunk + at[i + 1], *f3 = chunk + at[i + 2];
+            const char *f4 = chunk + at[i + 3], *eol = chunk + at[i + 4];
+            u32 q1 = quotes_before(at[i]), q2 = quotes_before(at[i + 1]), q3 = quotes_before(at[i + 2]);
+            u32 qname = q2 - q1, qnote = q3 - q2;
+            u32 name_field = f2 - f1 - 1, note_field = f3 - f2 - 1;
+            u32 quoted = qname != 0;
+            const char* name_at = f1 + 1 + quoted;
+            u32 name_raw = name_field - 2 * quoted;
+            u32 name_length = name_field - qname / 2 - quoted;
+            u32 note_length = note_field - qnote / 2 - (qnote != 0);
+            const char* amount = f4 + 1;
+            const char* amount_end = eol - (eol[-1] == '\r');
+            bool negative = *amount == '-';
+            Numbers num = numbers(p, f1, f3 + 1, f4, amount + negative, amount_end);
+            u64 id = num.id, region = num.region;
+            i64 cents = negative ? -i64(num.cents) : i64(num.cents);
+
+            // Region ids are below 10^7 (fit u32); one past the table means none.
+            u32 r = region < regions ? u32(region) : u32(regions);
+            _mm_prefetch(reinterpret_cast<const char*>(country_of + r), _MM_HINT_T0);
+            u64 key = NameTable::key(name_at, name_raw);
+            names.prefetch(key);
+            produce(key, r, u32(id), name_length, note_length, cents);
+            p = eol + 1;
+        }
+    }
+}
+
+// The consumer half of a pair: resolve each record's name id (its slot was
+// prefetched by the producer), update this thread's totals, and mark the
+// name in its country's bitset, the word prefetched LAG records ahead.
+// Counts pieces as their ends pass so the pair's pieces finish in step, and
+// returns once every piece of the file is done.
+void consume_records(PairQueue& q, const u8* country_of, size_t regions, NameTable names, NamesSeen seen,
+                     Totals* totals, std::atomic<int>& pieces_done, int pieces) {
+    constexpr u64 LAG = 16;
+    struct Mark {
+        u32 country, id;
+    } marks[LAG];
+    u64 t = 0, retired = 0, pe_seen = 0;
+    auto retire = [&](u64 upto) __attribute__((always_inline)) {
+        for (; retired < upto; ++retired) {
+            Mark& mk = marks[retired % LAG];
+            totals[mk.country].distinct += seen.mark(mk.country, mk.id);
+        }
+    };
+    while (pieces_done.load(std::memory_order_acquire) < pieces) {
+        if (t == q.head.load(std::memory_order_acquire)) {
+            u64 pe = q.piece_end.load(std::memory_order_acquire);
+            if (pe && t >= pe && pe != pe_seen) {  // the piece's records are all consumed
+                retire(t);
+                pe_seen = pe;
+                pieces_done.fetch_add(1, std::memory_order_acq_rel);
+            }
+            _mm_pause();
+            continue;
+        }
+        const PairQueue::Entry& e = q.ring[t % PairQueue::CAP];
+        retire(t >= LAG ? t + 1 - LAG : 0);
+        u32 c = e.region < regions ? country_of[e.region] : 0;
+        Totals& tt = totals[c];
+        ++tt.count;
+        tt.id_sum += e.id;
+        tt.amount_sum += e.cents;
+        tt.amount_min = std::min(tt.amount_min, e.cents);
+        tt.amount_max = std::max(tt.amount_max, e.cents);
+        tt.name_bytes += e.name_bytes;
+        tt.note_bytes += e.note_bytes;
+        marks[t % LAG] = {c, names.id(e.key)};
+        seen.prefetch(c, marks[t % LAG].id);
+        q.tail.store(t + 1, std::memory_order_release);
+        ++t;
+    }
+}
+
 // 15-bit code of a three-letter country; numeric order is alphabetical order.
 u32 code(const char* p) { return (p[0] - 'A') << 10 | (p[1] - 'A') << 5 | (p[2] - 'A'); }
 
@@ -449,11 +646,23 @@ int main(int argc, char** argv) {
     NamesSeen seen;
 
     // Populate tables and flag countries; populate bitsets and fill the region
-    // table; parse records.
+    // table; parse records. With hyperthread siblings in sight the parse runs
+    // as producer/consumer pairs pinned one per physical core (see PairQueue);
+    // without them every thread parses whole pieces itself.
+    const std::vector<std::pair<int, int>> pairs = core_pairs();
+    const int workers = pairs.empty() ? nthreads : 2 * (int)pairs.size();
+    std::vector<PairQueue> queues(pairs.size());
+    std::atomic<int> claimed{0}, pieces_done{0};
     Phase fill{.pieces = nthreads}, parse{.pieces = pieces};
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
+            if (!pairs.empty() && t < workers) {
+                cpu_set_t one;
+                CPU_ZERO(&one);
+                CPU_SET(t % 2 == 0 ? pairs[t / 2].first : pairs[t / 2].second, &one);
+                sched_setaffinity(0, sizeof one, &one);
+            }
             fill.run([&](int k) {
                 populate_share(country_of, nregions, k, nthreads);
                 names.populate(k, nthreads);
@@ -463,14 +672,36 @@ int main(int argc, char** argv) {
                 }
             });
             populate_share(seen.bits, (ncountries + 1) * NamesSeen::WORDS, t, nthreads);
-            parse.run([&](int k) {
-                uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
-                madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
-                parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
-                              seen, totals[t].data());
-                uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
-                if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
-            });
+            if (pairs.empty()) {
+                parse.run([&](int k) {
+                    uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
+                    madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
+                    parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions,
+                                  names, seen, totals[t].data());
+                    uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
+                    if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
+                });
+            } else if (t < workers && t % 2 == 0) {  // the pair's producer
+                PairQueue& q = queues[t / 2];
+                u64 last_end = 0;
+                for (int k; (k = claimed++) < pieces;) {
+                    if (last_end) {  // piece_end moves only once the consumer passed the last piece
+                        while (q.tail.load(std::memory_order_acquire) < last_end) _mm_pause();
+                        q.piece_end.store(0, std::memory_order_release);
+                    }
+                    uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
+                    madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
+                    produce_records(records + cut[k], records + cut[k + 1], records + size, q, country_of, nregions,
+                                    names);
+                    uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
+                    if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
+                    last_end = q.head.load(std::memory_order_relaxed);
+                    q.piece_end.store(last_end, std::memory_order_release);
+                }
+            } else if (t < workers) {  // the pair's consumer
+                consume_records(queues[t / 2], country_of, nregions, names, seen, totals[t].data(), pieces_done,
+                                pieces);
+            }
         });
     for (auto& th : pool) th.join();
 
