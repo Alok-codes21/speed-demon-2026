@@ -150,7 +150,7 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
             if hf_d + hb_d >= mu:
                 break
 
-            if len(hf) <= len(hb):
+            if hf_d <= hb_d:
                 # ── forward step ─────────────────────────────────────────────
                 entry = _pop(hf)
                 x = entry // n
