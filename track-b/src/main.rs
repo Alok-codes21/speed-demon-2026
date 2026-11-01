@@ -546,7 +546,11 @@ impl Run {
             let (starts, ends, hashes) =
                 (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_mut_ptr());
             let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
+            let lines_ptr = b.lines.as_ptr();
             let mut has_long = false;
+            let mut force_all = false;
+            let mut long_lines = [u32::MAX; 64];
+            let mut long_count = 0usize;
             let mut i = token;
             while i + 1 < ready {
                 let (from_a, to_a) = span(i);
@@ -555,6 +559,19 @@ impl Run {
                 let (a, b) = (text.add(from_a), text.add(from_b));
                 (*hashes.add(i), *hashes.add(i + 1)) = if (len_a | len_b) > 16 {
                     has_long = true;
+                    // The lines holding a long token, so only they take the checking loop.
+                    let lines = std::slice::from_raw_parts(lines_ptr, line_count);
+                    for (t, len) in [(i, len_a), (i + 1, len_b)] {
+                        if len > 16 {
+                            let k = lines.partition_point(|&l| (l as usize) <= t) as u32;
+                            if long_count == 64 {
+                                force_all = true;
+                            } else if long_count == 0 || long_lines[long_count - 1] != k {
+                                long_lines[long_count] = k;
+                                long_count += 1;
+                            }
+                        }
+                    }
                     (hash_of(a, len_a), hash_of(b, len_b))
                 } else {
                     hash_pair(a, len_a, b, len_b)
@@ -565,6 +582,14 @@ impl Run {
                 let (from, to) = span(i);
                 if to - from > 16 {
                     has_long = true;
+                    let lines = std::slice::from_raw_parts(lines_ptr, line_count);
+                    let k = lines.partition_point(|&l| (l as usize) <= i) as u32;
+                    if long_count == 64 {
+                        force_all = true;
+                    } else if long_count == 0 || long_lines[long_count - 1] != k {
+                        long_lines[long_count] = k;
+                        long_count += 1;
+                    }
                 }
                 *hashes.add(i) = hash_of(text.add(from), to - from);
             }
@@ -575,55 +600,25 @@ impl Run {
             let buckets = self.buckets;
             let (heavy_hits, list_hits) = (b.heavy_hits.as_mut_ptr(), b.list_hits.as_mut_ptr());
             if has_long {
-            // A batch holding a token over 16 bytes takes the checking loop: such a token
-            // went through the long-token mix, not the bijective short hash, so a hit of
-            // its is confirmed against the term's bytes before it counts. A batch without
-            // one (every batch of the scored corpus) keeps the unchecked loop, byte for
-            // byte the original: the exactness work costs the common path nothing.
-                for line in 0..line_count {
-                let to = b.lines[line] as usize;
-                while token < to {
-                    let ahead = bucket_of(*hashes.add(token + AHEAD));
-                    _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
-                    let mut action = action_in(buckets, *hashes.add(token));
-                    if action != 0 {
-                        let (from, upto) = span(token);
-                        if upto - from > 16
-                            && !term_eq(self, action_term(self, action), text.add(from), upto - from)
-                        {
-                            action = 0;
-                        }
-                    }
-                    // All three stores happen, and only the right counts move.
-                    *heavy_hits.add(heavy_count) = action;
-                    heavy_count += (action >> 31) as usize;
-                    *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
-                    // A term id + 1, with or without ANCHOR: not 0 and not HEAVY.
-                    list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
-                    // Rare enough to predict: about 1 token in 150 starts a phrase check.
-                    if action & ANCHOR != 0 {
-                        *b.anchor_hits.get_unchecked_mut(anchor_count) =
-                            (action as u64) << 40 | (doc as u64) << 20 | token as u64;
-                        anchor_count += 1;
-                    }
-                    token += 1;
-                }
-                *b.heavy_ends.get_unchecked_mut(line) = heavy_count as u32;
-                // The token after a line is the next document's id. As hash 0 it also stops a
-                // phrase check from running on into the next document. The last line stays
-                // for the next batch.
-                if line + 1 < line_count {
-                    doc += 1;
-                    b.hashes[to] = 0;
-                    token = to + 1;
-                }
-            }
+                // A batch holding a token over 16 bytes takes a checking pass, outlined
+                // cold so the common batch compiles exactly like the original engine.
+                // Line-grained when the long tokens fit the side list: only a line that
+                // actually holds one runs the confirming loop. (Batch-grained flagging
+                // cost +15%: about 6% of 16KB batches paid a whole second pass.)
+                let r = if force_all {
+                    scan_checking(
+                        self, b, buckets, text, line_count, token, doc,
+                        heavy_count, list_count, anchor_count,
+                    )
+                } else {
+                    scan_mixed(
+                        self, b, buckets, text, line_count, token, doc,
+                        heavy_count, list_count, anchor_count,
+                        &long_lines[..long_count],
+                    )
+                };
+                token = r.0; doc = r.1; heavy_count = r.2; list_count = r.3; anchor_count = r.4;
             } else {
-            // A batch holding a token over 16 bytes takes the checking loop: such a token
-            // went through the long-token mix, not the bijective short hash, so a hit of
-            // its is confirmed against the term's bytes before it counts. A batch without
-            // one (every batch of the scored corpus) keeps the unchecked loop, byte for
-            // byte the original: the exactness work costs the common path nothing.
                 for line in 0..line_count {
                 let to = b.lines[line] as usize;
                 while token < to {
@@ -1345,6 +1340,139 @@ fn spawn_tree<'scope, 'env>(scope: &'scope thread::Scope<'scope, 'env>, run: &'e
         scope.spawn(move || spawn_tree(scope, run, child));
     }
     unsafe { run.work(id) };
+}
+
+/// The checking pass for a batch that holds a token over 16 bytes: such a token went
+/// through the long-token mix, not the bijective short hash, so a hit of its is confirmed
+/// against the term's bytes before it counts. Outlined and cold: the common batch keeps
+/// the original loop's codegen, and only a rare batch pays for the exactness work.
+#[cold]
+#[inline(never)]
+unsafe fn scan_checking(
+    run: &Run,
+    b: &mut Buffers,
+    buckets: *const Bucket,
+    text: *const u8,
+    line_count: usize,
+    mut token: usize,
+    mut doc: usize,
+    mut heavy_count: usize,
+    mut list_count: usize,
+    mut anchor_count: usize,
+) -> (usize, usize, usize, usize, usize) {
+    let (starts, ends, hashes) = (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_ptr());
+    let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
+    let (heavy_hits, list_hits) = (b.heavy_hits.as_mut_ptr(), b.list_hits.as_mut_ptr());
+    for line in 0..line_count {
+        let to = b.lines[line] as usize;
+        while token < to {
+            let ahead = bucket_of(*hashes.add(token + AHEAD));
+            _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
+            let mut action = action_in(buckets, *hashes.add(token));
+            if action != 0 {
+                let (from, upto) = span(token);
+                if upto - from > 16
+                    && !term_eq(run, action_term(run, action), text.add(from), upto - from)
+                {
+                    action = 0;
+                }
+            }
+            *heavy_hits.add(heavy_count) = action;
+            heavy_count += (action >> 31) as usize;
+            *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
+            list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
+            if action & ANCHOR != 0 {
+                *b.anchor_hits.get_unchecked_mut(anchor_count) =
+                    (action as u64) << 40 | (doc as u64) << 20 | token as u64;
+                anchor_count += 1;
+            }
+            token += 1;
+        }
+        *b.heavy_ends.get_unchecked_mut(line) = heavy_count as u32;
+        if line + 1 < line_count {
+            doc += 1;
+            b.hashes[to] = 0;
+            token = to + 1;
+        }
+    }
+    (token, doc, heavy_count, list_count, anchor_count)
+}
+
+/// The line-grained checking pass: a line in `long_lines` runs the confirming loop (a
+/// long token went through the long-token mix, not the bijective short hash, so a hit of
+/// its is checked against the term's bytes); every other line runs the original loop.
+#[cold]
+#[inline(never)]
+unsafe fn scan_mixed(
+    run: &Run,
+    b: &mut Buffers,
+    buckets: *const Bucket,
+    text: *const u8,
+    line_count: usize,
+    mut token: usize,
+    mut doc: usize,
+    mut heavy_count: usize,
+    mut list_count: usize,
+    mut anchor_count: usize,
+    long_lines: &[u32],
+) -> (usize, usize, usize, usize, usize) {
+    let (starts, ends, hashes) = (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_ptr());
+    let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
+    let (heavy_hits, list_hits) = (b.heavy_hits.as_mut_ptr(), b.list_hits.as_mut_ptr());
+    let mut li = 0usize;
+    for line in 0..line_count {
+        let to = b.lines[line] as usize;
+        let checking = li < long_lines.len() && long_lines[li] as usize == line;
+        li += checking as usize;
+        if checking {
+            while token < to {
+                let ahead = bucket_of(*hashes.add(token + AHEAD));
+                _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
+                let mut action = action_in(buckets, *hashes.add(token));
+                if action != 0 {
+                    let (from, upto) = span(token);
+                    if upto - from > 16
+                        && !term_eq(run, action_term(run, action), text.add(from), upto - from)
+                    {
+                        action = 0;
+                    }
+                }
+                *heavy_hits.add(heavy_count) = action;
+                heavy_count += (action >> 31) as usize;
+                *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
+                list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
+                if action & ANCHOR != 0 {
+                    *b.anchor_hits.get_unchecked_mut(anchor_count) =
+                        (action as u64) << 40 | (doc as u64) << 20 | token as u64;
+                    anchor_count += 1;
+                }
+                token += 1;
+            }
+        } else {
+            while token < to {
+                let ahead = bucket_of(*hashes.add(token + AHEAD));
+                _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
+                let action = action_in(buckets, *hashes.add(token));
+                *heavy_hits.add(heavy_count) = action;
+                heavy_count += (action >> 31) as usize;
+                *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
+                list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
+                if action & ANCHOR != 0 {
+                    *b.anchor_hits.get_unchecked_mut(anchor_count) =
+                        (action as u64) << 40 | (doc as u64) << 20 | token as u64;
+                    anchor_count += 1;
+                }
+                token += 1;
+            }
+        }
+        *b.heavy_ends.get_unchecked_mut(line) = heavy_count as u32;
+        if line + 1 < line_count {
+            doc += 1;
+            b.hashes[to] = 0;
+            token = to + 1;
+        }
+    }
+    (token, doc, heavy_count, list_count, anchor_count)
 }
 
 fn main() {
