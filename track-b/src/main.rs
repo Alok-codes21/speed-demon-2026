@@ -237,7 +237,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         };
         // The corpus's pages are scattered in memory and the hardware prefetcher
         // stops at each 4 KB page; this reaches into the next one in time.
-        // _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
+        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
         let stop = if nl != 0 { nl.trailing_zeros() } else { 64 }; // the window's bytes in this document
         let mut m = word & ((1u128 << stop) - 1) as u64;
@@ -298,41 +298,12 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
         (Bits(mut a), _, Bits(b)) => {
-            let x = a.to_mut();
-            let n_vec = x.len() / 4;
-            let xp = x.as_mut_ptr() as *mut __m256i;
-            let yp = b.as_ptr() as *const __m256i;
-            unsafe {
-                match op {
-                    b'A' => {
-                        for i in 0..n_vec {
-                            let vx = _mm256_loadu_si256(xp.add(i));
-                            let vy = _mm256_loadu_si256(yp.add(i));
-                            _mm256_storeu_si256(xp.add(i), _mm256_and_si256(vx, vy));
-                        }
-                    }
-                    b'O' => {
-                        for i in 0..n_vec {
-                            let vx = _mm256_loadu_si256(xp.add(i));
-                            let vy = _mm256_loadu_si256(yp.add(i));
-                            _mm256_storeu_si256(xp.add(i), _mm256_or_si256(vx, vy));
-                        }
-                    }
-                    _ => {
-                        for i in 0..n_vec {
-                            let vx = _mm256_loadu_si256(xp.add(i));
-                            let vy = _mm256_loadu_si256(yp.add(i));
-                            _mm256_storeu_si256(xp.add(i), _mm256_andnot_si256(vy, vx));
-                        }
-                    }
-                }
-                for i in (n_vec * 4)..x.len() {
-                    x[i] = match op {
-                        b'A' => x[i] & b[i],
-                        b'O' => x[i] | b[i],
-                        _ => x[i] & !b[i],
-                    };
-                }
+            for (x, &y) in a.to_mut().iter_mut().zip(b.iter()) {
+                *x = match op {
+                    b'A' => *x & y,
+                    b'O' => *x | y,
+                    _ => *x & !y,
+                };
             }
             Bits(a)
         }
@@ -774,29 +745,21 @@ fn main() {
             Docs::List(v)
         }
     };
-    let num_queries = spans.len();
-    let mut phrase_starts = vec![0u32; num_queries + 1];
-    for m in &found {
-        phrase_starts[m.0 as usize + 1] += 1;
-    }
-    for i in 0..num_queries {
-        phrase_starts[i + 1] += phrase_starts[i];
-    }
     let n = spans.len().div_ceil(64);
     let chunks: Vec<Mutex<String>> = (0..n).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     on_threads(|_| loop {
         let k = next.fetch_add(1, Relaxed);
         let Some(chunk) = chunks.get(k) else { return };
-        let mut out = String::with_capacity(4096);
+        let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let r = from as usize..to as usize;
             let (tids, ops) = (&ids[r.clone()], &ops[r]);
             if phrase {
                 // Matches are (query, doc) sorted, so a phrase's docs ascend:
-                // count, sum and the first ten straight from the match list in O(1).
-                let at = phrase_starts[q] as usize;
-                let end = phrase_starts[q + 1] as usize;
+                // count, sum and the first ten straight from the match list.
+                let at = found.partition_point(|m| m.0 < q as u32);
+                let end = at + found[at..].partition_point(|m| m.0 == q as u32);
                 let (mut sum, mut first, mut nfirst) = (0u64, [0u32; 10], 0usize);
                 for m in &found[at..end] {
                     sum += m.1 as u64;
@@ -819,7 +782,7 @@ fn main() {
     });
     // Chunk by chunk, so the answers are never held twice.
     let file = std::fs::File::create("/out/results.txt").expect("/out/results.txt");
-    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut out = std::io::BufWriter::new(file);
     for c in chunks {
         std::io::Write::write_all(&mut out, c.into_inner().unwrap().as_bytes()).unwrap();
     }
