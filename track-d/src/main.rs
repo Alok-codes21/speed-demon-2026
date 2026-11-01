@@ -154,11 +154,21 @@ impl Heap {
         let h = &mut self.0;
         let mut i = h.len();
         h.push((k, u));
-        while i > 0 && h[(i - 1) / 4].0 > k {
-            h[i] = h[(i - 1) / 4];
-            i = (i - 1) / 4;
+        // Sift the hole upward through raw pointers. The parent index is
+        // always smaller than i, and every destination is inside the Vec.
+        unsafe {
+            let p = h.as_mut_ptr();
+            while i > 0 {
+                let parent = (i - 1) / 4;
+                let item = *p.add(parent);
+                if item.0 <= k {
+                    break;
+                }
+                *p.add(i) = item;
+                i = parent;
+            }
+            *p.add(i) = (k, u);
         }
-        h[i] = (k, u);
     }
     /// The smallest entry (the heap must not be empty). The last entry sifts
     /// down from the root, unchecked: every index read is below n.
