@@ -372,6 +372,10 @@ int main(int argc, char **argv) {
         pr_money(out, g.amount_max, ' ');
     fprintf(out, "%u %lu %lu\n", d, g.name_bytes, g.note_bytes);
   }
-  return fclose(out), 0;
+  // Teardown skip: the buffer is flushed explicitly, then _exit goes straight
+  // to exit_group - no stdio cleanup, atexit handlers or static destructors
+  // on the timed path (1BRC winners' exit trick; threads are already joined).
+  fflush(out);
+  _exit(0);
 }
 
