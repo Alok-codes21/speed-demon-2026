@@ -768,3 +768,14 @@ byte-exact, all six adversarial suites byte-exact vs the trusted
 binary. Expected: S 652 -> ~642, M -2.4 MB (keys array and its
 renumber clone gone), and the T win Cache Me's own first roll
 (73.234 at T=0.1732 s) has not shown yet.
+
+
+## Step 43 result and step 44: next-page prefetch (v55, Cache Me adoption)
+
+v43/v54's first true reading (run-24cba018aa0d): T=0.1702 s, M=47.9 MB,
+S=654, **73.195448 pts - new best** (+0.196). A stray track-b/main.rs
+from the upload doubled S to 1298 for one reading; deleted. Cache Me's
+follow-up (their commit c1ec48304e3f, MIT): one _mm_prefetch(p + 2048)
+per 64-byte window, so the next page of the corpus is on its way before
+the hardware prefetcher's 4 KB stop. A prefetch never faults, so output
+cannot change; gates byte-exact as before. S +1 line.
