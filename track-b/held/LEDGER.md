@@ -240,3 +240,10 @@ T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
   49.2 -> 47.8 with this change). Their first board run with it scored
   73.234 on a mid T roll (0.173163) - the T win has not shown yet.
   SUPERSEDES v52 as the next probe candidate.
+
+  BOARD RESULT (12:12 IST, run-24cba018aa0d, live at track-b/src/main.rs):
+  73.195448 NEW BEST (T=0.17021, M=47.9MB, S=654), +0.196 over v42's
+  72.999937. Note: the first v54 push mistakenly went to track-b/main.rs
+  (the board builds track-b/src/main.rs), doubling S to 1298 for one
+  reading; the stray was deleted. All future code pushes go to
+  track-b/src/main.rs.
