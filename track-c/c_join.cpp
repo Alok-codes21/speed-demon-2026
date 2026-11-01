@@ -217,7 +217,7 @@ private:
 };
 
 // One country's running aggregates (per thread, summed at the end).
-struct Totals {
+struct alignas(64) Totals {
     u64 count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0, distinct = 0;
     i64 amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
