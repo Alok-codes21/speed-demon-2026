@@ -929,3 +929,14 @@ the fault theory is dead and B is at its plateau.
 - Bench: 50 interleaved full-dataset native-flag runs (rig under external load, absolute times inflated ~2x; interleaving keeps the comparison fair). v92 min 0.827-0.831 s vs v97 min 0.794-0.799 s on the calm batches (-3.5 to -4.5%); v97 won 19 of the last 20 pairs. Over the 3% bar -> LIVE, this push.
 - v92's first board reading (run-32e0c25064e2, commit be1cde23): T 0.163987 (beats v90's 0.165231, revert rule NOT triggered), M 46,018,560 B, S 606, pts 74.021657 - below v90's banked 74.14792 on the M/S lottery, so the banked best stands (sticky per track).
 - Revert rule: if board T regresses >3% vs the v90 band (0.165647/0.166093) on two runs, restore the step-56 (v90) file; if it regresses vs v92's local profile only, restore step-58 (v92) file.
+
+## Step 64: v98 - Claude round 3, fused first bitmap op (ONE variable, no promotion)
+
+- bits_new: first bitmap-vs-bitmap op computes a op b into a fresh Vec instead of clone + read-modify-write. Byte-exact (3 official shas EXACT, 70/70 suites). Bench: 46 interleaved runs, v97 min 0.472 s vs v98 min 0.463 s (~2%) - under the 3% bar, and +20 lines of S would eat a third of it on points. Held, not live: speed-demon-held track-b/held/v98_main.rs. Claude stall 1 of 3.
+
+## Step 65: v99 - Claude round 4, suffix-sum bit_sums (ONE variable, LIVE)
+
+- bit_sums v3: the per-word multiply and word counter replaced by the suffix-sum identity sum_j j*c_j = N*C - S, where S is the running prefix sum of the per-lane popcount. Per-vector work drops by 3 ops; the function LOSES 5 lines (S factor improves).
+- Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites.
+- Bench: 64 interleaved full-dataset native-flag runs (ABBA order): v97 min 0.474-0.475 s vs v99 min 0.458-0.461 s (~3.2-3.4% on mins, ~1-2.7% on medians). Line-negative and points-positive under conservative reads: T -2% -> +1.0% K, S -5 lines -> +0.1% K. Over the bar -> LIVE, this push.
+- Revert rule: if board points land below 74.02 (v92's reading) on TWO v99 runs, or T > ~0.169 on two runs, restore the step-63 (v97) file; v90 banked best 74.14792 is sticky regardless.
