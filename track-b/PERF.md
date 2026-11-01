@@ -956,3 +956,12 @@ the fault theory is dead and B is at its plateau.
 - Bench (1 vCPU, 6-pair ABBA interleaved mins): v107 470 ms vs v109 429 ms (-8.7%), v109-min wins 6/6 pairs.
 - 20 lines shorter (645 vs 665).
 - Board trial under the trial-phase rules; v107 stays restore-ready in one push. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+
+## Step 68: huge-page term table + batched parse inserts + prefilled lookup ring (Cache Me steps 65+67, MIT)
+
+- Term table mapped on its own, 2 MB aligned, MADV_HUGEPAGE, first page faulted before PR_SET_THP_DISABLE, unmapped after the scan (Cache Me step 67: one TLB entry for the whole table; their board 0.1511 -> 0.147).
+- Parse hashes all query terms first, then inserts in order with each slot prefetched 16 hashes ahead (Cache Me step 65: parse 19-21 -> 10-11 ms; the serial parse is pure wall time on the board).
+- The lookup ring starts each document full of hash-0 lookups (they stay in cache) and resolves one lookup per token, dropping the `if n >= LAG` branch; each document's ids follow 8 throwaway ones (Cache Me step 65: 1.6% fewer instructions).
+- Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
+- Bench (1 vCPU, 4-pair ABBA interleaved mins): v109 min 411 ms vs v111 min 391 ms (-4.9%).
+- +13 lines (658 vs 645). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v109 (74.919244, run-4121048f5831) is the current banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
