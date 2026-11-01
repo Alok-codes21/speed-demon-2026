@@ -355,6 +355,7 @@ fn main() {
     let off = &off;
     let mut heavy2: Vec<(u32, u32)> = on_threads(nt, |t| {
         let (mut out, r) = (Vec::new(), share(n, t, nt));
+        let mut hi = heavy.partition_point(|h| h.0 < first[r.start]);
         for u in r.clone() {
             if u + 8 < r.end {
                 prefetch(&off[id[u + 8] as usize]);
@@ -367,7 +368,8 @@ fn main() {
             for e in first[u]..first[u + 1] {
                 let x = link[e as usize];
                 if x >> hb == big {
-                    out.push((j, heavy_weight(&heavy, e)));
+                    out.push((j, heavy[hi].1));
+                    hi += 1;
                 }
                 unsafe { *ar.at(j as usize) = id[(x & hmask) as usize] | (x & !hmask) };
                 j += 1;
