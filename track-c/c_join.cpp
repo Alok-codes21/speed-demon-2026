@@ -408,6 +408,20 @@ int main(int argc, char** argv) {
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
+            // Pin this thread to the t-th allowed CPU: no migrations, one
+            // thread per hardware context for the whole run.
+            cpu_set_t cs;
+            if (sched_getaffinity(0, sizeof cs, &cs) == 0) {
+                int seen = 0;
+                for (int c = 0; c < CPU_SETSIZE; ++c)
+                    if (CPU_ISSET(c, &cs) && seen++ == t) {
+                        cpu_set_t one;
+                        CPU_ZERO(&one);
+                        CPU_SET(c, &one);
+                        sched_setaffinity(0, sizeof one, &one);
+                        break;
+                    }
+            }
             flag.run([&](int k) {
                 populate_share(country_of, nregions, k, nthreads);
                 names.populate(k, nthreads);
