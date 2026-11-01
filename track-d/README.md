@@ -1,20 +1,14 @@
 # Track D: Traverse
 
-This submission is implemented in **Python 3.13 using only the standard library**. The supplied reference repository, [manusingh090/speed-demon-2026-entry](https://github.com/manusingh090/speed-demon-2026-entry), is used only as an optimization reference; its Rust implementation is not included or used at runtime.
+Track D is implemented in Rust with no third-party runtime dependencies.
 
-## Python approach
+## Design
 
-- Build forward and reverse compressed sparse row (CSR) adjacency.
-- Answer queries with bidirectional Dijkstra and a lower-bound stopping rule.
-- Preserve input query order and output order.
-- Skip self-loops and cache duplicate query answers.
-- Reset only nodes touched by each search and buffer the output.
-- Expand the frontier with the smaller current minimum distance in bidirectional Dijkstra.
+- Parse the memory-mapped graph once and build per-part CSR adjacency.
+- Pack each edge's head and common-case weight into one 32-bit word; keep oversized weights in a side table.
+- Renumber vertices using compact BFS-grown blobs to improve graph locality.
+- Build a reverse CSR graph for bidirectional Dijkstra.
+- Use compact 4-ary heaps and paged distance storage.
+- Use scoped worker threads for graph construction and query processing.
 
-## Dependencies
-
-None. Python standard library only.
-
-## Validation status
-
-The Python implementation is restored. Official sample/full output hash checks and leaderboard benchmarks still need to be run; no runtime or rank improvement is claimed until measured.
+The Dockerfile builds the Rust binary offline and runs it directly. Official output-hash and leaderboard checks must be performed after each change; no performance gain is claimed without a measured run.
