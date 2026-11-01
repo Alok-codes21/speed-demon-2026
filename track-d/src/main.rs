@@ -188,7 +188,7 @@ impl Filed {
         })
     }
 }
-const HEAVY_BLOCK_BITS: usize = 8;
+const HEAVY_BLOCK_BITS: usize = 5;
 fn heavy_index(heavy: &[(u32, u32)], m: usize) -> Vec<u32> {
     let blocks = m.div_ceil(1 << HEAVY_BLOCK_BITS);
     let mut index = vec![0u32; blocks + 1];
@@ -208,7 +208,7 @@ fn heavy_weight(heavy: &[(u32, u32)], index: &[u32], e: u32) -> u32 {
     let b = (e as usize) >> HEAVY_BLOCK_BITS;
     let lo = index[b] as usize;
     let hi = index[b + 1] as usize;
-    heavy[lo..hi].partition_point(|h| h.0 < e).checked_add(lo).map_or(0, |i| heavy[i].1)
+    heavy[lo + heavy[lo..hi].partition_point(|h| h.0 < e)].1
 }
 fn main() {
     unsafe {
