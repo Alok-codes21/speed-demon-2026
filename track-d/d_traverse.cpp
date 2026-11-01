@@ -617,7 +617,7 @@ int main() {
     groups.push_back({begin, end});
     begin = end;
   }
-  unsigned query_threads = std::min(12u, threads);
+  unsigned query_threads = std::min(6u, threads);
   std::atomic<size_t> next{0};
   parallel(std::min<size_t>(query_threads, std::max<size_t>(1, groups.size())),
            [&](unsigned) {
