@@ -44,9 +44,8 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
-constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16,
-                   kPartCap = kIds * 256;
+constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2, kPartCap = kIds * 256;
+constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
@@ -58,17 +57,11 @@ using Run = std::pair<Rec *, uint32_t>;
 // output text, its length
 using Part = std::pair<std::unique_ptr<char[]>, size_t>;
 
-[[noreturn]] void fail(const char *what) {
-  std::perror(what);
-  std::exit(1);
-}
-__m256i load(const void *p) {
-  return _mm256_loadu_si256(static_cast<const __m256i *>(p));
-}
+[[noreturn]] void fail(const char *what) { std::perror(what), std::exit(1); }
+__m256i load(const void *p) { return _mm256_loadu_si256((const __m256i *)p); }
 uint64_t load64(const void *p) {
   uint64_t v;
-  std::memcpy(&v, p, 8);
-  return v;
+  return (std::memcpy(&v, p, 8), v);
 }
 uint32_t spaces(const char *p) {
   return _mm256_movemask_epi8(
@@ -119,14 +112,11 @@ uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
                         _mm256_permutevar8x32_epi32(v, lanes(kLanes.low[m])));
     _mm256_storeu_si256((__m256i *)(dst + r - 8),
                         _mm256_permutevar8x32_epi32(v, lanes(kLanes.high[m])));
-    l += __builtin_popcount(m);
-    r -= 8 - __builtin_popcount(m);
+    (l += __builtin_popcount(m), r -= 8 - __builtin_popcount(m));
   }
   for (; i < hi; ++i) {
     const int32_t v = src[i];
-    dst[l] = dst[r - 1] = v;
-    l += v < pivot;
-    r -= v >= pivot;
+    (dst[l] = dst[r - 1] = v, l += v < pivot, r -= v >= pivot);
   }
   return l - lo;
 }
@@ -137,31 +127,29 @@ template <int M> __m256i step(__m256i v, __m256i other) {
   return _mm256_blend_epi32(_mm256_min_epi32(v, other),
                             _mm256_max_epi32(v, other), M);
 }
+#define SA v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1))
+#define SC1 v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x1B))
+#define SC4 v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E))
+#define SF v = step<0xF0>(v, _mm256_permutevar8x32_epi32(v, flip))
+#define SP v = step<0xF0>(v, _mm256_permute2x128_si256(v, v, 1))
 __m256i sort8(__m256i v) {
   const __m256i flip = _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0);
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x1B));
-  v = step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
-  v = step<0xF0>(v, _mm256_permutevar8x32_epi32(v, flip));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+  return (SA, SC1, SA, SF, SC4, step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1)));
 }
 __m256i merge8(__m256i v) { // v is a bitonic sequence
-  v = step<0xF0>(v, _mm256_permute2x128_si256(v, v, 1));
-  v = step<0xCC>(v, _mm256_shuffle_epi32(v, 0x4E));
-  return step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1));
+  return (SP, SC4, step<0xAA>(v, _mm256_shuffle_epi32(v, 0xB1)));
 }
 void sort16(const int32_t *a, uint32_t n, int32_t *out) {
   const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
                 big = _mm256_set1_epi32(INT32_MAX),
                 count = _mm256_set1_epi32(n),
                 iota8 = _mm256_add_epi32(iota, _mm256_set1_epi32(8));
-  __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
-          y = _mm256_blendv_epi8(big, load(a + 8),
-                                 _mm256_cmpgt_epi32(count, iota8));
-  x = sort8(x);
-  y = _mm256_permutevar8x32_epi32(sort8(y),
-                                  _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
+  __m256i x = sort8(_mm256_blendv_epi8(big, load(a),
+                                       _mm256_cmpgt_epi32(count, iota))),
+          y = _mm256_permutevar8x32_epi32(
+              sort8(_mm256_blendv_epi8(big, load(a + 8),
+                                       _mm256_cmpgt_epi32(count, iota8))),
+              _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
   _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
   _mm256_storeu_si256((__m256i *)(out + 8), merge8(_mm256_max_epi32(x, y)));
 }
@@ -188,10 +176,8 @@ void multiselect(int32_t *a, int32_t *b, uint32_t lo, uint32_t hi,
   int32_t pivot = std::max(std::min(x, y), std::min(std::max(x, y), z));
   uint32_t cut = lo + split(a, b, lo, hi, pivot);
   if (cut == lo) { // pivot is the minimum: peel off its duplicates
-    if (pivot == INT32_MAX) {
-      std::fill(out, out + nk, pivot);
-      return;
-    }
+    if (pivot == INT32_MAX)
+      return (std::fill(out, out + nk, pivot), void());
     cut = lo + split(a, b, lo, hi, pivot + 1);
     for (int i = 0; i < nk && k[i] < cut; ++i)
       out[i] = pivot;
@@ -215,10 +201,7 @@ struct SpinLock {
   std::atomic_flag held = ATOMIC_FLAG_INIT;
   void lock() {
     for (int i = 0; held.test_and_set(std::memory_order_acquire); ++i)
-      if (i < 64)
-        _mm_pause();
-      else
-        sched_yield();
+      (i < 64 ? (_mm_pause(), 0) : sched_yield());
   }
   void unlock() { held.clear(std::memory_order_release); }
 };
@@ -279,21 +262,17 @@ struct Local { // one worker's private open-addressing view of the dictionary
     if (const int id = lookup(names, ep, n, h); id >= 0)
       return id;
     const uint32_t id = names.size.load(std::memory_order_relaxed);
-    if (id >= kIds)
-      fail("too many endpoints");
-    std::memcpy(names.img[id], ep, n);
-    names.img[id][n] = ' ';
-    names.len[id] = n;
-    names.hash[id] = h;
+    (id >= kIds ? (fail("too many endpoints"), 0) : 0);
+    (std::memcpy(names.img[id], ep, n), names.img[id][n] = ' ',
+     names.len[id] = n, names.hash[id] = h);
     auto by_name = [&](uint32_t x, uint32_t y) {
       return std::memcmp(names.img[x], names.img[y], 128) < 0;
     };
     names.sorted.insert(
         std::lower_bound(names.sorted.begin(), names.sorted.end(), id, by_name),
         id);
-    names.size.store(id + 1, std::memory_order_release);
-    put(h, id);
-    synced = id + 1;
+    (names.size.store(id + 1, std::memory_order_release), put(h, id),
+     synced = id + 1);
     return id;
   }
   __attribute__((always_inline)) uint32_t find(Names &names, const char *ep,
@@ -318,8 +297,7 @@ struct Stream {
 uint64_t digits_of(uint32_t v) {
   uint64_t x = v / 10000 | uint64_t{v % 10000} << 32;
   uint64_t q = (x * 5243 >> 19) & 0x0000007f0000007f;
-  x = q | (x - q * 100) << 16;
-  q = (x * 103 >> 10) & 0x000f000f000f000f;
+  (x = q | (x - q * 100) << 16, q = (x * 103 >> 10) & 0x000f000f000f000f);
   return q | (x - q * 10) << 8;
 }
 // Appends a space and v; 16 bytes of slack must follow.
@@ -330,8 +308,7 @@ __attribute__((always_inline)) char *put(char *out, uint32_t v) {
   const uint64_t d = digits_of(v);
   const uint32_t skip = __builtin_ctzll(d | uint64_t{1} << 56) / 8;
   const uint64_t text = (d + 0x3030303030303030) >> 8 * skip;
-  std::memcpy(out, &text, 8);
-  return out + 8 - skip;
+  return (std::memcpy(out, &text, 8), out + 8 - skip);
 }
 
 struct Job {
@@ -369,8 +346,7 @@ struct Job {
     if (pool.empty())
       return T();
     T t = std::move(pool.back());
-    pool.pop_back();
-    return t;
+    return (pool.pop_back(), std::move(t));
   }
   static const char *next_line(const char *p) {
     while (p[-1] != '\n')
@@ -388,39 +364,30 @@ struct Job {
   line(Local &local, Stream &st, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
-      st.date = date;
-      st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698;
-      if (!*st.at) {
-        Rec *r = take(runbufs);
+      (st.date = date,
+       st.at = wp + (p[9] + (p[6] & 1)) * 24 + p[11] * 10 + p[12] - 1698);
+      if (!*st.at)
         *st.at = bp[st.at - wp] =
-            r ? r
-              : (Rec *)std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t));
-      }
+            take(runbufs)
+                ?: (Rec *)std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t));
     }
-    _mm_prefetch(p + 1280, _MM_HINT_T0);
-    _mm_prefetch(p + 1344, _MM_HINT_T0);
+    (_mm_prefetch(p + 1280, _MM_HINT_T0), _mm_prefetch(p + 1344, _MM_HINT_T0));
     const char *q = p + 28;
     uint64_t m = spaces(q) | uint64_t{spaces(q + 32)} << 32;
-    const uint32_t k1 = __builtin_ctzll(m);
-    m &= m - 1;
-    const uint32_t k2 = m ? __builtin_ctzll(m) : far_space(q);
+    const uint32_t k1 = __builtin_ctzll(m),
+                   k2 = (m &= m - 1) ? __builtin_ctzll(m) : far_space(q);
     const uint32_t id = local.find(names, q + k1 + 1, k2 - k1 - 1);
     const char *s = q + k2 + 1;
     const uint32_t error = *s == '5';
-    s += 4;
-    uint64_t v = load64(s) ^ 0x3030303030303030, lat;
+    uint64_t v = load64(s += 4) ^ 0x3030303030303030, lat;
     const uint64_t other = ((v + 0x7676767676767676) | v) & 0x8080808080808080;
-    if (other) {
-      const uint32_t digits = __builtin_ctzll(other) >> 3;
-      lat = digits8(v << (64 - 8 * digits));
-      s += digits;
-    } else {
-      for (lat = digits8(v), s += 8; *s != '\n'; ++s)
+    const uint32_t digits = other ? __builtin_ctzll(other) >> 3 : 8;
+    (lat = digits8(v << (64 - 8 * digits)), s += digits);
+    if (!other)
+      for (; *s != '\n'; ++s)
         lat = lat * 10 + (*s - '0');
-    }
     const uint64_t rec = lat | uint64_t{id | error << 11} << 32;
-    std::memcpy((*st.at)++, &rec, sizeof(Rec));
-    st.pos = s + 1;
+    (std::memcpy((*st.at)++, &rec, sizeof(Rec)), st.pos = s + 1);
   }
 
   void parse(Local &local, uint32_t block) {
@@ -453,11 +420,8 @@ struct Job {
       if (!bp[h])
         continue;
       last = h;
-      if (h < next_hour) {
-        bad = true;
-        runbufs.push_back(bp[h]);
-      } else
-        runs[h].push_back({bp[h], static_cast<uint32_t>(wp[h] - bp[h])});
+      h < next_hour ? (bad = true, runbufs.push_back(bp[h]))
+                    : runs[h].push_back({bp[h], uint32_t(wp[h] - bp[h])});
     }
     top[block] = last;
     for (++registered; watermark < nblocks && top[watermark] >= 0; ++watermark)
@@ -468,12 +432,8 @@ struct Job {
   void finalize(uint32_t hour) {
     std::vector<Run> mine;
     std::vector<uint16_t> order;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      mine.swap(runs[hour]);
-      std::lock_guard<SpinLock> names_lock(names.mu);
-      order = names.sorted;
-    }
+    (std::lock_guard<std::mutex>(mu), mine.swap(runs[hour]),
+     std::lock_guard<SpinLock>(names.mu), order = names.sorted);
     // by tag: ids, then their 5xx
     uint32_t total = 0, count[2 * kIds] = {}, pos[kIds];
     for (const auto &[rec, n] : mine)
@@ -483,22 +443,17 @@ struct Job {
     uint32_t seen = 0;
     for (const uint16_t id : order) {
       const uint32_t n = count[id] + count[id + kIds];
-      pos[id] = total;
-      total += n;
-      live[seen] = id;
-      seen += n != 0;
+      (pos[id] = total, total += n, live[seen] = id, seen += n != 0);
     }
     std::vector<int32_t> lat = take(latbufs);
-    lat.reserve(1 << 17);
-    lat.resize(total + 16);
+    (lat.reserve(1 << 17), lat.resize(total + 16));
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         lat[pos[rec[i].tag % kIds]++] = rec[i].lat ^ 0x80000000;
 
     static thread_local std::vector<int32_t> scratch;
     std::unique_ptr<char[]> text = take(outbufs);
-    if (!text)
-      text.reset(new char[kPartCap + 256]);
+    text ? 0 : (text.reset(new char[kPartCap + 256]), 0);
     char *out = text.get(), label[22];
     std::snprintf(label, sizeof label, "%sT%02u:00:00Z ",
                   kDays[(hour + 18) / 24], (hour + 18) % 24);
@@ -510,10 +465,9 @@ struct Job {
                                  (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
-      if (scratch.size() < n + 16)
-        scratch.resize(n + 16);
-      multiselect(a, scratch.data(), 0, n, ranks, 3, value);
-      std::memcpy(out, label, 21);
+      scratch.size() < n + 16 ? (scratch.resize(n + 16), 0) : 0;
+      (multiselect(a, scratch.data(), 0, n, ranks, 3, value),
+       std::memcpy(out, label, 21));
       for (uint32_t i = 0; i < 128; i += 32)
         _mm256_storeu_si256((__m256i *)(out + 21 + i), load(names.img[id] + i));
       out += 21 + names.len[id];
@@ -521,16 +475,13 @@ struct Job {
                         uint32_t(value[1]) ^ 0x80000000),
                     uint32_t(value[2]) ^ 0x80000000),
                 errors);
-      out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0);
-      *out++ = '\n';
+      (out = errors ? put(out, uint64_t{errors} * 1000000 / n) : put(out, 0),
+       *out++ = '\n');
     }
     const size_t length = out - text.get();
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      latbufs.push_back(std::move(lat));
-      for (const auto &[rec, n] : mine)
-        runbufs.push_back(rec);
-    }
+    (std::lock_guard<std::mutex>(mu), latbufs.push_back(std::move(lat)));
+    for (std::lock_guard<std::mutex> lock(mu); const auto &[rec, n] : mine)
+      runbufs.push_back(rec);
     emit(hour, {std::move(text), length});
   }
 
@@ -548,20 +499,17 @@ struct Job {
       for (size_t done = 0; done < part.second;) {
         const ssize_t w =
             write(fd, part.first.get() + done, part.second - done);
-        if (w <= 0)
-          fail("write summary");
-        done += w;
+        w <= 0 ? (fail("write summary"), ssize_t(0)) : (done += w);
       }
-      end[written + 1] = end[written] + part.second;
-      if (written + 1 == kHours && ftruncate(fd, end[kHours]))
-        fail("size summary");
+      (end[written + 1] = end[written] + part.second,
+       written + 1 == kHours && ftruncate(fd, end[kHours])
+           ? (fail("size summary"), 0)
+           : 0);
       sync_file_range(fd, end[written], part.second, SYNC_FILE_RANGE_WRITE);
       if (written >= kKeep)
         posix_fadvise(fd, 0, end[written - kKeep + 1], POSIX_FADV_DONTNEED);
-      {
-        std::lock_guard<std::mutex> pool_lock(mu);
-        outbufs.push_back(std::move(part.first));
-      }
+      (std::lock_guard<std::mutex>(mu),
+       outbufs.push_back(std::move(part.first)));
       lock.lock();
     }
     writing = false;
@@ -580,22 +528,17 @@ struct Job {
     for (;;) {
       if (claimable()) {
         const uint32_t hour = next_hour++;
-        cv.notify_all();
-        lock.unlock();
-        finalize(hour);
-        lock.lock();
+        (cv.notify_all(), lock.unlock());
+        (finalize(hour), lock.lock());
       } else if (next_block < nblocks && next_block < watermark + 2 * threads) {
         const uint32_t block = next_block++;
-        lock.unlock();
-        parse(*local, block);
-        lock.lock();
+        (lock.unlock(), parse(*local, block), lock.lock());
       } else if (next_hour >= kHours) {
         lock.unlock(); // drop the file mapping in shared 4 MiB steps so that
                        // exit is cheaper
-        constexpr size_t kStep = 4 << 20;
-        for (size_t at; (at = zapped++ * kStep) < size;)
-          madvise(const_cast<char *>(base) + at, std::min(kStep, size - at),
-                  MADV_DONTNEED);
+        for (size_t at; (at = zapped++ * size_t{4 << 20}) < size;)
+          madvise(const_cast<char *>(base) + at,
+                  std::min(size_t{4 << 20}, size - at), MADV_DONTNEED);
         return;
       } else {
         cv.wait(lock);
@@ -607,10 +550,9 @@ struct Job {
   // Workers start their children before working, so that a dozen threads are up
   // after a few thread creations instead of eleven.
   void start(uint32_t i) {
-    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c) {
-      pool[c] = std::thread([this, c] { start(c); });
-      started.fetch_add(1, std::memory_order_release);
-    }
+    for (uint32_t c = 2 * i + 1; c <= 2 * i + 2 && c < threads; ++c)
+      (pool[c] = std::thread([this, c] { start(c); }),
+       started.fetch_add(1, std::memory_order_release));
     work(i);
   }
   bool run() {
@@ -642,16 +584,14 @@ int main() {
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
            O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
-  if (fd < 0)
-    fail("open summary");
+  fd < 0 ? (fail("open summary"), 0) : 0;
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
   const uint32_t threads =
       forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
-  if (!(new Job(map, bytes, kLag, fd, threads))->run()) {
-    if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
-      fail("rewind summary");
-    (new Job(map, bytes, kNever, fd, threads))->run();
-  }
+  if (!(new Job(map, bytes, kLag, fd, threads))->run())
+    ((ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) ? (fail("rewind summary"), 0)
+                                                 : 0),
+     (new Job(map, bytes, kNever, fd, threads))->run());
   _exit(0); // the kernel reclaims everything faster than free() does
 }
