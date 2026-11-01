@@ -21,18 +21,9 @@ def _load_fast(path):
     import mmap
     with open(path, "rb") as f:
         data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        size = len(data)
-        i = 0
+        tokens = iter(__import__("re").finditer(rb"\\S+", data))
         def number():
-            nonlocal i
-            while i < size and data[i] <= 32:
-                i += 1
-            j = i
-            while j < size and data[j] > 32:
-                j += 1
-            x = int(data[i:j])
-            i = j
-            return x
+            return int(next(tokens).group())
         n, m = number(), number()
         outdeg, indeg = array("I", [0]) * n, array("I", [0]) * n
         for _ in range(m):
@@ -47,8 +38,8 @@ def _load_fast(path):
         del outdeg, indeg
         fc, fw = array("I", [0]) * fp[n], array("I", [0]) * fp[n]
         rc, rw = array("I", [0]) * rp[n], array("I", [0]) * rp[n]
-        i = 0
-        number(); number()
+        tokens = iter(__import__("re").finditer(rb"\\S+", data))
+        next(tokens); next(tokens)
         for _ in range(m):
             u, v, w = number(), number(), number()
             if u == v:
