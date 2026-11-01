@@ -5,6 +5,7 @@ Uses compact forward/reverse CSR arrays, memory-mapped two-pass graph parsing,
 bidirectional Dijkstra, duplicate caching, and touched-node distance resets.
 """
 import os
+import re
 import sys
 from array import array
 from heapq import heappop, heappush
@@ -21,7 +22,7 @@ def _load_fast(path):
     import mmap
     with open(path, "rb") as f:
         data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        tokens = iter(__import__("re").finditer(rb"\\S+", data))
+        tokens = iter(re.finditer(rb"\S+", data))
         def number():
             return int(next(tokens).group())
         n, m = number(), number()
@@ -38,7 +39,7 @@ def _load_fast(path):
         del outdeg, indeg
         fc, fw = array("I", [0]) * fp[n], array("I", [0]) * fp[n]
         rc, rw = array("I", [0]) * rp[n], array("I", [0]) * rp[n]
-        tokens = iter(__import__("re").finditer(rb"\\S+", data))
+        tokens = iter(re.finditer(rb"\S+", data))
         next(tokens); next(tokens)
         for _ in range(m):
             u, v, w = number(), number(), number()
