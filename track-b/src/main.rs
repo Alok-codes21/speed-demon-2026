@@ -396,7 +396,7 @@ impl Units {
     #[inline(never)]
     fn grow(&mut self) {
         self.finish();
-        let c = Vec::<u16>::with_capacity(1 << 15);
+        let c = Vec::<u16>::with_capacity(1 << 17);
         (self.at, self.end) = (c.as_ptr() as usize, c.as_ptr() as usize + 2 * c.capacity());
         self.chunks.push(c);
     }
@@ -418,7 +418,7 @@ impl Units {
 
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
-    let qtext = map("/data/queries.txt");
+    let qtext = map("data/queries.txt");
     let n = (qtext.len() / 8).next_power_of_two().max(4);
     // Mapped on its own and handed back after the scan. Every token's lookup
     // lands on a random line of it, so it is put on 2 MB pages (one TLB entry
@@ -455,7 +455,7 @@ fn main() {
         })
         .collect();
     let nterms = terms.n;
-    let text = map("/data/docs.txt");
+    let text = map("data/docs.txt");
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
     for c in &mut cut[1..THREADS] {
         while *c < text.len() && text[*c - 1] != b'\n' {
@@ -670,7 +670,7 @@ fn main() {
         }
         *chunk.lock().unwrap() = out;
     });
-    let file = std::fs::File::create("/out/results.txt").expect("/out/results.txt");
+    let file = std::fs::File::create("out/results.txt").expect("out/results.txt");
     let mut out = std::io::BufWriter::new(file);
     for c in chunks {
         std::io::Write::write_all(&mut out, c.into_inner().unwrap().as_bytes()).unwrap();
