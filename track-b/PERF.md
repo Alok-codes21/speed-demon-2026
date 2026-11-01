@@ -982,3 +982,12 @@ the fault theory is dead and B is at its plateau.
 - Measured locally (1 vCPU): munmap count ~unchanged (444; ~384 of them are the single first chunk of each non-empty Units, 32 buckets x 12 threads - the chunk growth was only ~15% of the calls), ABBA neutral (v114 min 0.400 vs v113 min 0.396). The board trial decides the VM-lock/TLB half; the per-thread pre-reserved region (one release per thread) is the follow-up if it fires.
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
 - 680 lines, unchanged. Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best.
+
+## Step 71: postings arena - no mmap/munmap after the scan starts (Claude, from our strace + phase profile)
+
+- Root cause (Claude, confirmed by our strace: 441 munmap + 492 mmap per full run): mallopt(M_MMAP_THRESHOLD, 64 KB) makes every Units chunk its own mmap and every consumed chunk a munmap at scatter; each takes the process VM lock for writing while 12 threads page-fault, and each munmap sends TLB shootdowns to every core - a cost invisible to CPU profiles and to a 1-vCPU box.
+- One NORESERVE anonymous region (2x corpus bytes + 384 x 256 KB, a proven bound: a token writes at most 4 bytes of units and needs at least 2 bytes of text) mapped before the scan; Units::grow bumps an atomic pointer (~400 fetch_adds total); chunks become &'static [u16]; each chunk is madvise(DONTNEED) right after the scatter reads it, in parallel (madvise takes the VM lock for READING). Term-table munmap moved out of the scan's shadow too.
+- strace after: mmap 495 -> 112, munmap 444 -> 60 (rest is startup/teardown); 399 parallel madvise(DONTNEED).
+- Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites. No new threading (same joins; chunks disjoint by fetch_add, read after the scan join) - TSAN not applicable.
+- Bench (1 vCPU, 4-pair ABBA interleaved mins): v114 0.391 vs v115 0.377 (-3.6%) - and this is the box that cannot show the VM-lock/TLB half, so the board should show more.
+- +20 lines (700 vs 680) = -0.32 pts of S; the T gain prices it in. Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best.
