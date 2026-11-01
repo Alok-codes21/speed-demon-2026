@@ -41,10 +41,8 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
-
 using u32 = uint32_t;
 using u64 = uint64_t;
-// Real distances stay below 2^53, so INF plus any distance cannot wrap.
 static constexpr u64 INF = u64(1) << 62;
 using Escapes =
     std::vector<std::pair<u32, u64>>; // slot -> weight too large to pack
@@ -54,9 +52,6 @@ static bool test(const Bits &bits, u32 v) {
 }
 [[noreturn]] static void fail(const char *what) { perror(what), std::exit(2); }
 static void set(Bits &bits, u32 v) { bits[v >> 6] |= u64(1) << (v & 63); }
-
-// Uninitialized, lazily faulted storage, so memory is committed only where it
-// is written.
 template <class T> struct Array {
   T *p = nullptr;
   size_t bytes = 0;
@@ -67,7 +62,6 @@ template <class T> struct Array {
     if (q == MAP_FAILED)
       fail("mmap");
     p = static_cast<T *>(q);
-    // Partly used arrays would round up to whole huge pages.
     if (sparse)
       madvise(q, bytes, MADV_NOHUGEPAGE);
   }
@@ -87,7 +81,6 @@ template <class T> struct Array {
   T &operator[](size_t i) { return p[i]; }
   const T &operator[](size_t i) const { return p[i]; }
 };
-
 template <class F> static void parallel(unsigned threads, F &&f) {
   std::vector<std::thread> pool;
   for (unsigned i = 1; i < threads; ++i)
@@ -96,29 +89,20 @@ template <class F> static void parallel(unsigned threads, F &&f) {
   for (auto &t : pool)
     t.join();
 }
-
 static unsigned id_bits(u64 n) {
   unsigned bits = 1;
   while (bits < 32 && (u64(1) << bits) < n)
     ++bits;
   return bits;
 }
-
 static void merge(Escapes &into, std::vector<Escapes> &parts) {
   for (auto &e : parts)
     into.insert(into.end(), e.begin(), e.end());
   std::sort(into.begin(), into.end());
 }
-
-// The slice [n * t / threads, n * (t + 1) / threads) of worker t.
 static u32 cut(size_t n, unsigned t, unsigned threads) {
   return u32(n * t / threads);
 }
-
-// ---------------------------------------------------------------- parsing
-
-// Bit i is set when p[i] is a separator (space or LF), the only bytes below
-// '0'.
 static u64 separators(const char *p) {
   u64 m = 0;
   for (int k = 0; k < 4; ++k) {
@@ -128,9 +112,6 @@ static u64 separators(const char *p) {
   }
   return m;
 }
-
-// Value of the digits [a, b). Short numbers are read as the 8 bytes ending at
-// b, leading bytes masked off.
 static u32 decimal(const char *a, const char *b, const char *lo) {
   size_t len = size_t(b - a);
   if (len > 8 || b - lo < 8) {
@@ -147,9 +128,6 @@ static u32 decimal(const char *a, const char *b, const char *lo) {
               ((x >> 16) & m) * 0x0000271000000001ull) >>
              32);
 }
-
-// Calls emit(u, v, w) for every line in [begin, end); both are line starts
-// within the file [lo, hi).
 template <class Emit>
 static void parse_lines(const char *lo, const char *hi, const char *begin,
                         const char *end, Emit &&emit) {
@@ -178,7 +156,6 @@ static void parse_lines(const char *lo, const char *hi, const char *begin,
     }
   }
 }
-
 static u32 scan(const char *&p) {
   u32 v = 0;
   while (*p >= '0')
@@ -186,18 +163,11 @@ static u32 scan(const char *&p) {
   ++p;
   return v;
 }
-
-// A bin entry packs the tail's low bits with the head and keeps 16 weight bits,
-// so it takes 6 bytes; heavier weights store the all-ones marker and live in
-// the binner's sorted side table.
 struct __attribute__((packed)) Entry {
   u32 key;
   uint16_t w;
 };
 using Run = std::pair<const Entry *, u32>;
-
-// One thread's edges partitioned by u >> shift into short chunk runs, so each
-// bucket can be built in cache.
 class alignas(64) Binner { // aligned for the same reason as Region
   static constexpr u32 CHUNK = 256;
   Array<Entry> pool_;
@@ -211,7 +181,6 @@ class alignas(64) Binner { // aligned for the same reason as Region
       runs_[b].push_back(
           {limit_[b] - CHUNK, u32(fill_[b] - limit_[b] + CHUNK)});
   }
-
 public:
   Binner(unsigned shift, unsigned bits, size_t buckets, size_t edges)
       : pool_(edges + (buckets + 1) * CHUNK, true), fill_(buckets),
@@ -249,13 +218,6 @@ public:
         f(r.first[i]);
   }
 };
-
-// ---------------------------------------------------------------- graphs
-
-// Adjacency in 4-slot rows of packed edges (head in the high bits, weight in
-// the low bits), so visiting a vertex costs one cache miss. A vertex with more
-// than four edges keeps three inline and a spill code in the fourth slot that
-// locates a counted list after the rows.
 struct Rows {
   static constexpr u32 EMPTY = ~0u;
   Array<u32> slot;
@@ -287,8 +249,6 @@ struct Rows {
       fresh.push_back({u32(i), w});
     slot[i] = v << wbits | u32(std::min<u64>(w, mask));
   }
-  // Empties u's row and, for more than four edges, reserves its list from the
-  // caller's chunk.
   void open(u32 u, u32 degree, Cursor &c) {
     u32 *r = &slot[size_t(u) * 4];
     r[0] = r[1] = r[2] = r[3] = EMPTY;
@@ -304,8 +264,6 @@ struct Rows {
     c.at += degree - 2;
   }
   size_t list(u32 code) const { return size_t(n) * 4 + (code - spill); }
-  // Slot of u's k-th edge once the row is open; the fourth slot holds a spill
-  // code only for long rows.
   size_t at(u32 u, u32 k) const {
     u32 code = slot[size_t(u) * 4 + 3];
     return k < 3 || code < spill || code == EMPTY ? size_t(u) * 4 + k
@@ -326,9 +284,6 @@ struct Rows {
     }
   }
 };
-
-// Builds the raw rows one tail bucket at a time in cache and marks bypassable
-// vertices: out-degree <= 2 and not a query endpoint.
 static void fill_rows(const std::vector<Binner> &bins, unsigned shift,
                       const Bits &terminal, Rows &raw, Bits &bypass,
                       unsigned threads) {
@@ -360,24 +315,12 @@ static void fill_rows(const std::vector<Binner> &bins, unsigned shift,
   });
   merge(raw.escapes, escapes);
 }
-
-// ---------------------------------------------------------------- fused
-// contraction, ordering and gathering
-
-// One worker's share of the search order: vertices in discovery order and their
-// surviving out-edges. Aligned: each worker updates its region's counters
-// constantly, so regions must not share cache lines.
 struct alignas(64) Region {
   Array<u32> order, ends,
       out;         // out holds raw heads with weights packed as in the raw rows
   Escapes escapes; // keyed by position in out
   u32 len = 0, edges = 0;
 };
-
-// Concurrent BFS regions over the raw graph. Expanding a vertex follows each
-// out-edge through bypassable vertices (one way on, not back) to the first
-// survivor, so contraction, ordering and gathering share one pass. Walks of a
-// batch advance one hop per round, so their cache misses overlap.
 class Grower {
   static constexpr u32 BATCH = 32;
   struct Walk {
@@ -391,11 +334,6 @@ class Grower {
   Region &reg;
   std::vector<Walk> walks_;
   u64 sink_ = 0;
-
-  // A private bitmap answers most checks, since a region mostly meets its own
-  // vertices. Claims race without locked instructions: a vertex claimed twice
-  // leaves a copy that no forward edge reaches, as heads resolve through a
-  // single map entry, so it is never on a shortest path.
   void claim(u32 z) {
     u64 bit = u64(1) << (z & 63), *word = &claimed[z >> 6];
     if (mine_[z >> 6] & bit)
@@ -403,7 +341,6 @@ class Grower {
     mine_[z >> 6] |= bit;
     u64 seen = __atomic_load_n(word, __ATOMIC_RELAXED);
     bool fresh = !(seen & bit);
-    // Shared lines are written only by claims.
     __atomic_store_n(fresh ? word : &sink_, seen | bit, __ATOMIC_RELAXED);
     reg.order[reg.len] = z;
     reg.len += fresh;
@@ -413,7 +350,6 @@ class Grower {
       reg.escapes.push_back({pos, w});
     reg.out[pos] = z << raw.wbits | u32(std::min<u64>(w, raw.mask));
   }
-  // Advances a walk one hop; returns false once its edge is final.
   bool step(Walk &w) {
     const u32 *r = &raw.slot[size_t(w.at) * 4]; // at most two edges
     u32 ahead = 0, next = w.at, which = 0;
@@ -422,8 +358,6 @@ class Grower {
       if (h != w.prev && h != w.at)
         ++ahead, next = h, which = k;
     }
-    // A branch ends the walk at a surviving vertex; a useless walk becomes a
-    // self-loop.
     if (ahead > 1)
       next = w.at;
     else if (ahead == 0 || next == w.root)
@@ -456,12 +390,9 @@ class Grower {
       __builtin_prefetch(&raw.slot[size_t(y) * 4]);
     });
   }
-
 public:
   Grower(const Rows &r, const Bits &b, Bits &c, Region &g)
       : raw(r), bypass(b), claimed(c), mine_(c.size()), reg(g) {}
-
-  // Grows a region from z unless z is already claimed.
   void grow(u32 z) {
     u32 lo = reg.len;
     claim(z);
@@ -484,18 +415,13 @@ public:
     }
   }
 };
-
 struct Graph {
   std::unique_ptr<Rows> fwd, rev;
   size_t edges = 0;
 };
-
 struct Query {
   u32 from, to;
 };
-
-// Grows the regions, concatenates them into the forward rows and renames the
-// query endpoints.
 static Graph build_forward(Rows &raw, const Bits &bypass, size_t m,
                            unsigned threads, std::vector<Query> &queries) {
   u32 n = raw.n;
@@ -508,8 +434,6 @@ static Graph build_forward(Rows &raw, const Bits &bypass, size_t m,
     reg.ends = Array<u32>(n, true);
     reg.out = Array<u32>(m, true);
     Grower grower(raw, bypass, claimed, reg);
-    // Seeds are the unclaimed survivors of this worker's raw-id slice, so idle
-    // workers start new regions.
     for (u32 x = cut(n, t, threads); x < cut(n, t + 1, threads); ++x)
       if (!test(bypass, x))
         grower.grow(x);
@@ -517,8 +441,6 @@ static Graph build_forward(Rows &raw, const Bits &bypass, size_t m,
   raw.slot.release();
   Array<u32> where(n); // raw id -> region << lbits | position
   parallel(threads, [&](unsigned t) {
-    // A vertex listed twice is named by whichever entry lands last,
-    // consistently for every head.
     for (u32 i = 0; i < regions[t].len; ++i)
       __atomic_store_n(&where[regions[t].order[i]], t << lbits | i,
                        __ATOMIC_RELAXED);
@@ -555,9 +477,6 @@ static Graph build_forward(Rows &raw, const Bits &bypass, size_t m,
     q = {locate(where[q.from]), locate(where[q.to])};
   return g;
 }
-
-// Transposes the forward rows. Each worker owns an id slice; in-edges from
-// other slices go through inboxes.
 static void add_reverse(Graph &g, unsigned threads) {
   const Rows &fwd = *g.fwd;
   u32 n = fwd.n;
@@ -616,9 +535,6 @@ static void add_reverse(Graph &g, unsigned threads) {
   });
   merge(rev.escapes, escapes);
 }
-
-// Maps a whole file read-only; the mapping lives until exit and its pages
-// belong to the page cache.
 static const char *map_file(const std::string &path, size_t &size) {
   int fd = open(path.c_str(), O_RDONLY);
   struct stat st {};
@@ -630,7 +546,6 @@ static const char *map_file(const std::string &path, size_t &size) {
     fail("mmap");
   return static_cast<const char *>(q);
 }
-
 static std::vector<Query> read_queries(const std::string &path) {
   size_t size;
   const char *p = map_file(path, size);
@@ -641,7 +556,6 @@ static std::vector<Query> read_queries(const std::string &path) {
   }
   return result;
 }
-
 static Graph read_graph(const std::string &path, std::vector<Query> &queries,
                         unsigned threads) {
   size_t size;
@@ -679,12 +593,6 @@ static Graph read_graph(const std::string &path, std::vector<Query> &queries,
   Graph g = build_forward(raw, bypass, m, threads, queries);
   return g;
 }
-
-// ---------------------------------------------------------------- queries
-
-// Monotone queue: width 2^shift buckets in a ring; larger jumps wait in a
-// binary heap. push writes unconditionally and counts the entry only when
-// `take`, so relaxations need no branch.
 struct Queue {
   static constexpr unsigned B = 2048, SHIFT_MAX = 7;
   struct Bucket {
@@ -731,8 +639,6 @@ struct Queue {
     occupied[b >> 6] |= u64(take) << (b & 63);
     near += take;
   }
-  // Moves cur to the first nonempty bucket and returns its smallest possible
-  // key; INF if empty.
   u64 lower_bound() {
     if (near) {
       unsigned b = cur & (B - 1), w = b >> 6;
@@ -750,17 +656,12 @@ struct Queue {
     return cur << shift;
   }
 };
-
-// Distances in fixed pages materialized on first write and recycled per query,
-// so memory tracks the search.
 class Distances {
   static constexpr unsigned SHIFT = 7, SIZE = 1u << SHIFT;
   std::vector<u64 *> dir_;
   std::vector<u32> used_;
   Array<u64> store_; // pages are handed out in order, so only the deepest
-                     // search's pages are touched
   std::array<u64, SIZE> blank_;
-
 public:
   explicit Distances(u32 n)
       : dir_((n >> SHIFT) + 1), store_(dir_.size() * SIZE, true) {
@@ -769,8 +670,6 @@ public:
   }
   const u64 *at(u32 v) const { return dir_[v >> SHIFT] + (v & (SIZE - 1)); }
   u64 get(u32 v) const { return *at(v); }
-  // A writable label for v; a page is materialized first, as any finite
-  // distance improves a blank one.
   u64 *slot(u32 v) {
     u64 *&p = dir_[v >> SHIFT];
     if (p == blank_.data()) {
@@ -786,7 +685,6 @@ public:
     used_.clear();
   }
 };
-
 struct Side {
   static constexpr u32 LOOK = 4;
   const Rows &g;
@@ -799,9 +697,6 @@ struct Side {
     *dist.slot(s) = 0;
     queue.push(0, s);
   }
-  // Settles the current bucket, FIFO so entries are prefetched before
-  // expansion, and returns how many vertices it expanded. Relaxations are
-  // branch-free: nd + other(v) is a real path length either way.
   size_t drain(const Side &other, u64 &best) {
     Queue::Bucket &bk = queue.bucket[queue.cur & (Queue::B - 1)];
     const u64 base = queue.cur << queue.shift;
@@ -834,9 +729,6 @@ struct Side {
     return count;
   }
 };
-
-// Exact forward probe, then bidirectional Dijkstra balancing settled vertices;
-// stops once f + b >= best.
 struct Worker {
   static constexpr size_t PROBE = 256;
   Side fwd, bwd;
@@ -873,14 +765,13 @@ struct Worker {
     return best == INF ? -1 : int64_t(best);
   }
 };
-
 int main() {
   const char *env_data = getenv("SD_DATA");
   const char *env_out = getenv("SD_OUT");
   std::string data = env_data ? env_data : "/data",
               out = env_out ? env_out : "/out";
   unsigned threads =
-      std::min(12u, std::max(1u, std::thread::hardware_concurrency()));
+      std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
   if (getenv("SD_THREADS"))
     threads = std::max(1, std::min(64, atoi(getenv("SD_THREADS"))));
   std::vector<Query> queries = read_queries(data + "/queries.txt");
@@ -907,5 +798,4 @@ int main() {
   if (!f || fwrite(text.data(), 1, text.size(), f) != text.size() || fclose(f))
     fail("distances");
   std::exit(0); // skips destructors of the large arrays; still flushes profiles
-                // for PGO builds
 }
