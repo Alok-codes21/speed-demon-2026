@@ -1138,3 +1138,15 @@ Every step from the reference to your final version, each with the live-board ru
   79.2687 pts. T sits inside the v164 same-hour band 0.0282-0.0288, so HUGEPAGE
   is neutral-to-tiny-positive and the line is kept. Banked best stands at
   79.6090 (run-c97f6a1a8a95).
+
+## Step 111 - v171: ChatGPT candidate 1 (hit-before-free-slot, conditional 2nd load)
+- Source: ChatGPT (project chat, rajualok862 account) wrote a full c_join.cpp with
+  two narrow hot-path changes vs v170: NameTable::id checks the hit before the
+  free-slot SIMD mask; find() skips the second 32-byte delimiter load when the
+  delimiter is in the first window. ChatGPT's estimate: 0.026-0.028 s.
+- Gates: full seed-1 sha256 d8088b1c... exact; 6/6 fixtures; TSAN clean (hash
+  exact under TSAN). Local box: 0.0952 s vs v170's 0.0959 s (noise).
+- Run run-d54eabd3ea8f (commit 777be7345e): T 0.028814 s, M 9.29 MB, S 408,
+  79.1427 pts. T at the top of the v170 band 0.0283-0.0287 with box drift normal
+  (median latest/best 1.014); S +4 lines is the only clear cost. Second sample
+  via this doc push; revert to v170 if the band does not improve.
