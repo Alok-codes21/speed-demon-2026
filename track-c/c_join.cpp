@@ -45,13 +45,12 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
     for (int t = 0; t < 4; t++)
       snap[t] = __atomic_load_n(&NT[idx + t], __ATOMIC_ACQUIRE);
     __m256i v = _mm256_load_si256((const __m256i *)snap);
-    uint32_t hit = _mm256_movemask_pd(_mm256_castsi256_pd(
-        _mm256_cmpeq_epi64(v, _mm256_set1_epi64x(h))));
-    if (hit)
+    if (uint32_t hit = _mm256_movemask_pd(_mm256_castsi256_pd(
+            _mm256_cmpeq_epi64(v, _mm256_set1_epi64x(h)))))
       return idx + __builtin_ctz(hit);
-    uint32_t free = _mm256_movemask_pd(_mm256_castsi256_pd(
-        _mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
-    for (; free; free &= free - 1) {
+    for (uint32_t free = _mm256_movemask_pd(_mm256_castsi256_pd(
+             _mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
+         free; free &= free - 1) {
       uint32_t j = idx + __builtin_ctz(free);
       if (__sync_bool_compare_and_swap(&NT[j], 0, h) ||
           __atomic_load_n(&NT[j], __ATOMIC_ACQUIRE) == h)
@@ -66,8 +65,8 @@ static inline uint32_t intern_name(uint64_t h, uint32_t idx) {
 // unconditional. The result is never 0 (0 marks a free slot).
 static inline uint64_t hs(const char *s, uint32_t len) {
   static const signed char KEEP[32] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
-  __m128i head = _mm_loadu_si128((const __m128i *)s);
-  head = _mm_and_si128(head, _mm_loadu_si128((const __m128i *)(KEEP + 16 - std::min(len, 16u))));
+  __m128i head = _mm_and_si128(_mm_loadu_si128((const __m128i *)s),
+      _mm_loadu_si128((const __m128i *)(KEEP + 16 - std::min(len, 16u))));
   uint64_t h = ((uint64_t)_mm_cvtsi128_si64(head) * 0x9E3779B97F4A7C15ULL ^ len) +
                (uint64_t)_mm_extract_epi64(head, 1) * 0xBF58476D1CE4E5B9ULL;
   for (uint32_t i = 16; i < len; i += 8) {
@@ -90,9 +89,8 @@ static inline uint64_t hs(const char *s, uint32_t len) {
 // zero byte of the 8 bytes at p XOR ','.
 static inline const char *comma_after(const char *p) {
   uint64_t x;
-  memcpy(&x, p, 8);
-  x ^= 0x2C2C2C2C2C2C2C2CULL;
-  return p + __builtin_ctzll((x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL) / 8;
+  return memcpy(&x, p, 8), x ^= 0x2C2C2C2C2C2C2C2CULL,
+         p + __builtin_ctzll((x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL) / 8;
 }
 
 // The value of the last n (1..8) digit bytes in v (first byte is lowest).
@@ -105,24 +103,15 @@ static inline uint64_t fold(uint64_t v, uint32_t n) {
 // The 1..8 decimal digits in [s, e): one overlapping 8-byte load.
 static inline uint64_t digits(const char *s, const char *e) {
   uint64_t w;
-  memcpy(&w, e - 8, 8);
-  return fold(w, (uint32_t)(e - s));
+  return memcpy(&w, e - 8, 8), fold(w, (uint32_t)(e - s));
 }
 // Amount in cents from [s, e), dot third from the end: at most 7 digits, so
 // the 8 bytes ending at e with the dot's byte dropped are one number.
 static inline uint64_t money(const char *s, const char *e) {
   uint64_t w;
-  memcpy(&w, e - 8, 8);
-  return fold((w & 0xFFFFFFFFFFULL) << 8 | (w & 0xFFFF000000000000ULL),
+  return memcpy(&w, e - 8, 8),
+         fold((w & 0xFFFFFFFFFFULL) << 8 | (w & 0xFFFF000000000000ULL),
               (uint32_t)(e - s - 1));
-}
-
-// field-width integer ending at term; consumes the terminator
-static inline uint64_t num(const char *&p, char term) {
-  uint64_t v = 0;
-  while (*p != term)
-    v = v * 10 + (*p++ - '0');
-  return p++, v;
 }
 
 // ---------------------------------------------------------------- regions.csv
@@ -281,8 +270,8 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       uint32_t reg = (uint32_t)digits(p, f4);
       const char *amt = f4 + 1, *eol = lf ? p + __builtin_ctz(lf) : end,
                  *ae = eol - (eol[-1] == '\r');
-      int64_t neg = *amt == '-', cents = money(amt + neg, ae);
-      cents = neg ? -cents : cents;
+      int64_t neg = *amt == '-', cents = neg ? -(int64_t)money(amt + neg, ae)
+                                             : (int64_t)money(amt + neg, ae);
       __builtin_prefetch(&R2C[reg < 1000000 ? reg : 0]);
       adv();
       pend[n++ & 15] = {nh, id, cents, slot, reg, nm.length, nt.length};
