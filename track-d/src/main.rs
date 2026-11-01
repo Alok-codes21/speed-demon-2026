@@ -392,13 +392,16 @@ fn main() {
     let mut radj = vec![0u32; m];
     let rar = Raw::of(&mut radj);
     let mut rheavy: Vec<(u32, u32)> = on_threads(nt, |t| {
+        let r = share(n, t, nt);
         let mut out = Vec::new();
-        for u in share(n, t, nt) {
+        let mut hi = heavy2.partition_point(|h| h.0 < off[r.start]);
+        for u in r {
             for e in off[u]..off[u + 1] {
                 let x = adj[e as usize];
                 let j = bump((x & hmask) as usize);
                 if x >> hb == big {
-                    out.push((j, heavy_weight(&heavy2, e)));
+                    out.push((j, heavy2[hi].1));
+                    hi += 1;
                 }
                 unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
             }
