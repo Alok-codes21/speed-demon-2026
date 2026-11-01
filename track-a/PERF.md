@@ -65,3 +65,5 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-f80da880e9c2 | ffe639ad | 0.020305 | 19.99 | 514 | 83.098319 | Re-run on unchanged Track A source |
 | run-63147f00590e | 67d7e9b3 | 0.016996 | 20.50 | 514 | 84.919136 | New Track A best (was 84.857344); re-run on unchanged source |
 | run-73be56343137 | d9735b25 | 0.019802 | 20.78 | 514 | 83.201738 | Re-run on unchanged Track A source |
+| run-48889ed72c17 | 067aa448 | 0.019172 | 20.28 | 514 | 83.659365 | Re-run on unchanged Track A source |
+| run-f2907f83d9ad | 3983b60e | 0.022235 | 25.04 | 514 | 81.135566 | Re-run on unchanged Track A source; M spike +4.7 MB vs typical |
