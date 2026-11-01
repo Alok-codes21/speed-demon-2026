@@ -889,3 +889,8 @@ the fault theory is dead and B is at its plateau.
 - Adoption is verbatim + the MIT credit header (comments do not count for S). Expected S 577 (from 654): the S factor alone is worth ~+1.9% of K, and M 43.8 hits the 44 MB cap for ~+1.7%.
 - Gated: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact. Local (1-vCPU rig, indicative): median ~0.63 s vs v62 ~0.70 s.
 - Revert rule: if the board reads materially worse than v62 (T > 0.175, or M back over ~48 MB), restore v62 (step-55 file).
+
+## Step 57: v90 board results (two runs) + re-roll (this push)
+
+- v90 runs: run-9bd9b932424c T 0.165647, M 45,768,704 B, pts 74.095673 (banked best, #9 on B); run-91f25be45625 T 0.166093, M 45,867,008 B, pts 74.057161. Both T draws beat v62's best (0.168961) - the step-57 engine is genuinely faster.
+- This PERF-only commit re-rolls the M lottery; code unchanged from step 56.
