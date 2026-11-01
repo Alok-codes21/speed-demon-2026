@@ -1,0 +1,11 @@
+# Traverse
+
+Exact directed shortest paths on a road-like graph, built for the end-to-end clock: parse, preprocess, answer, write. Every phase uses all workers (`SD_THREADS`, default up to twelve).
+
+1. **Parse.** `graph.txt` is mmapped and cut at line boundaries per worker. Each 64-byte block yields a separator bitmask (SSE2); every number is decoded from the 8 bytes ending at its separator. Edges go to 6-byte bin entries keyed by the tail's bucket of ids; weights of 65535 or more keep a marker and live in a side table.
+2. **Raw graph.** Each bucket is turned into compressed rows in cache (packed `head << wbits | weight` words, oversized weights in a sorted escape table). All workers' bins share one pool laid out by group of buckets; each group is unmapped (one call) as soon as its rows exist, so the bins shrink while the graph grows. Out-degree <= 2 vertices that are not query endpoints are marked bypassable.
+3. **Contraction and ordering, fused.** Workers grow breadth-first regions from unclaimed survivors of their id slices. Expanding a vertex follows each out-edge through bypassable vertices (one way on, never back) to the first survivor, so degree-2 contraction, locality ordering and edge gathering are one pass. Walks of a batch advance one hop per round with a two-stage prefetch (offsets, then edges), so their misses overlap. Claims use plain stores: a vertex claimed twice leaves a copy with no in-edges, because every head resolves through one map entry.
+4. **Reverse graph.** Forward edges are binned by head and built by the same bucket builder as the raw graph.
+5. **Queries** run on independent workers in order of source id: an exact 256-vertex forward probe, then bidirectional Dijkstra balancing settled counts and stopping when the two queue fronts sum to the best meeting. The queue is a ring of width-128 buckets (heap for far jumps), drained FIFO with lookahead prefetch. Labels are 32-bit, in 128-entry pages materialized on first write; a query whose distances reach 2^32 - 1 is recomputed with 64-bit labels. Relaxations are branch-free.
+
+Exactness covers zero weights, parallel and duplicate edges, self-loops, isolated and unreachable vertices, and 64-bit sums. No third-party runtime dependencies.
