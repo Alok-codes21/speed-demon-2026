@@ -1,19 +1,19 @@
 # Track D: Traverse
 
-This Track D implementation is adapted from the MIT-licensed Rust solution in [manusingh090/speed-demon-2026-entry](https://github.com/manusingh090/speed-demon-2026-entry), with attribution retained in `src/main.rs`. The upstream approach is used as a substantial optimization reference; its reported timings are not claimed as measurements of this repository.
+This submission is implemented in **Python 3.13 using only the standard library**. The supplied reference repository, [manusingh090/speed-demon-2026-entry](https://github.com/manusingh090/speed-demon-2026-entry), is used only as an optimization reference; its Rust implementation is not included or used at runtime.
 
-## Approach
+## Python approach
 
-- Parse the graph once from a memory-mapped file using parallel workers.
-- Build compact, packed adjacency data in node-range partitions.
-- Reorder nodes into small locality-friendly BFS blobs.
-- Build a reverse graph and answer queries with bidirectional Dijkstra.
-- Use compact 4-ary heaps and lazily allocated distance pages.
+- Build forward and reverse compressed sparse row (CSR) adjacency.
+- Answer queries with bidirectional Dijkstra and a lower-bound stopping rule.
+- Preserve input query order and output order.
+- Skip self-loops, cache duplicate query answers, and use low-degree shortcuts.
+- Reset only nodes touched by each search and buffer the output.
 
 ## Dependencies
 
-No Rust crates. Uses the Rust standard library and Linux/POSIX memory mapping interfaces.
+None. Python standard library only.
 
 ## Validation status
 
-The code has been integrated, but this repository's full official Docker/hash benchmark has not yet been run. Check the sample and full datasets before treating the result as verified.
+The Python implementation is restored. Official sample/full output hash checks and leaderboard benchmarks still need to be run; no runtime or rank improvement is claimed until measured.
