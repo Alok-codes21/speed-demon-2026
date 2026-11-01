@@ -35,6 +35,8 @@ use std::sync::{Barrier, Mutex, OnceLock};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
     fn _exit(status: i32) -> !;
@@ -104,17 +106,15 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
 // the hash points into: a 32-byte compare finds the term or the first free
 // slot, which is where it would have been inserted.
 struct Terms {
-    slot: Vec<u64>,
-    base: usize,
-    len: usize,
+    slot: &'static mut [u64],
     n: usize,
 }
 
 impl Terms {
     fn find(&self, h: u64) -> u32 {
-        let (mask, mut i) = (self.len - 1, h as usize & (self.len - 4));
+        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 4));
         unsafe {
-            let p = self.base as *const u64;
+            let p = self.slot.as_ptr();
             let (tag, keep) = (
                 _mm256_set1_epi64x((h & !ID_MASK) as i64),
                 _mm256_set1_epi64x(!ID_MASK as i64),
@@ -134,18 +134,14 @@ impl Terms {
     }
 
     fn renumber(&mut self, new: &[u32]) {
-        for i in 0..self.len {
-            let s = unsafe { &mut *(self.base as *mut u64).add(i) };
-            if *s != 0 {
-                *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
-            }
+        for s in self.slot.iter_mut().filter(|s| **s != 0) {
+            *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
         }
     }
 
-    fn insert(&mut self, term: &[u8]) -> u32 {
-        let h = unsafe { hash(term.as_ptr(), term.len()) };
-        let (mask, mut i) = (self.len - 1, h as usize & (self.len - 4));
-        let p = self.base as *mut u64;
+    fn insert(&mut self, h: u64) -> u32 {
+        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 4));
+        let p = self.slot.as_mut_ptr();
         unsafe {
             while *p.add(i) != 0 {
                 if *p.add(i) >> ID_BITS == h >> ID_BITS {
@@ -173,10 +169,11 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
+// The ids of the document at p, appended to ids after LAG throwaway ones.
+const LAG: usize = 8;
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
-    const LAG: usize = 8;
     let mut ring = [0u64; LAG];
-    let (mut n, mut out, mask) = (0usize, ids.len(), t.len - 1);
+    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
         (ids.set_len(out), ids.reserve(32 + LAG));
         let buf = ids.as_mut_ptr();
@@ -205,14 +202,12 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             }
             m &= m.wrapping_add(m & m.wrapping_neg());
             let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { 0 };
-            _mm_prefetch::<_MM_HINT_T0>((t.base as *const u8).add((h as usize & mask) << 3).cast());
-            if n >= LAG {
-                look(&ring[n % LAG]);
-            }
+            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            look(&ring[n % LAG]);
             (ring[n % LAG], n) = (h, n + 1);
         }
         if nl != 0 {
-            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
+            (n..n + LAG).for_each(|i| look(&ring[i % LAG]));
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
@@ -362,7 +357,7 @@ fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32,
             ids.clear();
             p = tokens(p, t, &mut ids, pre);
         }
-        (f(doc, &ids), doc += 1);
+        (f(doc, &ids[LAG..]), doc += 1);
     }
     doc - first
 }
@@ -408,13 +403,22 @@ impl Units {
 }
 
 fn main() {
-    unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
+    unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
-    let mut slot = vec![0u64; (qtext.len() / 8).next_power_of_two() + 8];
-    let len = slot.len() - 8;
-    let addr = slot.as_mut_ptr() as usize;
-    let base = addr + (32 - (addr & 31) & 31);
-    let mut terms = Terms { slot, base, len, n: 0 };
+    let n = (qtext.len() / 8).next_power_of_two().max(4);
+    // Mapped on its own and handed back after the scan. Every token's lookup
+    // lands on a random line of it, so it is put on 2 MB pages (one TLB entry
+    // instead of 512), faulted in before huge pages are turned off for the rest,
+    // where a page written only in part would cost memory.
+    let slot = unsafe {
+        let len = (n * 8).next_multiple_of(1 << 21);
+        let raw = mmap(std::ptr::null_mut(), len + (1 << 21), 3, 0x22, -1, 0);
+        let p = raw.add(raw.align_offset(1 << 21));
+        (madvise(p, len, 14), std::ptr::write_volatile(p, 0));
+        prctl(41, 1u64, 0u64, 0u64, 0u64);
+        std::slice::from_raw_parts_mut(p.cast(), n)
+    };
+    let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let (phrase, from) = (q[0] == b'P', ids.len() as u32);
@@ -422,11 +426,20 @@ fn main() {
         for (k, word) in q[start..q.len() - phrase as usize].split(|&b| b == b' ').enumerate() {
             match !phrase && k % 2 == 1 {
                 true => *ops.last_mut().unwrap() = word[0],
-                false => (ids.push(terms.insert(word)), ops.push(0)).1,
+                false => (ids.push(unsafe { hash(word.as_ptr(), word.len()) }), ops.push(0)).1,
             }
         }
         spans.push((phrase, from, ids.len() as u32));
     }
+    // The terms' hashes come first, so each insert's slot is fetched 16 ahead.
+    let slot = terms.slot.as_ptr();
+    let mut ids: Vec<u32> = (0..ids.len())
+        .map(|k| {
+            let ahead = ids.get(k + 16).map_or(0, |&h| h as usize & (terms.slot.len() - 4));
+            unsafe { _mm_prefetch::<_MM_HINT_T0>(slot.add(ahead).cast()) };
+            terms.insert(ids[k])
+        })
+        .collect();
     let nterms = terms.n;
     let text = map("/data/docs.txt");
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
@@ -557,7 +570,7 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    drop(terms);
+    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 8) };
 
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
