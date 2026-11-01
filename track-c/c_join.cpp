@@ -223,6 +223,12 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
     uint32_t slot, reg, name_len, note_len;
   } pend[16]; // 16-record deferral ring
   struct Mk { uint32_t c, bnid; } mk[16];
+  // Hot-name filter: 64-entry direct-mapped thread-local cache of hash->slot.
+  // nh is never 0 (hs never returns 0; empty names map to fixed key 1), so a
+  // zero tag is an empty entry. Caches existing mappings only - every insert
+  // still goes through intern_name, so slot ids and output stay byte-exact.
+  uint64_t ftag[64] = {};
+  uint32_t fslot[64] = {};
   uint64_t n = 0, last = ~0ULL;
   auto adv = [&]() __attribute__((always_inline)) {
     uint32_t k = n & 15;
@@ -240,7 +246,19 @@ __attribute__((aligned(64))) void *parse_chunk(void *arg) {
       st.amount_min = std::min(st.amount_min, o.cents),
       st.amount_max = std::max(st.amount_max, o.cents);
       st.name_bytes += o.name_len, st.note_bytes += o.note_len;
-      mk[k] = {c, o.name_len ? intern_name(o.nh, o.slot) : 0};
+      uint32_t bn;
+      if (!o.name_len)
+        bn = 0;
+      else {
+        uint32_t fi = (uint32_t)(o.nh ^ (o.nh >> 26)) & 63;
+        if (ftag[fi] == o.nh)
+          bn = fslot[fi];
+        else {
+          bn = intern_name(o.nh, o.slot);
+          ftag[fi] = o.nh, fslot[fi] = bn;
+        }
+      }
+      mk[k] = {c, bn};
       __builtin_prefetch(&CB[mk[k].c][mk[k].bnid >> 6]);
     }
   };
