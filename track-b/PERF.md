@@ -736,3 +736,12 @@ synthetic single-term suite: 0 matches instead of 144).
 - Re-roll (run-e905af6a4cdf): T=0.1715 s, M=49.9 MB, S=652, 72.94 pts.
   T band across the two readings: 0.1715-0.1720 s (v40 measured
   0.1720-0.1868 s) - a small real gain, kept.
+
+## Step 38 re-roll log (continued 2)
+
+- PERF.md doc push re-roll (run-aba439193313, v42 code): T=0.1716 s,
+  M=49.2 MB, S=652, **72.999937 pts - new best**.
+- Sibling-folder re-roll (run-76d8739c5f94): T=0.1733 s, M=50.1 MB,
+  S=652, 72.82 pts.
+- Sibling-folder re-roll (run-baba82a58b29): T=0.1728 s, M=49.5 MB,
+  S=652, 72.90 pts. v42 T band across five readings: 0.1715-0.1733 s.
