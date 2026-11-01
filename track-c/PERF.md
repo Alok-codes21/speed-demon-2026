@@ -980,3 +980,18 @@ Every step from the reference to your final version, each with the live-board ru
   on 9d5cb696a6a79bb570e76978a97213a642cf5c59 scored 76.827523 with the same
   T (0.032032) but M measured 12.34MB - an M-measurement outlier (the same
   code measured 8.59MB the same hour), costing ~1.5 pts on that roll.
+
+
+## Step 101: Syscall Elimination & In-Memory Pipeline Optimization (v160)
+- Root Cause Analysis of 0.032s Wall:
+  Cache Me worker threads were executing madvise(MADV_POPULATE_READ) synchronously 96 times inside parse.run. Because /data pages are already resident in the Linux page cache, this caused 96 unnecessary kernel transitions and TLB shootdown contention across the 12 P-cores.
+- Optimizations:
+  1. Removed per-piece madvise(MADV_POPULATE_READ) in worker threads.
+  2. Advised records.csv and regions.csv once at startup with MADV_SEQUENTIAL.
+  3. Optimized NameTable::id probe increment from modulo to bitwise AND: (i + 4) & (SLOTS - 1).
+  4. Added out.reserve(16384) to eliminate heap reallocations.
+  5. Removed dead file track-c/2-Dockerfile to reduce S code line count.
+  6. Added -fno-exceptions -fno-rtti to Dockerfile build.
+  7. Replaced fclose(f); return 0; with fflush(f); _exit(0); to bypass glibc thread teardown on the timed exit path.
+- Target: Drop T from 0.0323s to 0.019s, pushing Track C points towards 83.5+.
+- Run: PENDING

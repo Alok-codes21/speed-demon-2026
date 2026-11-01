@@ -4,23 +4,18 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-A multi-threaded C++ engine built for throughput, small memory and zero external dependencies:
+A high-performance C++20 engine built for maximum throughput, low memory footprint, and zero external dependencies:
 
-1. **Zero-copy memory-mapped I/O**: `records.csv` is mapped with `mmap` + `MADV_SEQUENTIAL`; parsing reads the mapping directly.
-2. **Exact chunk partitioning**: the spec guarantees `\r` only occurs in CRLF terminators, so 12 worker threads find exact record boundaries by scanning for `\r\n` from their nominal offsets. No coordination, no overlap.
-3. **SIMD field scanning**: quoted fields are scanned for their closing quote with an inline SSE2 loop (16 bytes per step) and a `memchr` tail, instead of byte-at-a-time loops.
-4. **Flat O(1) region lookup**: `regions.csv` is parsed into a 1 MB `uint8_t` table indexed by region id. Country codes are stored packed as 3 bytes in one sorted integer array, so output order needs no re-sort and no `std::string` table. Missing regions map to `_UNMATCHED`.
-5. **Lock-free name interning**: distinct names (~100k) become compact 32-bit ids through an open-addressing table with atomic CAS slot reservation plus a 2-way thread-local L1 cache in front of it.
-6. **Correct length and identity for every name**: names up to 25 bytes hash from four 64-bit words with end-bounded loads (never a read past the mapping). Longer names take a full-length FNV-1a path, so distinct long names can never be merged by truncation, and the unescape buffer can never overflow.
-7. **Dense country bitsets**: each country tracks distinct name ids in a 1,600-word bitset (12.5 KB per country, ~3 MB total). Setting a bit is a relaxed check-and-OR; distinct counts are a final `popcount` pass.
-8. **Thread-local aggregates**: all numeric totals accumulate in per-thread arrays and merge in microseconds at the end. Output is built in one buffer and written with a single `write` loop.
+1. **Zero-copy memory-mapped I/O**: Both `regions.csv` and `records.csv` are mapped with `mmap` and `MADV_SEQUENTIAL`.
+2. **Parallel Table Pre-Warming**: `MADV_POPULATE_WRITE` is dispatched across 12 worker threads up front to fault in anonymous lookup tables concurrently, eliminating kernel page-table lock contention.
+3. **Exact CRLF chunk partitioning**: 8 pieces per thread are claimed dynamically through atomic work sharing, avoiding tail imbalance.
+4. **SWAR 8-digit Integer & Currency Decoders**: IDs, region codes, and currency cents are parsed 8 bytes at a time using bitwise masking and arithmetic folding (`load8` + `fold`), completely bypassing string scanning and floating point operations.
+5. **Lock-Free 4-Lane AVX2 Name Table**: Names intern to small IDs in a 1 MB table where 4 slots per cache line are probed simultaneously with 256-bit SIMD comparison (`_mm256_cmpeq_epi64`).
+6. **In-Scan Distinct Counting**: Country bitsets are updated on the fly using `fetch_or`. A successful bit toggle directly increments the country's distinct counter, completely eliminating any post-scan popcount over bitsets.
+7. **16-Record Lead Prefetch Pipeline**: A sliding ring buffer prefetches region entries, name table slots, and country bitset lines 16 records ahead, completely overlapping memory latency.
+8. **Direct Output Buffer Formatting**: Output strings are generated without allocations and written in a single streaming write.
 
 ## Dependencies
 
 None. Standard C++20, POSIX threads and glibc only (`dependency_count = 0`).
-
-## With another 24 hours
-
-- Wider SIMD (AVX2) for the quote scan and digit parsing.
-- Dynamic work stealing if row-length variance ever unbalances the 12 chunks.
-- io_uring for cold page-cache runs.
+Built offline with pinned GCC 16 and Debian 13 runtime.

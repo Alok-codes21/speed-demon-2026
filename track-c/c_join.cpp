@@ -72,6 +72,7 @@ const char* map_file(const char* path, size_t& size) {
         _exit(1);
     }
     close(fd);
+    madvise(p, size, MADV_SEQUENTIAL);
     return p;
 }
 
@@ -194,7 +195,7 @@ public:
     // hashes to: one 32-byte compare finds the key, or the first free slot,
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
-        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
+        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) & (SLOTS - 1)) {
             __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(&slots_[i]));
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
             u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
@@ -423,10 +424,6 @@ int main(int argc, char** argv) {
                 }
             });
             parse.run([&](int k) {
-                // Map the piece's pages in one call rather than by a fault
-                // every 16 pages as the parse reaches them.
-                uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
-                madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
             });
@@ -434,6 +431,7 @@ int main(int argc, char** argv) {
     for (auto& th : pool) th.join();
 
     std::string out;
+    out.reserve(16384);
     for (u32 i = 1; i <= codes.size() + 1; ++i) {
         u32 c = i % (codes.size() + 1);  // countries 1..N, then _UNMATCHED (0)
         Totals sum;
@@ -463,6 +461,6 @@ int main(int argc, char** argv) {
     FILE* f = fopen((od+"/aggregates.txt").c_str(), "wb");
     if (!f) { perror("aggregates.txt"); return 1; }
     fwrite(out.data(), 1, out.size(), f);
-    fclose(f);
-    return 0;
+    fflush(f);
+    _exit(0);
 }
