@@ -81,8 +81,8 @@ const HEADER: usize = 1;
 const JOBS: usize = 16;
 const TALLY_IDS: usize = 10;
 const BATCH: usize = 1 << 14; // bytes of text between the token pass and the term pass
-const BUCKETS: usize = 1 << 15;
-const BUCKET_SLOTS: usize = 7;
+const BUCKETS: usize = 1 << 16;
+const BUCKET_SLOTS: usize = 4;
 const ID_BLOCK: usize = 32; // term ids a thread takes at once while parsing queries
 const MAX_TERMS: usize = BUCKETS * BUCKET_SLOTS + 64 * ID_BLOCK;
 const AHEAD: usize = 20; // tokens between a bucket's prefetch and its lookup
@@ -99,18 +99,19 @@ const WORKSPACE: usize = 32 << 20;
 // Words in a phrase, at most (the grammar allows 2 to 8).
 const MAX_WORDS: usize = 8;
 
-/// One 64-byte line, the AVENGERS shape, made safe on any seed: the tag is the hash's low
-/// 32 bits and each action carries 10 more of its bits (32..42), checked on every hit.
-/// The bucket index comes from the TOP 15 bits, so bucket, tag and check are disjoint
-/// slices of the AES output: a wrong answer needs a 57-bit collision with another term,
-/// about 2e-7 per corpus build, independent of the data. (For tokens of 16 bytes or fewer
-/// the hash is two AES rounds of the padded token, a bijection; longer tokens are rare and
-/// every hit on one is checked against the term's bytes.) The last action answers for a
-/// hash found in no slot, so that a miss takes the same path as a hit.
+/// One cache line again, now with the WHOLE 64-bit hash as the tag: 4 tags + 5 actions.
+/// For tokens of 16 bytes or fewer the hash is two AES rounds of the padded token, a
+/// bijection, so distinct short tokens can never collide and equal ones always agree.
+/// Longer tokens are rare (generated vocabulary is at most 17 bytes) and every hit on one
+/// is checked against the term's bytes, so no seed can turn the long-token mix into a
+/// wrong answer. Twice as many buckets keep the load low, so overflow stays rare.
 #[repr(C, align(64))]
 struct Bucket {
-    tags: [u32; BUCKET_SLOTS + 1],
+    tags: [u64; BUCKET_SLOTS],
+    // One past the slots: the action for a hash found in no slot (0, or OVERFLOW when the
+    // bucket is full), so that a miss takes the same path as a hit.
     actions: [u32; BUCKET_SLOTS + 1],
+    _pad: [u32; 3],
 }
 
 /// A worker's space for a batch of text.
@@ -265,9 +266,7 @@ struct Run {
     term_count: AtomicUsize,
     // Every interned term's bytes, so a hash or tag hit can be checked exactly: the scan
     // accepts a token only when its bytes match the term's, letter case aside (A-Z only).
-    term_spans: *mut (u32, u32),
-    // Per term id: the action's 10 check bits, kept so a heavy rewrite can re-encode them.
-    term_checks: *mut u16, // per term id: (offset, length) in term_blob
+    term_spans: *mut (u32, u32), // per term id: (offset, length) in term_blob
     term_blob: *mut u8,
     term_blob_len: AtomicUsize,
     heavy_term: *mut u32, // per bitmap index: the term it belongs to
@@ -399,9 +398,9 @@ unsafe fn term_eq(run: &Run, term: u32, token: *const u8, len: usize) -> bool {
 #[inline(always)]
 unsafe fn action_term(run: &Run, action: u32) -> u32 {
     if action & HEAVY != 0 {
-        *run.heavy_term.add((action & 0xfff) as usize)
+        *run.heavy_term.add((action & !HEAVY) as usize)
     } else {
-        (action & 0x7ffff) - 1
+        (action & !ANCHOR) - 1
     }
 }
 
@@ -409,21 +408,15 @@ unsafe fn action_term(run: &Run, action: u32) -> u32 {
 #[inline(always)]
 unsafe fn action_in(buckets: *const Bucket, hash: u64) -> u32 {
     let bucket = buckets.add(bucket_of(hash));
-    let wanted = _mm256_set1_epi32(hash as i32);
-    let same = _mm256_cmpeq_epi32(_mm256_load_si256(bucket.cast()), wanted);
-    let found = _mm256_movemask_ps(_mm256_castsi256_ps(same)) as u32 | 1 << BUCKET_SLOTS;
-    let slot = found.trailing_zeros() as usize;
-    let action = (*bucket).actions[slot];
-    // Only the miss slot can hold OVERFLOW, and then the walk must happen whatever the
-    // check bits say: a displaced entry proves the bucket ran full.
+    let wanted = _mm256_set1_epi64x(hash as i64);
+    let same = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+        _mm256_load_si256(bucket.cast()),
+        wanted,
+    ))) as u32;
+    let found = same | 1 << BUCKET_SLOTS;
+    let action = (*bucket).actions[found.trailing_zeros() as usize];
     if action == OVERFLOW {
         return Run::action_past(buckets, hash);
-    }
-    // A tag match is a hit only if the action's 10 check bits agree. Interning never lets
-    // two terms share a bucket and tag, so the first tag match is the only candidate: a
-    // check mismatch is a miss, exactly. Light and heavy actions carry the bits at 19..29.
-    if slot != BUCKET_SLOTS && (action >> 19) & 0x3ff != ((hash >> 32) as u32) & 0x3ff {
-        return 0;
     }
     action
 }
@@ -445,25 +438,16 @@ impl Run {
     /// The action of a token whose bucket is full, so that its term may be in a later one.
     #[cold]
     unsafe fn action_past(buckets: *const Bucket, hash: u64) -> u32 {
-        let check = ((hash >> 32) as u32) & 0x3ff;
         let mut index = bucket_of(hash);
         loop {
             let bucket = &*buckets.add(index);
-            let slot = bucket.tags.iter().position(|&tag| tag == hash as u32);
-            match slot {
-                Some(slot) => {
-                    let action = bucket.actions[slot];
-                    if action != OVERFLOW && (action >> 19) & 0x3ff == check {
-                        return action;
-                    }
-                }
+            match bucket.tags.iter().position(|&tag| tag == hash) {
+                Some(slot) => return bucket.actions[slot],
                 None if bucket.actions[BUCKET_SLOTS] == 0 => return 0,
-                _ => {}
+                None => index = (index + 1) % BUCKETS,
             }
-            index = (index + 1) % BUCKETS;
         }
     }
-
 
     #[cold]
     unsafe fn claim_chunk(&self, shard: usize, claim: usize) -> (*mut u32, *mut u32) {
@@ -672,14 +656,14 @@ impl Run {
             }
             }
             for (i, &hit) in b.anchor_hits[..anchor_count].iter().enumerate() {
-                let later = |ahead: usize| ((b.anchor_hits[i + ahead] >> 40) as usize) & 0x7ffff;
+                let later = |ahead: usize| (b.anchor_hits[i + ahead] >> 40) as usize;
                 _mm_prefetch::<_MM_HINT_T0>(self.terms.add(later(8).wrapping_sub(1)).cast());
                 if let Some(term) = later(4).checked_sub(1) {
                     let first = (*self.terms.add(term)).phrases as usize;
                     _mm_prefetch::<_MM_HINT_T0>(self.phrases.add(first.wrapping_sub(1)).cast());
                 }
                 let token = hit as usize & ((1 << 20) - 1);
-                let mut next = (*self.terms.add((((hit >> 40) as usize) & 0x7ffff) - 1)).phrases;
+                let mut next = (*self.terms.add((hit >> 40) as usize - 1)).phrases;
                 while next != 0 {
                     let phrase = &*self.phrases.add(next as usize - 1);
                     next = phrase.next;
@@ -712,7 +696,7 @@ impl Run {
                         % 64;
                     let row = &mut b.group[rel * words..(rel + 1) * words];
                     for &action in &b.heavy_hits[from..to] {
-                        let id = (action & 0xfff) as usize;
+                        let id = (action & !HEAVY) as usize;
                         row[id / 64] |= 1 << (id % 64);
                     }
                     from = to;
@@ -722,7 +706,7 @@ impl Run {
                 }
             }
             for &hit in &b.list_hits[..list_count] {
-                let term = ((hit >> 32) as u32 & 0x7ffff) - 1;
+                let term = ((hit >> 32) as u32 & !ANCHOR) - 1;
                 if SAMPLE {
                     b.counts[term as usize] += 1;
                     continue;
@@ -840,7 +824,7 @@ impl Run {
                 if *action == 0 {
                     continue;
                 }
-                let id = (*action & 0x7ffff) as usize - 1;
+                let id = *action as usize - 1;
                 let term = &mut *self.terms.add(id);
                 if term.phrases != 0 {
                     *action |= ANCHOR;
@@ -850,7 +834,7 @@ impl Run {
                 } else if self.sample[id].load(Relaxed) as usize * 32 >= docs {
                     let heavy = self.setup[3].fetch_add(1, Relaxed);
                     if heavy < MAX_HEAVY {
-                        *action = HEAVY | heavy as u32 | ((*self.term_checks.add(id) as u32) << 19);
+                        *action = HEAVY | heavy as u32;
                         (term.heavy, term.first) = (true, heavy as u32);
                         *self.heavy_term.add(heavy) = id as u32;
                     }
@@ -1291,14 +1275,14 @@ fn put_number(out: &mut Vec<u8>, mut value: u64) {
 /// for the winner's id, which is stored right after.
 unsafe fn intern(run: &Run, ids: &mut std::ops::Range<u32>, hash: u64, word: &[u8]) -> u32 {
     let mut index = bucket_of(hash);
-    'buckets: loop {
+    loop {
         let bucket = &mut *run.buckets.add(index);
         for slot in 0..BUCKET_SLOTS {
-            let tag = AtomicU32::from_ptr(&mut bucket.tags[slot]);
+            let tag = AtomicU64::from_ptr(&mut bucket.tags[slot]);
             let action = AtomicU32::from_ptr(&mut bucket.actions[slot]);
             let mut seen = tag.load(Acquire);
             if seen == 0 {
-                seen = match tag.compare_exchange(0, hash as u32, AcqRel, Acquire) {
+                seen = match tag.compare_exchange(0, hash, AcqRel, Acquire) {
                     Ok(_) => {
                         let term = new_id(run, ids);
                         // The term's bytes are recorded before the action publishes the term,
@@ -1310,29 +1294,22 @@ unsafe fn intern(run: &Run, ids: &mut std::ops::Range<u32>, hash: u64, word: &[u
                             word.len(),
                         );
                         *run.term_spans.add(term as usize) = (at, word.len() as u32);
-                        *run.term_checks.add(term as usize) = ((hash >> 32) as u16) & 0x3ff;
-                        action.store(term + 1 | (((hash >> 32) as u32) & 0x3ff) << 19, Release);
+                        action.store(term + 1, Release);
                         return term;
                     }
                     Err(other) => other,
                 };
             }
-            if seen == hash as u32 {
+            if seen == hash {
                 let mut found = action.load(Acquire);
                 while found == 0 {
                     std::hint::spin_loop();
                     found = action.load(Acquire);
                 }
-                // A matching tag is not a matching term: check the bytes. A byte mismatch
-                // ends this bucket for us - two terms never share a bucket and tag, so the
-                // reader's first tag match stays the only candidate.
-                let id = (found & 0x7ffff) - 1;
-                if term_eq(run, id, word.as_ptr(), word.len()) {
-                    return id;
+                // A matching tag is not a matching term: check the bytes, probe on if not.
+                if term_eq(run, found - 1, word.as_ptr(), word.len()) {
+                    return found - 1;
                 }
-                AtomicU32::from_ptr(&mut bucket.actions[BUCKET_SLOTS]).store(OVERFLOW, Relaxed);
-                index = (index + 1) % BUCKETS;
-                continue 'buckets;
             }
         }
         AtomicU32::from_ptr(&mut bucket.actions[BUCKET_SLOTS]).store(OVERFLOW, Relaxed);
@@ -1398,7 +1375,6 @@ fn main() {
             terms: reserve(MAX_TERMS, true),
             term_count: AtomicUsize::new(0),
             term_spans: reserve(MAX_TERMS, false),
-            term_checks: reserve(MAX_TERMS, false),
             term_blob: reserve(queries.len() + 64, false),
             term_blob_len: AtomicUsize::new(0),
             heavy_term: reserve(MAX_HEAVY, false),
