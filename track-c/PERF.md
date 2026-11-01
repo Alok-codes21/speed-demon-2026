@@ -929,3 +929,17 @@ Every step from the reference to your final version, each with the live-board ru
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
 - Run: PENDING
+
+## Step 97 - v159: source-size pass (S axis; zero behavior change)
+- scc counts code lines (no blanks/comments) after canonical formatting, over
+  every file in the folder. Comments are already free; the remaining lever is
+  fewer code lines. Deleted the dead byte-loop helper num() (unused since the
+  word-op walk) and packed statement sequences the formatter will not split.
+  297 -> 288 code lines locally (approx -9, board S should follow; S was 335
+  on v157/v158 runs).
+- Not a research-derived candidate - scoring-metric cleanup of the live code
+  under the 10:41 standing instruction.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
+- Run: PENDING
