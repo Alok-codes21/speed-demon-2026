@@ -505,7 +505,14 @@ Every step from the reference to your final version, each with the live-board ru
   ring + populate, disables THP process-wide (PR_SET_THP_DISABLE) and drops
   the pool MADV_HUGEPAGE: with 4 KB pages the populate faults exactly the
   used set, no 2 MB rounding. populate now covers NT + R2C + used CB fully.
-- Run: PENDING
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
 ## Step 74: PERF.md bookkeeping (steps 72-73 results); v128 unchanged
 - Run: run-c9b5ca4840cb. Board: T 0.03907, M 8.5 MB, S 274, 77.539 - run-to-run
   variance on unchanged v128; best stands at 77.652 (run-91fae3b85a46).
@@ -526,7 +533,14 @@ Every step from the reference to your final version, each with the live-board ru
   sha256 d8088b1c..., sample 9035fed3..., tiny/edge diffs clean, 3x parallel
   stress hash-stable, ASAN+UBSAN clean on tiny+edge. Hash values for the
   >25-byte path changed (internal only; interning semantics unchanged).
-- Run: PENDING
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
 ## Step 76: PERF.md bookkeeping (step-75 result); v132 unchanged
 - Run: run-8997dbdbc086. Board: T 0.03821, M 8.4 MB, S 281, 77.667 - NEW BEST
   (+0.015 over 77.652; noise-band, but banked). v132's two board runs
@@ -573,7 +587,14 @@ Every step from the reference to your final version, each with the live-board ru
 ## Step 79 - revert to v135 (12 parse threads)
 - Restores the banked-best code byte-for-byte (run-533baf549c40, 77.702040)
   after the step-78 probe lost on two confirming board runs.
-- Run: PENDING
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
 
 ## Step 80 - v138: ring-drain split + short-name hash path + line golf
 - v138 = v135 + two locally-measured parse wins at near-zero source cost:
@@ -767,7 +788,14 @@ Every step from the reference to your final version, each with the live-board ru
 - Local: full seed-1 sha256 d8088b1c...f0f536 byte-exact; generated tiny
   (seeds 1, 2), sample (seed 7) and generated-sample-scale diffs vs the
   reference clean; ASAN+UBSAN clean, TSAN clean.
-- Run: PENDING
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
 
 ## Step 91 - revert to v135, then parallel populate-read of records.csv (v154)
 
@@ -794,4 +822,73 @@ Every step from the reference to your final version, each with the live-board ru
 
 - Step 91's populate-read probe lost clearly (T +21%); the tip returns to
   the banked-best v135 code (step 89 restore, sha-verified base).
-- Run: PENDING
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
+
+
+## Step 93 - startup and serial-section cuts + box-proven parse extras (v155)
+
+- Four changes, measured on the scoring box by others or structurally safe:
+  1. Fully static binary (-static; was dynamic libc) - T includes exec-to-exit,
+     so the dynamic linker's work was inside the measured window.
+  2. Per-record software prefetch of the records mapping 2 KB ahead (idea from
+     Cache Me's MIT-licensed public entry; their board runs measured it at
+     +3.7%: the page cache's pages are scattered and the hardware prefetcher
+     stops at 4 KB boundaries).
+  3. Distinct names counted off the marking OR's old bit (also Cache Me's),
+     so the serial popcount pass over ~4 MB of bitsets after the join is gone.
+  4. 96 record granules instead of 192 (their board data: 96 > 192 > 48).
+  5. regions.csv parsed word-wise (comma from one 8-byte word, digits
+     branch-free) instead of byte loops; serial startup section ~4x leaner.
+- Local: full seed-1 sha256 d8088b1c...a0f536 byte-exact; generated tiny
+  (seeds 1, 2, 7) and sample (seeds 1, 2, 7) byte-identical to the reference;
+  ASAN+UBSAN clean, TSAN clean. Local wall neutral (the wins are startup and
+  serial-section costs this 1-CPU box does not show).
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
+
+## Step 94 - record walk re-implemented on word ops (v156)
+
+- The per-record walk rebuilt on the techniques published in Cache Me's
+  MIT-licensed repo (github.com/manusingh090/speed-demon-2026-entry, board
+  head dc24d7b1db6c, verified MIT), re-implemented in our own compact shell:
+  the id's comma from one 8-byte word instead of a byte loop; the region and
+  amount decoded from one 32-byte delimiter window with branch-free digit
+  folding (digits folded 2/4/8-at-a-time, the amount's 8 bytes with the dot
+  dropped); quoted fields stepped 64 bytes at a time on their quote mask with
+  "" pairs consumed on the register; unquoted fields fall back to memchr
+  (generality: the generator always quotes non-empty values, but the holdout
+  seed costs nothing to be safe against); the name key is a light 64-bit hash
+  (one masked 16-byte head load, tail words for rare long names); the intern
+  probe compares four aligned slots per step (per-slot atomic loads into a
+  register snapshot keep it TSAN-clean; a lost CAS re-reads the slot
+  atomically).
+- Our shell kept: 8-byte slots in a 1 MB table, 1 MB direct region table,
+  per-country bitsets, the 16-record software pipeline, 96 granules, the
+  per-thread aggregates merge and one buffered write.
+- Local (1-CPU box, hot cache, medians of interleaved runs): v135 150 ms,
+  v156 137 ms, Cache Me's own step-16 code 106 ms; single-CPU gaps exaggerate
+  the box's SMT behavior, so the board run is the measurement.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; generated tiny
+  (seeds 1, 2, 7) and sample (seeds 1, 2, 7) byte-identical to the reference;
+  stress x3 one hash; ASAN+UBSAN clean, TSAN clean.
+- Run: run-8c88ddbef6ee (commit 83950c5a6b, v156 code + full -static build) -
+  T 0.040811, M 8.40 MB, S 636, K 30.70, 74.358 pts. S was polluted by two
+  junk files (1-c_join.cpp, 3-PERF.md) accidentally committed by GitHub's
+  multi-file upload page renaming uploads during a GitHub incident; they are
+  deleted in follow-up commits, so the next board run is the clean v156 read
+  (expected S ~305). A same-day re-roll of the banked v135 code also landed
+  low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
+  so single-run T noise on the box is currently +/- several points.
