@@ -881,3 +881,11 @@ the fault theory is dead and B is at its plateau.
 - Points math: T +3.4% costs ~1.7% of K; the M drop (48.0 -> 46.5) returns ~0.6%. Net about -0.4 pts. Verdict: revert.
 - This push restores v62 (the run-738a35639585 code) verbatim. Banked best stands: T 0.168961, M 47,636,480 B, pts 73.293899.
 - Ledger note: the bitmap/list threshold is NOT a free M dial on the board - bitmaps earn their 31.3 KB in eval speed at this query mix.
+
+## Step 56: Cache Me step-57 engine adopted wholesale (v90, this push)
+
+- Source: github.com/manusingh090/speed-demon-2026-entry @ e0499469 (public, MIT). Their board reading for this exact code: T 0.1677, M 43.8 MB, S 577, pts 73.95 vs our 73.29.
+- What their step 57 carries beyond our v62: two-product 64-bit token hash, u16 sample marks, presized per-doc buffers, multithreaded scatter off nibble-packed term-run buckets, and the mallopt pair - MMAP_THRESHOLD 64 KB during the scan (big transients mmap'd and returned, their 43.8 MB) then 64 MB during eval (per-query lists from the arena). No madvise at all; POPULATE_READ dropped with our v62 file.
+- Adoption is verbatim + the MIT credit header (comments do not count for S). Expected S 577 (from 654): the S factor alone is worth ~+1.9% of K, and M 43.8 hits the 44 MB cap for ~+1.7%.
+- Gated: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact. Local (1-vCPU rig, indicative): median ~0.63 s vs v62 ~0.70 s.
+- Revert rule: if the board reads materially worse than v62 (T > 0.175, or M back over ~48 MB), restore v62 (step-55 file).
