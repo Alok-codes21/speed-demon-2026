@@ -129,3 +129,10 @@ B ~= 71.6; rank 6 guseinov (76.52) B ~= 72.3.
 - Fire order recommendation: v36 first (own code, 75+ upside if T lands
   0.10-0.16, best never regresses so a low draw costs only a reading), then
   v37 if v36 lands under 72.8. Alok decides.
+
+## v37 refreshed 06:28 IST -> Cache Me @ 2b1da445 (their newest)
+- Board-verified: run-56404803018d = 73.075 pts (T=0.173807 s, M=49,422,336 B,
+  S=607). Same architecture, ~2.5% tuning (branch-reduced find, raw-pointer
+  id writes, per-id state prefetch). Re-gated: sample/full sha exact,
+  generator-shaped suites identical. Expected board ~73.07 +/- band;
+  overall at B=73.07: geomean ~76.87 -> rank ~8.

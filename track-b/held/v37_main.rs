@@ -155,13 +155,15 @@ struct Terms {
 impl Terms {
     fn find(&self, k: __m256i, h: usize) -> u32 {
         let mask = self.slot.len() - 1;
+        let key = |s: u64| unsafe { *self.keys.get_unchecked(s as u32 as usize - 1) };
         let mut i = h & mask;
         loop {
-            match self.slot[i] {
-                0 => return self.keys.len() as u32,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
-                _ => i = (i + 1) & mask,
+            // i is masked, and a slot holds 0 or the id + 1 of a stored key.
+            let s = unsafe { *self.slot.get_unchecked(i) };
+            if s == 0 || s >> 32 == h as u64 >> 32 && same(key(s), k) {
+                return (s as u32).wrapping_sub(1).min(self.keys.len() as u32);
             }
+            i = (i + 1) & mask;
         }
     }
 
@@ -215,12 +217,19 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// per 64-byte window; a token that runs into the window's end starts the next
 /// window. Each token's slot is prefetched and the token looked up LAG tokens
 /// later, so the misses overlap.
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>) -> *const u8 {
+unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [(_mm256_setzero_si256(), 0); LAG];
-    let mut look = |r: &(__m256i, usize)| ids.push(t.find(r.0, r.1));
-    let mut n = 0usize;
+    let (mut n, mut out) = (0usize, ids.len());
     loop {
+        // A window adds at most 32 ids, and the document's end LAG more.
+        (ids.set_len(out), ids.reserve(32 + LAG));
+        let buf = ids.as_mut_ptr();
+        let mut look = |r: &(__m256i, usize)| {
+            let id = t.find(r.0, r.1);
+            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast()); // its state, for the caller
+            (*buf.add(out), out) = (id, out + 1);
+        };
         let (word, nl) = classes(p);
         let stop = if nl != 0 { nl.trailing_zeros() } else { 64 }; // the window's bytes in this document
         let mut m = word & ((1u128 << stop) - 1) as u64;
@@ -238,7 +247,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>) -> *const u8 {
                 }
                 len = next;
             }
-            m &= (!0u64).checked_shl(s + len).unwrap_or(0); // the tokens after this one
+            m &= m.wrapping_add(m & m.wrapping_neg()); // clears this token's run of bits
             let k = match len {
                 ..=32 => key(p.add(s as usize), len as usize),
                 _ => _mm256_setzero_si256(), // no term, but it still parts its neighbours
@@ -252,6 +261,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>) -> *const u8 {
         }
         if nl != 0 {
             (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
+            ids.set_len(out);
             return p.add(stop as usize + 1);
         }
         p = p.add(next as usize);
@@ -396,8 +406,9 @@ fn line(out: &mut String, docs: &Docs) {
 }
 
 /// Calls f(doc, ids) with the token ids of each line in text, the first
-/// being document first; returns the number of documents.
-fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, &[u32])) -> u32 {
+/// being document first, with pre[id] prefetched for each; returns the
+/// number of documents.
+fn walk(text: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
     let (mut p, end) = (text.as_ptr(), text.as_ptr_range().end);
     let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
     while p < end {
@@ -406,7 +417,7 @@ fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, &[u32])) -> u
                 p = p.add(1);
             }
             ids.clear();
-            p = tokens(p, t, &mut ids);
+            p = tokens(p, t, &mut ids, pre);
         }
         f(doc, &ids);
         doc += 1;
@@ -489,8 +500,9 @@ fn main() {
     let nterms = terms.keys.len();
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
-    for &(phrase, from, to) in spans.iter().filter(|s| !s.0) {
-        ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = !phrase);
+    for &(_, from, to) in spans.iter().filter(|s| !s.0) {
+        let r = from as usize..to as usize;
+        ids[r].iter().for_each(|&id| in_bool[id as usize] = true);
     }
 
     let text = map("/data/docs.txt");
@@ -512,7 +524,7 @@ fn main() {
     let samples = on_threads(|t| {
         let (mut df, mut last) = (vec![0u32; nterms + 1], vec![NONE; nterms + 1]);
         let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 32];
-        let n = walk(sample, firsts[t], &terms, |doc, toks| {
+        let n = walk(sample, firsts[t], &terms, std::ptr::null(), |doc, toks| {
             for &id in toks {
                 if std::mem::replace(&mut last[id as usize], doc) != doc {
                     df[id as usize] += 1;
@@ -529,7 +541,8 @@ fn main() {
     // Each phrase's anchor, its rarest term: (anchor, query, position).
     let (mut anchored, mut anchor) = (vec![], vec![false; nterms]);
     for (q, &(_, from, to)) in spans.iter().enumerate().filter(|s| s.1 .0) {
-        let j = (from..to).min_by_key(|&j| df[ids[j as usize] as usize]).unwrap();
+        let rarity = |j: &u32| df[ids[*j as usize] as usize];
+        let j = (from..to).min_by_key(rarity).unwrap();
         anchored.push((ids[j as usize], q as u32, j - from));
         anchor[ids[j as usize] as usize] = true;
     }
@@ -587,7 +600,8 @@ fn main() {
         };
         // Every token does the same work, kept or not by masks, so whether a
         // term is new to the document, a list or a bitmap costs no branch.
-        let n = walk(&text[cut[t]..cut[t + 1]], first, &terms, |doc, toks| {
+        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
+        let n = walk(share, first, &terms, pre, |doc, toks| {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
@@ -644,7 +658,7 @@ fn main() {
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
         let s = &mut seg[i * THREADS..][..THREADS];
-        s.iter_mut().zip(&scans).for_each(|(n, scan)| *n = scan.0[i]);
+        s.iter_mut().zip(&scans).for_each(|(n, c)| *n = c.0[i]);
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
     // Written by every thread at its own positions; relaxed stores are plain stores.
@@ -711,8 +725,8 @@ fn main() {
                 let end = at + found[at..].partition_point(|m| m.0 == q as u32);
                 Docs::List(found[at..end].iter().map(|m| m.1).collect())
             } else {
-                let cur = docs(tids[0]);
-                ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
+                let (cur, steps) = (docs(tids[0]), ops.iter().zip(&tids[1..]));
+                steps.fold(cur, |cur, (&op, &id)| match &cur {
                     Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
                     _ => apply(cur, op, docs(id), words),
                 })
