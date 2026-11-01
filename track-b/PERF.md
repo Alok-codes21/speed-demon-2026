@@ -796,3 +796,13 @@ P-core's L2, so every find's first probe cost L3. Halving it (2^17,
 load 0.58) makes the table L2-resident; a rare second probe at L2
 latency is cheaper than every first probe at L3. Also M -1 MB. Gates
 byte-exact as before.
+
+
+## Step 47: revert to the full-size terms table (v56 code)
+
+run-7ccac029912b scored the half-size table at T=0.179428, M=50.5 MB,
+72.390688 points: worse than the 0.1700-0.1750 band the full-size table
+held across runs, so the L2-residency theory did not hold on the board
+box and the second probe's collision cost dominated instead. Reverting
+the tip to the v56 code (2^18 slots, S=654); best stays sticky at
+73.207521 (run-69d32d1af5fa). Gates byte-exact as before.
