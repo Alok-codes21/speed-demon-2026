@@ -34,7 +34,7 @@ extern "C" {
 
 const INF: u64 = u64::MAX;
 const BLOB: usize = 512; // nodes per locality blob
-const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
+const PART_BITS: u32 = 14; // 16K-node parts keep degree counters in a small cache footprint
 const PAGE: usize = 512; // distances per page
 
 /// A pointer the threads share; every use writes indices no other thread writes.
@@ -534,7 +534,22 @@ fn main() {
     });
 
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
-    let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
+    // Write integers directly into one byte buffer; avoid allocating a
+    // temporary String for every answer.
+    let mut out = Vec::with_capacity(ans.len() * 12);
+    for &a in &ans {
+        let mut value = (a as i64).unsigned_abs();
+        let negative = (a as i64) < 0;
+        let begin = out.len();
+        loop {
+            out.push(b'0' + (value % 10) as u8);
+            value /= 10;
+            if value == 0 { break; }
+        }
+        if negative { out.push(b'-'); }
+        out[begin..].reverse();
+        out.push(b'\n');
+    }
     std::fs::write("/out/distances.txt", out).unwrap();
 }
 
