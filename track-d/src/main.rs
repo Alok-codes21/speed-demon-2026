@@ -218,45 +218,68 @@ impl Dist {
     }
 }
 
-/// The weight of edge e stored as all ones: its entry in the sorted list.
-fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
-    heavy[heavy.partition_point(|h| h.0 < e)].1
+/// One thread's parse output. A record (the tail's offset in its part, the
+/// edge word) goes into chunks of CHUNK carved in turn from one arena of each,
+/// so the 100-odd lists per thread cost one mapping instead of one each (an
+/// unmap stalls every thread). Pages of the arena never written cost nothing.
+struct Filed {
+    offs: Vec<u16>,
+    words: Vec<u32>,
+    chunks: Vec<Vec<u32>>, // part -> its chunks, in order
+    len: Vec<usize>,       // part -> records
+    heavy: Vec<Vec<u32>>,  // part -> its heavy weights, in order
 }
 
-fn main() {
-    // Plain pages (a part-touched array with huge pages would count whole
-    // 2 MB pages), and freed arrays really go back to the kernel.
-    unsafe {
-        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
-        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
-    }
-    let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
-    let qtext = map("/data/queries.txt");
-    let mut queries = Vec::new();
-    let mut i = 0;
-    while i < qtext.len() {
-        let s = number(qtext, &mut i);
-        queries.push((s, number(qtext, &mut i)));
-    }
-    let text = map("/data/graph.txt");
-    let mut i = 0;
-    let n = number(text, &mut i) as usize;
-    number(text, &mut i);
-    let hb = 32 - (n as u32 | 1).leading_zeros(); // bits for a node id
-    let (hmask, big) = ((1u32 << hb) - 1, u32::MAX >> hb);
-    let sh = PART_BITS.min(hb);
-    let parts = (n >> sh) + 1;
+const CHUNK: usize = 1024;
 
-    // 1. Parse once, filing each edge under its tail's part.
-    type Bucket = (Vec<u64>, Vec<u32>); // (offset in part << 32 | word), heavy weights in order
+impl Filed {
+    fn records(&self, p: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        self.chunks[p].iter().enumerate().flat_map(move |(j, &c)| {
+            let r = c as usize * CHUNK..c as usize * CHUNK + (self.len[p] - j * CHUNK).min(CHUNK);
+            self.offs[r.clone()].iter().map(|&o| o as usize).zip(self.words[r].iter().copied())
+        })
+    }
+}
+
+/// The weight of edge e stored as all ones: its entry in the sorted list.
+fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
+    heavy[h    // 1. Parse once, filing each edge under its tail's part.
     let cut = cuts(text, i, nt);
-    let filed: Vec<Vec<Bucket>> = on_threads(nt, |t| {
-        let mut out: Vec<Bucket> = (0..parts).map(|_| Default::default()).collect();
-        let guess = (cut[t + 1] - cut[t]) / 17 / parts + 64;
-        out.iter_mut().for_each(|b| b.0.reserve(guess));
+    let filed: Vec<Filed> = on_threads(nt, |t| {
+        // A line takes at least 6 bytes, and each part leaves one chunk part full.
+        let cap = (cut[t + 1] - cut[t]) / 6 + parts * CHUNK;
+        let (mut at, mut next) = (vec![0; parts], 0); // where each part's next record goes
+        let (offs, words) = (vec![0; cap], vec![0; cap]);
+        let mut f = Filed { offs, words, chunks: vec![vec![]; parts], len: vec![0; parts], heavy: vec![vec![]; parts] };
         let mut i = cut[t];
         while i < cut[t + 1] {
             let u = number(text, &mut i);
+            let v = number(text, &mut i);
+            let mut w = number(text, &mut i);
+            if u == v {
+                continue; // a self-loop never shortens a path
+            }
+            let p = (u >> sh) as usize;
+            if f.len[p] % CHUNK == 0 {
+                (at[p], next) = (next * CHUNK, next + 1);
+                f.chunks[p].push(next as u32 - 1);
+            }
+            if w >= big {
+                f.heavy[p].push(w);
+                w = big;
+            }
+            (f.offs[at[p]], f.words[at[p]]) = ((u & ((1 << sh) - 1)) as u16, v | w << hb);
+            (at[p], f.len[p]) = (at[p] + 1, f.len[p] + 1);
+        }
+        f
+    });
+    // Part p's edges start where part p - 1's end.
+    let mut base = vec![0u32; parts + 1];
+    for p in 0..parts {
+        base[p + 1] = base[p] + filed.iter().map(|f| f.len[p] as u32).sum::<u32>();
+    }
+
+ number(text, &mut i);
             let v = number(text, &mut i);
             let mut w = number(text, &mut i);
             if u == v {
@@ -290,7 +313,7 @@ fn main() {
     let (fr, lr) = (Raw::of(&mut first), Raw::of(&mut link));
     let claim_part = AtomicUsize::new(0);
     let mut heavy: Vec<(u32, u32)> = on_threads(nt, |_| {
-        let mut heavy = Vec::new();
+        let (mut heavy, mut cursor) = (Vec::new(), vec![0u32; 1 << sh]);
         loop {
             let p = claim_part.fetch_add(1, Relaxed);
             if p >= parts {
@@ -298,19 +321,17 @@ fn main() {
             }
             let lo = p << sh;
             let len = (n - lo).min(1 << sh);
-            let mine: Vec<Bucket> = (0..nt).map(|t| std::mem::take(&mut *buckets[p * nt + t].lock().unwrap())).collect();
-            let mut cursor = vec![0u32; len];
-            mine.iter().for_each(|b| b.0.iter().for_each(|&r| cursor[(r >> 32) as usize] += 1));
+            cursor.fill(0);
+            filed.iter().for_each(|f| f.records(p).for_each(|(o, _)| cursor[o] += 1));
             let mut at = base[p];
-            for (k, c) in cursor.iter_mut().enumerate() {
+            for (k, c) in cursor[..len].iter_mut().enumerate() {
                 unsafe { *fr.at(lo + k) = at };
                 (at, *c) = (at + *c, at);
             }
-            for (records, weights) in &mine {
-                let mut h = weights.iter();
-                for &r in records {
-                    let c = &mut cursor[(r >> 32) as usize];
-                    let x = r as u32;
+            for f in &filed {
+                let mut h = f.heavy[p].iter();
+                for (o, x) in f.records(p) {
+                    let c = &mut cursor[o];
                     if x >> hb == big {
                         heavy.push((*c, *h.next().unwrap()));
                     }
@@ -322,7 +343,7 @@ fn main() {
     })
     .concat();
     heavy.sort_unstable();
-    drop(buckets);
+    drop(filed);
 
     // 3. Locality order: compact BFS blobs. A thread grows a blob over
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
