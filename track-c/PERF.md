@@ -892,3 +892,21 @@ Every step from the reference to your final version, each with the live-board ru
   (expected S ~305). A same-day re-roll of the banked v135 code also landed
   low (run-74ee2172c222, 74.777; run-9c4c600c7efd, 77.694 on the same code),
   so single-run T noise on the box is currently +/- several points.
+
+## Step 95 - v157: hot-name filter before the shared intern table
+- Instrumented v156 (rdtsc around intern_name on this sandbox): 3.19M hits at
+  ~540 cyc each vs 100.5K inserts at ~770 cyc - hits are 96% of intern
+  cycles, so insert-side ideas (privatization, sharding) are dead before
+  writing; the hit path is the cost. (Cache Me's insert-heavy profile differs
+  because their table/pipeline differs.)
+- Change (one variable vs v156): 64-entry direct-mapped thread-local cache of
+  name hash -> interned slot, consulted at the retire stage before touching
+  the shared 1M-slot table. Tag 0 = empty (name hashes are never 0; empty
+  names use fixed key 1). Caches existing mappings only: every insert still
+  goes through intern_name, so slot ids and output are byte-exact.
+- Local: identical wall time to v156 on this throttled sandbox (0.117 s
+  median both); the board run is the measurement.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
+- Run: PENDING
