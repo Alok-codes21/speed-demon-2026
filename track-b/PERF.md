@@ -862,3 +862,10 @@ the fault theory is dead and B is at its plateau.
 - v71 board result (run-45ff0f1cf47f, commit a2e9199b): T 0.173264, M 64,409,600 B, pts 71.651609. T in the usual band (no gain), M +16.4 MB over v62's 48.0 MB - huge-page rounding on the heap structures, the exact bloat the v21-era prctl disable banked.
 - Verdict: THP-on-heap is disqualified on this layout with evidence. This push restores v62 (POPULATE_READ tip) verbatim as the live build; the THP question is closed.
 - Banked best stands: run-9ebd09cd0394, T 0.169129, M 48,037,888 B, pts 73.246666.
+
+## Step 53: bitmap/list break-even at df = docs/16 (v84, this push)
+
+- M-diet, one variable: the class threshold moves from df > N/32 to df > N/16. A bitmap costs 31.3 KB per term; a list costs 2 B per document - lists are cheaper up to df = N/16. Measured on the full corpus: bitmap terms 377 -> 181, bits 11.8 -> 5.7 MB, postings 20.9 -> 24.8 MB, net anon 42.0 -> 40.5 MB (smaps_rollup, post-scatter).
+- Expected board M ~46 MB (from 48.0). The 44 MB cap on the M factor is NOT reachable in this design (postings without varint have a floor) - this takes the points that are on the table, ~+0.1-0.2.
+- Local timing: ~6% slower on the 1-vCPU rig (more list merging in eval) - indicative only; the board decides. Revert rule: board T regresses >3% vs the 0.169-0.173 band, or M does not drop -> revert to v62.
+- Gated: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact.
