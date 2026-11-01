@@ -787,3 +787,12 @@ v55's first reading (run-69d32d1af5fa): T=0.1701 s, M=47.8 MB, S=655,
 **73.207521 pts - new best** (+0.012). Step 45 removes an import left
 unused since the v39 output port (S 655 -> 654, no behaviour change);
 gates byte-exact as before.
+
+
+## Step 46: half-size terms table (v57)
+
+The slot table was 2 MB (2^18 slots for 75,747 terms): bigger than a
+P-core's L2, so every find's first probe cost L3. Halving it (2^17,
+load 0.58) makes the table L2-resident; a rare second probe at L2
+latency is cheaper than every first probe at L3. Also M -1 MB. Gates
+byte-exact as before.
