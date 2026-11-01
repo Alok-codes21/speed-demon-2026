@@ -849,7 +849,7 @@ struct Worker {
     if (fwd.g.slot[size_t(s) * 4] == Rows::EMPTY ||
         bwd.g.slot[size_t(t) * 4] == Rows::EMPTY)
       return -1;
-    bwd.dist.reset();
+    // bwd.start(t) resets its distance pages before use; avoid resetting twice.
     fwd.start(s);
     u64 best = INF;
     size_t fs = 0, bs = 0;
