@@ -779,3 +779,11 @@ follow-up (their commit c1ec48304e3f, MIT): one _mm_prefetch(p + 2048)
 per 64-byte window, so the next page of the corpus is on its way before
 the hardware prefetcher's 4 KB stop. A prefetch never faults, so output
 cannot change; gates byte-exact as before. S +1 line.
+
+
+## Step 44 result and step 45: dead import (v56)
+
+v55's first reading (run-69d32d1af5fa): T=0.1701 s, M=47.8 MB, S=655,
+**73.207521 pts - new best** (+0.012). Step 45 removes an import left
+unused since the v39 output port (S 655 -> 654, no behaviour change);
+gates byte-exact as before.
