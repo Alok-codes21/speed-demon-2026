@@ -55,3 +55,6 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-f29f7bc67c4d | b902193b | 0.019348 | 20.88 | 514 | 83.433205 | Re-run on unchanged Track A source |
 | run-4ba0159ff9e4 | 8af42fc9 | 0.021057 | 22.49 | 514 | 82.192522 | Re-run on unchanged Track A source |
 | run-67c6deb94015 | f0d73446 | 0.021193 | 19.96 | 514 | 82.641227 | Re-run on unchanged Track A source |
+| run-b5c1f5fd2853 | 07d2081d | 0.017225 | 20.12 | 514 | 84.857344 | Re-run triggered by teammate push; new best |
+| run-5160b02a0178 | 36e8b025 | 0.020986 | 20.51 | 514 | 82.630389 | Re-run triggered by teammate push |
+| run-5587c6bc5003 | 58eeeb45 | 0.019895 | 20.68 | 514 | 83.171318 | Re-run triggered by teammate push |
