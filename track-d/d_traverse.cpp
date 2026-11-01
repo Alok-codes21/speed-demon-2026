@@ -849,8 +849,10 @@ struct Worker {
     if (fwd.g.slot[size_t(s) * 4] == Rows::EMPTY ||
         bwd.g.slot[size_t(t) * 4] == Rows::EMPTY)
       return -1;
-    // bwd.start(t) resets its distance pages before use; avoid resetting twice.
+    // Start both sides before probing: drain() consults reverse labels, so
+    // they must not contain distances left by the previous query.
     fwd.start(s);
+    bwd.start(t);
     u64 best = INF;
     size_t fs = 0, bs = 0;
     while (fs < PROBE) {
@@ -861,7 +863,6 @@ struct Worker {
         return -1;
       fs += fwd.drain(bwd, best);
     }
-    bwd.start(t);
     best = std::min(best, fwd.dist.get(t));
     for (;;) {
       u64 f = fwd.queue.lower_bound(), b = bwd.queue.lower_bound();
