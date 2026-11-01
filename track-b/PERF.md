@@ -847,3 +847,12 @@ S +1 code line (654 -> ~655). Gates byte-exact as before: official
 tiny/sample/full sha256 exact, 70/70 differential suites clean.
 Verdict read: if board T improves, the scan was fault-bound; if flat,
 the fault theory is dead and B is at its plateau.
+
+## Step 51: THP re-enabled + huge pages on the hot heap structures (v71, this push)
+
+- v62 board result first (run-9ebd09cd0394, commit 2be00110): T 0.169129, M 48,037,888 B, pts 73.246666 = new banked best. T sits 0.5% under the 0.1700-0.1750 band = inside noise; the cold page-in theory is not confirmed by POPULATE_READ alone.
+- v71 change (one variable: THP on/off): prctl(41) process-wide THP disable removed, MADV_HUGEPAGE added on the terms slot table (~1.8 MB), the dense bitmap array, and the postings region. The v42 map MADV_HUGEPAGE (a no-op under the disable) becomes effective again.
+- Rationale: TLB pressure on the 2 MB slot table + ~37 MB of bitmaps/postings touched per token, and 2 MB fault granularity on the 243 MB corpus map (~127 faults vs ~62k).
+- Cost being priced: the v21-era disable banked ~3 MB of M from huge-page rounding; if M lands far over 48 MB the points math sours (~-0.9 pts at 51 MB if T is flat).
+- Gated before push: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact, warm-neutral locally (0.518-0.539 s vs v62 base on the same rig).
+- Revert rule: revert if no repeatable >=3% T gain across board runs, or if M regresses past ~51 MB.
