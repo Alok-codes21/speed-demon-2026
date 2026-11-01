@@ -834,3 +834,16 @@ the tip to the v56 code (2^18 slots, S=654); best stays sticky at
   5. 1 MB output buffer and preallocated 4 KB chunk strings: `BufWriter::with_capacity(1 << 20)` reduces write syscalls from ~200 down to 1-2.
 - Retained full multi-port software multiplier hash and corpus next-page prefetch.
 - Board evaluation pending.
+
+
+## Step 50: page-in probe - MADV_POPULATE_READ (v62)
+
+The last uninstrumented T suspect: WILLNEED starts async readahead, but
+if 12 scan threads outrun it they eat per-page minor faults mid-scan;
+POPULATE_READ (advice 23, Linux 5.14+, a no-op before) pages the whole
+254 MB map in through the kernel's batched readahead path before the
+scan starts. Advice only - read semantics and output cannot change.
+S +1 code line (654 -> ~655). Gates byte-exact as before: official
+tiny/sample/full sha256 exact, 70/70 differential suites clean.
+Verdict read: if board T improves, the scan was fault-bound; if flat,
+the fault theory is dead and B is at its plateau.
