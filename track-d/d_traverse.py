@@ -119,68 +119,6 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
             res[out_idx] = -1
             continue
 
-        # A very low-outdegree source (notably the injected heavy-edge
-        # sources) is cheaper to search forward from than to grow a large
-        # reverse frontier from the target.
-        if fp[s + 1] - fp[s] <= 2:
-            df[s] = 0
-            touched = [s]
-            heap = [s]
-            answer = -1
-            while heap:
-                entry = _pop(heap)
-                x = entry // n
-                u = entry - x * n
-                if x != df[u]:
-                    continue
-                if u == t:
-                    answer = x
-                    break
-                for j in range(fp[u], fp[u + 1]):
-                    v = fc[j]
-                    y = x + fw[j]
-                    if y < df[v]:
-                        if df[v] == I:
-                            touched.append(v)
-                        df[v] = y
-                        _psh(heap, y * n + v)
-            answer_cache[key] = answer
-            res[out_idx] = answer
-            for v in touched:
-                df[v] = I
-            continue
-
-        # If the target has very few incoming edges, reverse Dijkstra
-        # is cheaper than maintaining two frontiers. This covers the
-        # benchmark's injected sink queries and other low-indegree targets.
-        if rp[t + 1] - rp[t] <= 2:
-            db[t] = 0
-            touched = [t]
-            heap = [t]
-            answer = -1
-            while heap:
-                entry = _pop(heap)
-                x = entry // n
-                u = entry - x * n
-                if x != db[u]:
-                    continue
-                if u == s:
-                    answer = x
-                    break
-                for j in range(rp[u], rp[u + 1]):
-                    v = rc[j]
-                    y = x + rw[j]
-                    if y < db[v]:
-                        if db[v] == I:
-                            touched.append(v)
-                        db[v] = y
-                        _psh(heap, y * n + v)
-            answer_cache[key] = answer
-            res[out_idx] = answer
-            for v in touched:
-                db[v] = I
-            continue
-
         # ── initialise ───────────────────────────────────────────────────────
         df[s] = 0;  db[t] = 0
         hf = [s];   hb = [t]      # packed: 0*n+s, 0*n+t
