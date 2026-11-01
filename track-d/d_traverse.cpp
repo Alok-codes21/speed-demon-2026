@@ -94,17 +94,16 @@ Rows::Cursor cursor; for (u32 i = 0, pos = 0; i < reg.len; ++i) { u32 id = base[
 u32 e = reg.out[pos]; u64 w = (e & raw.mask) == raw.mask ? (esc++)->second : e & raw.mask; fwd.put(fwd.at(id, k), locate(where[raw.head(e)]), w, escapes[t]); } }
 }); merge(fwd.escapes, escapes); for (Query &q : queries) q = {locate(where[q.from]), locate(where[q.to])}; return g;
 } static void add_reverse(Graph &g, unsigned threads) { const Rows &fwd = *g.fwd; u32 n = fwd.n; g.rev = std::make_unique<Rows>(n, g.edges + 1024 * threads);
-Rows &rev = *g.rev; struct Remote { u32 head, tail, slot; };
+Rows &rev = *g.rev; struct Remote { u32 tail, slot; };
 std::vector<std::vector<std::vector<Remote>>> box( threads, std::vector<std::vector<Remote>>(threads)); Array<u32> degree(n), placed(n); std::vector<Escapes> escapes(threads); std::atomic<unsigned> arrived{0};
 std::vector<u32> cuts(threads + 1); for (unsigned t = 0; t <= threads; ++t) cuts[t] = cut(n, t, threads); parallel(threads, [&](unsigned t) { u32 lo = cuts[t], hi = cuts[t + 1];
 memset(&degree[lo], 0, size_t(hi - lo) * 4); memset(&placed[lo], 0, size_t(hi - lo) * 4); for (u32 u = lo; u < hi; ++u) fwd.each(u, [&](u32 e, size_t i) { u32 v = fwd.head(e);
 if (v >= lo && v < hi) ++degree[v]; else box[t] [std::upper_bound(cuts.begin(), cuts.end(), v) - cuts.begin() - 1]
-.push_back({v, u, u32(i)}); }); for (arrived.fetch_add(1); arrived < threads;) std::this_thread::yield(); for (unsigned s = 0; s < threads; ++s)
-for (const Remote &r : box[s][t]) ++degree[r.head]; Rows::Cursor cursor; for (u32 v = lo; v < hi; ++v) rev.open(v, degree[v], cursor);
+.push_back({u, u32(i)}); }); for (arrived.fetch_add(1); arrived < threads;) std::this_thread::yield(); for (unsigned s = 0; s < threads; ++s)
+for (const Remote &r : box[s][t]) ++degree[fwd.head(fwd.slot[r.slot])]; Rows::Cursor cursor; for (u32 v = lo; v < hi; ++v) rev.open(v, degree[v], cursor);
 auto add = [&](u32 v, u32 u, u32 e, size_t i) { u32 k = placed[v]++; rev.put(degree[v] <= 4 || k < 3 ? size_t(v) * 4 + k : rev.list(rev.slot[size_t(v) * 4 + 3]) + k - 2,
 u, fwd.weight(e, i), escapes[t]); }; for (u32 u = lo; u < hi; ++u) fwd.each(u, [&](u32 e, size_t i) { u32 v = fwd.head(e);
-if (v >= lo && v < hi) add(v, u, e, i); }); for (unsigned s = 0; s < threads; ++s) for (const Remote &r : box[s][t])
-add(r.head, r.tail, fwd.slot[r.slot], r.slot); }); merge(rev.escapes, escapes); } static const char *map_file(const std::string &path, size_t &size) {
+if (v >= lo && v < hi) add(v, u, e, i); }); for (unsigned s = 0; s < threads; ++s) for (const Remote &r : box[s][t]) { u32 e = fwd.slot[r.slot]; add(fwd.head(e), r.tail, e, r.slot); } }); merge(rev.escapes, escapes); } static const char *map_file(const std::string &path, size_t &size) {
 int fd = open(path.c_str(), O_RDONLY); struct stat st {}; if (fd < 0 || fstat(fd, &st) != 0) fail(path.c_str()); size = size_t(st.st_size);
 void *q = size ? mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0) : nullptr; if (q == MAP_FAILED) fail("mmap"); return static_cast<const char *>(q); }
 static std::vector<Query> read_queries(const std::string &path) { size_t size; const char *p = map_file(path, size); std::vector<Query> result; for (const char *end = p + size; p < end;) {
