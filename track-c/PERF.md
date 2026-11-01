@@ -943,3 +943,27 @@ Every step from the reference to your final version, each with the live-board ru
   TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
   reference; stress x3 one hash; ASAN+UBSAN clean; TSAN clean.
 - Run: PENDING
+
+## Step 98 - CM-PORT: Cache Me full-design port (research-derived, promoted from held)
+- Source: github.com/manusingh090/speed-demon-2026-entry track-c, MIT licence
+  (repo-root LICENSE verified 2026-11-01). Verbatim port of their main.cpp as
+  our c_join.cpp with an attribution header; the only functional addition is
+  an argv shim matching our harness invocation. Credit: Cache Me
+  (manusingh090).
+- Design: both files memory-mapped; phase-cut parallel pipeline over one
+  thread pool; regions flagged to country indices, direct region_id ->
+  country table; records split at CRLFs (no CR inside quotes), per-field
+  word-op scanning with quote bit-mask stepping (escaped "" pairs), 8-digit
+  number decode; per-thread per-country sums; shared lock-free name intern to
+  dense ids + per-country bitsets for distinct-name counts, prefetched ahead.
+- Dockerfile mirrored from their track-c: same pinned base images we already
+  used (gcc:16@sha256:43978d..., debian:13-slim@sha256:62bd42...); flags
+  -std=c++20 -O3 -march=native -static -pthread.
+- Expected: +1.5-2 pts vs v159 at today's box band (their board T 0.0334
+  today vs our ~0.0408) net of S ~398 vs 335 (-0.6) and M 8.60 vs 8.40 (-0.1).
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; ASAN+UBSAN clean; TSAN clean.
+- Staged on speed-demon-held 2026-11-01 ~05:20 UTC; promoted to speed-demon
+  on Alok's go (11:05 IST).
+- Run: PENDING
