@@ -998,17 +998,25 @@ Every step from the reference to your final version, each with the live-board ru
   reference; ASAN+UBSAN clean; TSAN clean. Local 1-CPU wall unchanged
   (0.166 vs 0.164 - the sandbox cannot show the parallel effect; the board
   run is the measurement).
-- Run: PENDING
+- Run: run-bf9e4d1b1d4d on c4ba38ee54daa76f3024ef9c8947cf9454d24b8b:
+  T 0.043124, M 10.0MB, S 400, 74.50 pts - LOST, reverted. Box was normal
+  (same five minutes: Cache Me +1%, Microsecond +1%, SALAAR +4%, ALL STAR
+  +0% of their best T), so the +33% is the change, not drift: populating
+  under the flag phase serializes kernel page work against the regions
+  parse. Reverted to step 98's c_join.cpp within 15 minutes.
 
-
-## Step 102: NickTrapp Architecture Adoption (1024-Entry L1 Hot Filter + BITS=18 Table) (v161)
-- Root Cause Identified:
-  Profile showed 240 ms out of 530 ms CPU time was consumed by shared NameTable atomic contention and L3 cache line bouncing.
-- NickTrapp Solution:
-  1. 1024-Entry Thread-Local L1 Hot Filter (ftag/fslot): 12 KB cache fitting 100% inside 48 KB L1D cache. Captures Zipf distribution so ~70% of all lookups hit in 1 clock cycle without touching the shared table or atomic CAS.
-  2. BITS = 18 (262,144 slots): Drops table load factor from 76% to 38%. Reduces probe length to 1.1 cache lines.
-  3. Removed synchronous MADV_POPULATE_READ in flag phase that caused Step 99 regression (0.043s).
-  4. Bitwise probe increment (i + 4) & (SLOTS - 1).
-  5. Sized output reserve and timed exit path bypass (_exit(0)).
-- Target: Drop T to 0.018-0.020s, matching NickTrapp (0.0180s) for 83.5+ points.
-- Run: PENDING
+## Step 100 - v162: discard each piece's pages once parsed (Cache Me head)
+- Cache Me pushed a new track-c change after our port (their commit
+  2a68402, "each parsed piece's pages unmapped by its thread"; MIT, credit
+  Cache Me): right after a piece is parsed, its pages are dropped with
+  MADV_DONTNEED by the thread that parsed it, so the file's page teardown is
+  spread across all threads during the run instead of one thread freeing
+  200 MB of pages at process exit. This file is exactly their current head
+  plus our argv shim and attribution header.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; ASAN+UBSAN clean; TSAN clean.
+- Run: run-56668d591c9c on 78a78deeae...: T 0.028927, M 8.97MB, S 403,
+  79.2943 pts - NEW BANKED BEST (was 78.299604). Reproduces Cache Me's own
+  board run the same hour (run-5b7c10e8801e, T 0.028895). Box normal at the
+  time (Microsecond +1%, Lex +1%, ALL STAR +0% of best T).
