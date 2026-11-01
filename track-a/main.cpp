@@ -2,7 +2,9 @@
 // Track A engine adopted from HighVelocity's public repository
 //   https://github.com/insightlabs38-pixel/sd-sm
 // at commit 8b6f45035580b379f8e27af9cb537c4068896c09 (identical to their
-// board-best commit 12673d75a84ce13de0c21a687a605c5c86327d96 for this file).
+// board-best commit 12673d75a84ce13de0c21a687a605c5c86327d96 for this file),
+// with later local edits that only compress source formatting; the algorithm
+// and constants are unchanged from HighVelocity's implementation.
 // Their code is MIT licensed (Hackathon Raptors CIC and contributors); the
 // full license text is in THIRD_PARTY_LICENSES.md in this directory and the
 // copyright/permission notice below is retained as required:
@@ -43,7 +45,8 @@
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
 constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2;
-constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16, kPartCap = kIds * 256;
+constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16,
+                   kPartCap = kIds * 256;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
 
@@ -52,8 +55,8 @@ struct __attribute__((packed)) Rec {
   uint16_t tag;
 }; // tag: id | 5xx << 11
 using Run = std::pair<Rec *, uint32_t>;
-using Part =
-    std::pair<std::unique_ptr<char[]>, size_t>; // output text, its length
+// output text, its length
+using Part = std::pair<std::unique_ptr<char[]>, size_t>;
 
 [[noreturn]] void fail(const char *what) {
   std::perror(what);
@@ -93,10 +96,8 @@ struct Lanes {
   constexpr Lanes() {
     for (int m = 0; m < 256; ++m)
       for (int lane = 0, in = 0, out = 0; lane < 8; ++lane)
-        if (m >> lane & 1)
-          low[m][in++] = lane;
-        else
-          high[m][__builtin_popcount(m) + out++] = lane;
+        (m >> lane & 1 ? low[m][in++]
+                       : high[m][__builtin_popcount(m) + out++]) = lane;
   }
 };
 constexpr Lanes kLanes;
@@ -109,8 +110,8 @@ uint32_t split(const int32_t *src, int32_t *dst, uint32_t lo, uint32_t hi,
   uint32_t i = lo, l = lo, r = hi;
   for (; hi - i >= 16; i += 8) {
     const __m256i v = load(src + i);
-    const uint32_t m = _mm256_movemask_ps(
-        _mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
+    const uint32_t m =
+        _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(bound, v)));
     auto lanes = [&](const uint8_t *idx) {
       return _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)idx));
     };
@@ -152,13 +153,15 @@ __m256i merge8(__m256i v) { // v is a bitonic sequence
 }
 void sort16(const int32_t *a, uint32_t n, int32_t *out) {
   const __m256i iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
-                big = _mm256_set1_epi32(INT32_MAX), count = _mm256_set1_epi32(n);
+                big = _mm256_set1_epi32(INT32_MAX),
+                count = _mm256_set1_epi32(n),
+                iota8 = _mm256_add_epi32(iota, _mm256_set1_epi32(8));
   __m256i x = _mm256_blendv_epi8(big, load(a), _mm256_cmpgt_epi32(count, iota)),
-          y = _mm256_blendv_epi8(
-              big, load(a + 8),
-              _mm256_cmpgt_epi32(count, _mm256_add_epi32(iota, _mm256_set1_epi32(8))));
+          y = _mm256_blendv_epi8(big, load(a + 8),
+                                 _mm256_cmpgt_epi32(count, iota8));
   x = sort8(x);
-  y = _mm256_permutevar8x32_epi32(sort8(y), _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
+  y = _mm256_permutevar8x32_epi32(sort8(y),
+                                  _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0));
   _mm256_storeu_si256((__m256i *)out, merge8(_mm256_min_epi32(x, y)));
   _mm256_storeu_si256((__m256i *)(out + 8), merge8(_mm256_max_epi32(x, y)));
 }
@@ -222,9 +225,10 @@ struct SpinLock {
 
 // Exact endpoint dictionary. The global part is an append-only log (key image,
 // length, fingerprint) behind a lock whose size is published with a release
-// store; entries below it never change. Each worker mirrors the log in a private
-// bucket table, so the hot lookups are plain SIMD reads without sharing. Keys
-// are stored after a space and zero-padded, so n + 1 equal bytes prove equality.
+// store; entries below it never change. Each worker mirrors the log in a
+// private bucket table, so the hot lookups are plain SIMD reads without
+// sharing. Keys are stored after a space and zero-padded, so n + 1 equal bytes
+// prove equality.
 struct Names {
   alignas(64) char img[kIds][128]{};
   uint32_t len[kIds]{}, hash[kIds]{};
@@ -281,12 +285,11 @@ struct Local { // one worker's private open-addressing view of the dictionary
     names.img[id][n] = ' ';
     names.len[id] = n;
     names.hash[id] = h;
+    auto by_name = [&](uint32_t x, uint32_t y) {
+      return std::memcmp(names.img[x], names.img[y], 128) < 0;
+    };
     names.sorted.insert(
-        std::lower_bound(names.sorted.begin(), names.sorted.end(), id,
-                         [&](uint32_t x, uint32_t y) {
-                           return std::memcmp(names.img[x], names.img[y], 128) <
-                                  0;
-                         }),
+        std::lower_bound(names.sorted.begin(), names.sorted.end(), id, by_name),
         id);
     names.size.store(id + 1, std::memory_order_release);
     put(h, id);
@@ -349,7 +352,7 @@ struct Job {
   uint32_t written = 0;    // hours written so far
   bool writing = false;
   std::atomic<size_t> zapped{0}; // 4 MiB steps of the mapping released
-  std::vector<Rec *> runbufs; // free buffers, guarded by mu
+  std::vector<Rec *> runbufs;    // free buffers, guarded by mu
   std::vector<std::vector<int32_t>> latbufs;
   std::vector<std::unique_ptr<char[]>> outbufs;
 
@@ -381,9 +384,8 @@ struct Job {
   }
 
   // Parses one line of the stream; 256 readable bytes must follow it.
-  __attribute__((always_inline)) void line(Local &local, Stream &st,
-                                           Rec *(&wp)[kHours],
-                                           Rec *(&bp)[kHours]) {
+  __attribute__((always_inline)) void
+  line(Local &local, Stream &st, Rec *(&wp)[kHours], Rec *(&bp)[kHours]) {
     const char *p = st.pos;
     if (const uint64_t date = load64(p + 5); date != st.date) {
       st.date = date;
@@ -392,8 +394,7 @@ struct Job {
         Rec *r = take(runbufs);
         *st.at = bp[st.at - wp] =
             r ? r
-              : static_cast<Rec *>(
-                    std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t)));
+              : (Rec *)std::malloc(kRunCap * sizeof(Rec) + sizeof(uint64_t));
       }
     }
     _mm_prefetch(p + 1280, _MM_HINT_T0);
@@ -426,12 +427,10 @@ struct Job {
     Rec *wp[kHours]{}, *bp[kHours]{};
     Stream st[kStreams]; // interleaved streams overlap their latencies
     const char *p = align(block), *end = align(block + 1);
-    for (uint32_t i = 0; i < kStreams; ++i) {
+    for (uint32_t i = 0; i < kStreams; ++i)
       st[i].pos = i ? next_line(p + (end - p) * i / kStreams) : p;
-      st[i].stop = i + 1 < kStreams ? nullptr : end;
-    }
-    for (uint32_t i = 0; i + 1 < kStreams; ++i)
-      st[i].stop = st[i + 1].pos;
+    for (uint32_t i = 0; i < kStreams; ++i)
+      st[i].stop = i + 1 < kStreams ? st[i + 1].pos : end;
     // Every line has at most kMaxLine bytes, so this many lines are in range.
     for (size_t rounds = 1; rounds;) {
       size_t room = SIZE_MAX;
@@ -475,8 +474,8 @@ struct Job {
       std::lock_guard<SpinLock> names_lock(names.mu);
       order = names.sorted;
     }
-    uint32_t count[2 * kIds] = {}, pos[kIds],
-                       total = 0; // by tag: ids, then their 5xx
+    // by tag: ids, then their 5xx
+    uint32_t total = 0, count[2 * kIds] = {}, pos[kIds];
     for (const auto &[rec, n] : mine)
       for (uint32_t i = 0; i < n; ++i)
         ++count[rec[i].tag];
@@ -507,7 +506,8 @@ struct Job {
       const uint16_t id = live[i];
       const uint32_t errors = count[id + kIds], n = count[id] + errors;
       int32_t *const a = lat.data() + pos[id] - n;
-      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1,
+      const uint32_t ranks[3] = {(50 * n + 99) / 100 - 1,
+                                 (95 * n + 99) / 100 - 1,
                                  (99 * n + 99) / 100 - 1};
       int32_t value[3];
       if (scratch.size() < n + 16)
@@ -625,9 +625,9 @@ struct Job {
 } // namespace
 
 int main() {
-  const char *const dir = std::getenv("SD_DATA_DIR"),
-                    *const out = std::getenv("SD_OUT_DIR"),
-                    *const forced = std::getenv("SD_THREADS");
+  const char *dir = std::getenv("SD_DATA_DIR"),
+             *out = std::getenv("SD_OUT_DIR"),
+             *forced = std::getenv("SD_THREADS");
   const int in = open(
       (std::string(dir ? dir : "/data") + "/requests.log").c_str(), O_RDONLY);
   const size_t bytes = in < 0 ? 0 : lseek(in, 0, SEEK_END);
@@ -646,7 +646,8 @@ int main() {
     fail("open summary");
   cpu_set_t cpus{};
   sched_getaffinity(0, sizeof cpus, &cpus);
-  const uint32_t threads = forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
+  const uint32_t threads =
+      forced ? std::atoi(forced) : std::min(16, CPU_COUNT(&cpus));
   if (!(new Job(map, bytes, kLag, fd, threads))->run()) {
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET))
       fail("rewind summary");
