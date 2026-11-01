@@ -34,7 +34,7 @@ extern "C" {
 
 const INF: u64 = u64::MAX;
 const BLOB: usize = 512; // nodes per locality blob
-const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
+const PART_BITS: u32 = 14; // nodes per part: 2^14, so offsets fit in 16 bits
 const PAGE: usize = 512; // distances per page
 
 /// A pointer the threads share; every use writes indices no other thread writes.
@@ -501,9 +501,8 @@ fn main() {
                 if a.0 + b.0 >= best {
                     break;
                 }
-                // Expand the direction with the smaller tentative distance,
-                // keeping the two Dijkstra frontiers balanced by path cost.
-                let k = (queue[1].0[0].0 < queue[0].0[0].0) as usize;
+                // Expand the direction with the smaller live frontier.
+                let k = (queue[1].0.len() < queue[0].0.len()) as usize;
                 let (go, ga, gh) = sides[k];
                 let (a, b) = dist.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
