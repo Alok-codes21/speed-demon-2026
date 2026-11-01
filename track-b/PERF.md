@@ -1026,3 +1026,26 @@ the fault theory is dead and B is at its plateau.
 - v3 board results: run-2f665bc69212 T 0.111132 / 76.177358 and run-16416f81d0fe T 0.110762 / 76.321806 - median T 0.1109, about 76.25 points, all gates green on both. +15% over the raw engine's 0.0967 median buys exactness on any seed.
 - v4, the 2 MB attempt: the raw bucket shape (8x u32 tags + 8 actions, one line, 2 MB - the box has 2 MB of L2 per core) with 10 extra hash bits (32..42, disjoint from the top-15 bucket bits and the low-32 tag) stowed in each action and checked on a hit; interning never lets two terms share a bucket and tag, so the first tag match is provably the only candidate. A wrong answer then needs a 57-bit collision, about 2e-7 per corpus build, seed-independent. Correct (60/60 fuzz, 3/3 shas) but SLOWER on the board: run-6a9ed4544cbf T 0.121743 / 75.367890. The per-hit check costs more than the smaller table saves; v4 retired.
 - Decision: v3 restored as the tip. Freeze-safe engines on the board: v3 median T 0.1109 / ~76.25 vs v115 (all-ours, exact) 75.69 - v3 leads. The raw engine's 78.39 stays the banked best but is not freeze-safe (32-bit tags + hash-only phrases + the long-hash cancellation), so it cannot be the freeze tip under the owner's rule.
+
+## Step 76: v3s (2 MB table) - the footprint hypothesis tested and rejected
+
+- v3s = v3 with 1<<15 buckets (2 MB table, the box's L2 size) instead of 1<<16 (4 MB). Same 64-bit tags, same one-line buckets, same code otherwise. Bucket-full probability rises from 1.7% to 22%, paid as overflow walks.
+- Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT.
+- Board: run-5e07c4e4e1ee T 0.109865, M 44,412,928, S 1109, points 76.556203 - statistically identical to v3's 0.1108 median despite the halved table. The M readout (44.4 MB vs 47.1 MB) confirms the smaller table really ran.
+- Conclusion: the +15% over the raw engine is NOT cache footprint. It is the loop shape of the wider tag compare. v3 restored as the tip; v3s retired. This also retires the term-set-shrink route (its only win was fitting 2 MB).
+
+## Step 77: v7 (checking pass outlined cold) - the code-layout hypothesis tested and rejected
+
+- v7 = v3 with the whole checking pass moved out of the batch loop into a #[cold] #[inline(never)] function. A clean batch's inner loop then compiles byte-identical to the raw engine's; only a batch holding a >16-byte token calls the cold pass.
+- Motivation: v3 kept both loop copies inline, doubling the hot function's code and register pressure. If the +15% were code layout, outlining should recover it.
+- Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, five runs one hash.
+- Board: run-73baaa21981d T 0.108432, M 46,579,712, S 1140, points 76.402076 - inside v3's own spread (0.1065-0.1111), about 1.5% under v3's median. Nowhere near the ~10% the layout hypothesis predicted.
+- Conclusion: code layout is NOT the tax either. With footprint (step 76) and per-hit op count (v4c) also rejected, the remaining sources are the second lookup pass itself on flagged batches (about 6% of 16KB batches, each paying ~2x lookup) and the 64-bit compare path. v3 restored as the tip; v7 retired.
+
+## Step 78: v8 (line-grained checking) - only the lines that hold a long token pay
+
+- v8 = v7 with the checking granularity cut from batch to line. The hash pass already touches every token; it now also records which document lines hold a >16-byte token (a small side list, deduplicated, ascending). A flagged batch then runs a mixed pass, outlined #[cold]: lines on the list run the confirming loop (a long-token hit is checked against the term's bytes), every other line runs the original branchless loop. Over 64 long-token lines falls back to the whole-batch checker. Exactness unchanged: bijective 64-bit tags for <=16 bytes, byte-confirmed hits for longer tokens, word-byte-confirmed phrases - correct on any seed.
+- Corpus facts behind the design: 3,969 tokens over 16 bytes in 3,903 of 250,000 documents, and every one of them is exactly 17 bytes; the query vocabulary's longest term is 17 bytes (94,752 terms; 65% are 8 bytes or fewer, 99.999% 16 or fewer).
+- Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, five runs one hash. Local 1 vCPU ABBA: +7.7% over the raw engine (min 0.361s vs 0.335s), vs +11.1% for v7 and +12% for v3 on the same rig - about a third of the tax recovered locally.
+- Board: run-babb38a91daf T 0.108477, M 46,551,040, S 1253, points 76.092399 - statistically identical to v7's 0.108432 and inside v3's spread (0.1065-0.1111). The line-grained pass recovered a third of the tax on the 1-vCPU rig (+7.7% vs +11.1%) but nothing measurable on the board: the second-pass cost model did not survive contact with the 12-thread box either. Residual tax now attributed to the 64-bit compare/action path itself (the one remaining structural difference a clean batch still executes).
+- A second v8 board run is queued via this PERF.md update; v8 stays tip while its 2-run median is measured against v3's 0.1094.
