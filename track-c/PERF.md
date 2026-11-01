@@ -1167,3 +1167,26 @@ Every step from the reference to your final version, each with the live-board ru
   banked 79.6396. REVERTED to v170 (banked code) on the points math.
 - Lesson, fed back to the loop: a candidate is a gain only if
   0.385*dT(ms) > 0.025*dS + 0.49*dM(MB).
+
+## Step 113 - v171: Cache Me step 24 port (alignas(64) Totals)
+- Cache Me's published step 24 (MIT, attributed): the per-country Totals struct
+  is exactly 64 bytes but malloc-aligned at 16, so most updates touched two
+  cache lines. alignas(64) makes it one. Zero counted-line cost. Their board:
+  0.0286 -> 0.0284. Our v170 had the identical layout flaw.
+- Gates: full seed-1 sha256 d8088b1c... exact; 6/6 fixtures; TSAN clean.
+  Local box: noise-level (0.2 ms is below this box's resolution).
+- v171's own board run was superseded by the v172 push; see step 114, whose
+  runs measure v171+step-114 together.
+
+## Step 114 - v172: ChatGPT candidate 5 (S-only cleanup) on v171
+- ChatGPT (project chat) found the S axis after the points formula was shared:
+  removed an unused u16 alias and string_view include, deduplicated the region
+  comma scan through comma_after(), and templated split() on the delimiter
+  array length. Three counted-line cuts, T-neutral by construction.
+- Gates: full seed-1 sha256 d8088b1c... exact; 6/6 fixtures; TSAN clean (hash
+  exact under TSAN). Local box: 0.0959 s vs v171's 0.0962 s (T-neutral, noise).
+- Run run-3ec4ea09a625 (commit fb64ce71ee): T 0.028125 s (best ever), M 8.55 MB,
+  S 398, 79.8495 pts - NEW BEST, +0.21 over run-93b4d3fbfbbf.
+- Run run-984dcb27e039 (commit 84b9894f6e, same code): T 0.028306 s, M 8.80 MB,
+  S 398, 79.6527 pts. S 404 -> 398: the judge counted the three cuts plus three
+  of the trimmed comments. KEEP.
