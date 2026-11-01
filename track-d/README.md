@@ -7,8 +7,9 @@ This submission is implemented in **Python 3.13 using only the standard library*
 - Build forward and reverse compressed sparse row (CSR) adjacency.
 - Answer queries with bidirectional Dijkstra and a lower-bound stopping rule.
 - Preserve input query order and output order.
-- Skip self-loops, cache duplicate query answers, and use low-degree shortcuts.
+- Skip self-loops and cache duplicate query answers.
 - Reset only nodes touched by each search and buffer the output.
+- Expand the frontier with the smaller current minimum distance in bidirectional Dijkstra.
 
 ## Dependencies
 
