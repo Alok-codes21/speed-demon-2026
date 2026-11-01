@@ -206,7 +206,7 @@ public:
     std::sort(heavy_.begin(), heavy_.end());
   }
   u32 weight(const Entry &e) const {
-    if (e.w != 0xFFFF)
+    if (__builtin_expect(e.w != 0xFFFF, 1))
       return e.w;
     return std::lower_bound(heavy_.begin(), heavy_.end(),
                             std::make_pair(&e, 0u))
@@ -238,7 +238,7 @@ struct Rows {
   }
   u32 head(u32 e) const { return e >> wbits; }
   u64 weight(u32 e, size_t i) const {
-    if ((e & mask) != mask)
+    if (__builtin_expect((e & mask) != mask, 1))
       return e & mask;
     return std::lower_bound(escapes.begin(), escapes.end(),
                             std::make_pair(u32(i), u64(0)))
@@ -621,9 +621,10 @@ struct Queue {
     cur = near = 0;
   }
   void push(u64 d, u32 v, bool take = true) {
-    if ((d >> shift) - cur >= B) {
-      if (take)
-        far.push({d, v});
+    if (!take)
+      return;
+    if (__builtin_expect((d >> shift) - cur >= B, 0)) {
+      far.push({d, v});
       return;
     }
     unsigned b = (d >> shift) & (B - 1);
@@ -710,14 +711,15 @@ struct Side {
       }
       u32 u = bk.data[k] & mask;
       u64 d = base | bk.data[k] >> queue.node_bits;
-      if (dist.get(u) != d)
+      if (__builtin_expect(dist.get(u) != d, 0))
         continue;
       ++count;
       g.each(u, [&](u32 e, size_t i) {
         u32 v = g.head(e);
-        u64 nd = d + g.weight(e, i), *x = dist.slot(v), old = *x;
+        u64 nd = d + g.weight(e, i), old = dist.get(v);
         bool take = nd < old;
-        *x = take ? nd : old;
+        if (take)
+          *dist.slot(v) = nd;
         queue.push(nd, v, take);
         best = std::min(best, nd + other.dist.get(v));
       });
@@ -739,19 +741,18 @@ struct Worker {
     if (fwd.g.slot[size_t(s) * 4] == Rows::EMPTY ||
         bwd.g.slot[size_t(t) * 4] == Rows::EMPTY)
       return -1;
-    bwd.dist.reset();
     fwd.start(s);
+    bwd.start(t);
     u64 best = INF;
     size_t fs = 0, bs = 0;
     while (fs < PROBE) {
       u64 f = fwd.queue.lower_bound(), known = fwd.dist.get(t);
-      if (known < f)
+      if (known != INF && known <= f)
         return int64_t(known);
       if (f == INF)
         return -1;
       fs += fwd.drain(bwd, best);
     }
-    bwd.start(t);
     best = std::min(best, fwd.dist.get(t));
     for (;;) {
       u64 f = fwd.queue.lower_bound(), b = bwd.queue.lower_bound();
@@ -771,7 +772,7 @@ int main() {
   std::string data = env_data ? env_data : "/data",
               out = env_out ? env_out : "/out";
   unsigned threads =
-      std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
+      std::min(12u, std::max(1u, std::thread::hardware_concurrency()));
   if (getenv("SD_THREADS"))
     threads = std::max(1, std::min(64, atoi(getenv("SD_THREADS"))));
   std::vector<Query> queries = read_queries(data + "/queries.txt");
@@ -780,16 +781,35 @@ int main() {
   std::vector<int64_t> answers(queries.size(), -1);
   std::vector<u32> order(queries.size());
   std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(),
-            [&](u32 a, u32 b) { return queries[a].from < queries[b].from; });
+  std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
+    if (queries[a].from != queries[b].from)
+      return queries[a].from < queries[b].from;
+    return queries[a].to < queries[b].to;
+  });
+  std::vector<std::pair<size_t, size_t>> groups;
+  for (size_t begin = 0; begin < order.size();) {
+    size_t end = begin + 1;
+    const Query &q = queries[order[begin]];
+    while (end < order.size() && queries[order[end]].from == q.from &&
+           queries[order[end]].to == q.to)
+      ++end;
+    groups.push_back({begin, end});
+    begin = end;
+  }
+  unsigned query_threads = std::min(12u, threads);
   std::atomic<size_t> next{0};
-  parallel(std::min<size_t>(threads, std::max<size_t>(1, queries.size())),
+  parallel(std::min<size_t>(query_threads, std::max<size_t>(1, groups.size())),
            [&](unsigned) {
              Worker worker(g);
-             for (size_t k; (k = next.fetch_add(1, std::memory_order_relaxed)) <
-                            queries.size();)
-               answers[order[k]] =
-                   worker.solve(queries[order[k]].from, queries[order[k]].to);
+             for (size_t task;
+                  (task = next.fetch_add(1, std::memory_order_relaxed)) <
+                  groups.size();) {
+               const auto [begin, end] = groups[task];
+               const Query &q = queries[order[begin]];
+               const int64_t answer = worker.solve(q.from, q.to);
+               for (size_t j = begin; j < end; ++j)
+                 answers[order[j]] = answer;
+             }
            });
   std::string text;
   for (int64_t x : answers)
