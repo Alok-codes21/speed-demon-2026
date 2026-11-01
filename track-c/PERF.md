@@ -1020,7 +1020,8 @@ Every step from the reference to your final version, each with the live-board ru
   79.2943 pts - NEW BANKED BEST (was 78.299604). Reproduces Cache Me's own
   board run the same hour (run-5b7c10e8801e, T 0.028895). Box normal at the
   time (Microsecond +1%, Lex +1%, ALL STAR +0% of best T).
-## Step 102: NickTrapp Architecture Adoption (1024-Entry L1 Hot Filter + BITS=18 Table) (v161)
+
+## Step 101: NickTrapp Architecture Adoption (1024-Entry L1 Hot Filter + BITS=18 Table) (v161)
 - Root Cause Identified:
   Profile showed 240 ms out of 530 ms CPU time was consumed by shared NameTable atomic contention and L3 cache line bouncing.
 - NickTrapp Solution:
@@ -1032,13 +1033,21 @@ Every step from the reference to your final version, each with the live-board ru
 - Run: run-7b8b188ae9cb (commit 749fc790): T_s = 0.032005, M = 14.76 MB, S = 409, K = 33.088, points = 75.983701.
   Diagnosis: BITS=18 doubled table size and per-country bitsets (seen_bits), driving M from 8.59 MB to 14.76 MB (-2.3 points on the M-axis). Names are uniform, so the 1024-entry filter yielded only ~1% hit rate while adding stack clearing churn.
 
+## Step 102: Parse Phase Pricing via Dual-Parse Diagnostic (v162-diag)
+- Run: run-7288367cbf69 (commit 10f92739): T_s = 0.052389, M = 8.59 MB.
+- Differential measurement:
+  - 1x parse (banked best run-00b1f75f8a19): T = 0.029047 s
+  - 2x parse (diagnostic run-7288367cbf69): T = 0.052389 s
+  - Delta = 0.023342 s (23.3 ms pure record parsing time across 12 threads)
+  - Non-parse overhead (file mapping, thread spawn/join, regions load, aggregates output) = 5.7 ms.
+
 ## Step 103: Fast-Path Probe, SWAR Region Comma, Per-Piece Streaming DONTNEED, and M-Recovery (v163)
 - Changes:
   1. M-Axis Recovery: Reverted BITS=18 back to BITS=17 (131,072 slots), restoring total memory footprint to 8.59 MB (reclaiming +2.3 points).
   2. Per-Piece Streaming Mapping (Cache Me Step 21 proven): Kept MADV_POPULATE_READ before each parsed piece and immediate MADV_DONTNEED upon piece completion. This prevents accumulating resident pages and cuts kernel unmapping time at exit from 8 ms to 0 ms.
-  3. Fast-Path Probe in NameTable::id: 97% of records are lookups of already-inserted names. Branch-predicted early exit if (__builtin_expect(hit != 0, 1)) return i + __builtin_ctz(hit); skips the ree mask vector calculation and atomic CAS logic entirely, eliminating 6.6 million AVX2 instructions across the run.
+  3. Fast-Path Probe in NameTable::id: 97% of records are lookups of already-inserted names. Branch-predicted early exit if (__builtin_expect(hit != 0, 1)) return i + __builtin_ctz(hit); skips the free mask vector calculation and atomic CAS logic entirely, eliminating 6.6 million AVX2 instructions across the run.
   4. SWAR Region Comma: Replaced 256-bit AVX2 compare for region_id comma with single-cycle SWAR comma_after(p) load.
   5. S-Axis Source Golf: Condensed statements and removed redundant comments to reduce non-blank source lines from 409 to ~330 lines.
   6. Kept process exit bypass (_exit(0)) and output reservation.
-- Target: Drop T to ~0.024-0.027s, recover M = 8.59 MB, S ~330 lines, lifting Track C score to 81.5 - 83.0+ points.
+- Target: Drop T from 29.0 ms to ~22-25 ms, recover M = 8.59 MB, S ~330 lines, lifting Track C score to 81.5 - 83.0+ points.
 - Run: PENDING
