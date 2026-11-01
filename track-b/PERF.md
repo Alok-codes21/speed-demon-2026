@@ -947,3 +947,12 @@ the fault theory is dead and B is at its plateau.
 - Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites. Line-neutral vs v99 (S unchanged).
 - Bench: fresh 31-pair 3-way interleaved ABBA, 62 runs/engine: v99 min 0.456 s vs v107 min 0.451 s (+1.1% mins, +0.8% median). Under the promotion bar, so held - UNTIL the board gave v99 its second sub-74.02 run (run-9cb0135dd81d: T 0.165363, M 46,989,312, pts 73.771138; first was run-4f27f68a3c35, 74.018248). Strike rule fired with v107 as the designated successor (owner decision, 19:41 IST) -> LIVE, this push.
 - Same strike rule on v107: two sub-74.02 runs (or T > ~0.169 twice) -> restore the step-63 (v97) file. Trial phase (structural redesigns) may supersede; v90 banked best 74.14792 is sticky regardless.
+
+## Step 67: aligned-group probing (adopted from Cache Me step 62, MIT-licensed, credit kept)
+
+- find/insert probe from the start of the aligned group of 4 slots the hash points into: one aligned 32-byte load and two compares find the term or the first free slot; the probe loop almost never repeats and its exit is predictable. Table window 32-byte aligned by over-allocating the Vec by 8 slots (no leak, memory unchanged).
+- Source: Cache Me step 62, which gained +7.3% on the board (0.1629 -> 0.1510 s) for this plus a branch-free hash; our AVX2 KEEP hash is already branch-free, so this push is the probing half only.
+- Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
+- Bench (1 vCPU, 6-pair ABBA interleaved mins): v107 470 ms vs v109 429 ms (-8.7%), v109-min wins 6/6 pairs.
+- 20 lines shorter (645 vs 665).
+- Board trial under the trial-phase rules; v107 stays restore-ready in one push. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
