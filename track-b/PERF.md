@@ -974,3 +974,11 @@ the fault theory is dead and B is at its plateau.
 - Step 74 (inline phrase records) REGRESSED 0.144 -> 0.189 on the board for them; not adopted.
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites. Local bench neutral (page-drop and bcmp effects need the 12-thread box).
 - +22 lines (680 vs 658). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+
+## Step 70: 4x Units chunk (Claude-identified mmap-threshold interaction)
+
+- mallopt(M_MMAP_THRESHOLD, 64 KB) makes every Units chunk its own mmap, and every consumed chunk a munmap at scatter time; mmap/munmap serialize on the process VM lock and munmap triggers TLB shootdowns on every core that ran the process (only visible at 12 threads). strace on a full run: 441 munmap / 492 mmap calls.
+- Change: Units::grow chunk 1<<15 -> 1<<17 u16 (256 KB): one constant, line-neutral, postings order unchanged so output is byte-exact; untouched tail pages are never resident, so RSS is unchanged.
+- Measured locally (1 vCPU): munmap count ~unchanged (444; ~384 of them are the single first chunk of each non-empty Units, 32 buckets x 12 threads - the chunk growth was only ~15% of the calls), ABBA neutral (v114 min 0.400 vs v113 min 0.396). The board trial decides the VM-lock/TLB half; the per-thread pre-reserved region (one release per thread) is the follow-up if it fires.
+- Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
+- 680 lines, unchanged. Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best.
