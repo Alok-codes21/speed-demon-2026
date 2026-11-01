@@ -857,7 +857,7 @@ struct Worker {
     size_t fs = 0, bs = 0;
     while (fs < PROBE) {
       u64 f = fwd.queue.lower_bound(), known = fwd.dist.get(t);
-      if (known <= f)
+      if (known != INF && known <= f)
         return int64_t(known);
       if (f == INF)
         return -1;
