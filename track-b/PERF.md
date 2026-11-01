@@ -753,3 +753,18 @@ synthetic single-term suite: 0 matches instead of 144).
   held ledger's v53 note).
 - Sibling-folder re-roll (run-1424f5aaabc6): T=0.1792 s, S=652,
   72.42 pts. v42 T band across eight readings: 0.1715-0.1928 s.
+
+## Step 43: hash-only terms table (v43, Cache Me adoption)
+
+Cache Me's 2026-11-01 change (their commit fae41d5e, MIT - see the
+header) removes the keys array from the terms table: a full 64-bit
+token hash, each slot the top 46 hash bits above id + 1, and find
+compares hash bits only, so no key is ever loaded or compared. The
+keys[] dependent load was the scan's last unprefetched miss, and the
+scan ring now carries 8-byte hashes instead of 32-byte keys. A false
+match needs a 63-bit hash collision per probe pair (~2^-63), so
+correctness is not a gamble. Gates: full corpus byte-exact, sample
+byte-exact, all six adversarial suites byte-exact vs the trusted
+binary. Expected: S 652 -> ~642, M -2.4 MB (keys array and its
+renumber clone gone), and the T win Cache Me's own first roll
+(73.234 at T=0.1732 s) has not shown yet.
