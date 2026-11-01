@@ -81,8 +81,8 @@ const HEADER: usize = 1;
 const JOBS: usize = 16;
 const TALLY_IDS: usize = 10;
 const BATCH: usize = 1 << 14; // bytes of text between the token pass and the term pass
-const BUCKETS: usize = 1 << 15;
-const BUCKET_SLOTS: usize = 7;
+const BUCKETS: usize = 1 << 16;
+const BUCKET_SLOTS: usize = 4;
 const ID_BLOCK: usize = 32; // term ids a thread takes at once while parsing queries
 const MAX_TERMS: usize = BUCKETS * BUCKET_SLOTS + 64 * ID_BLOCK;
 const AHEAD: usize = 20; // tokens between a bucket's prefetch and its lookup
@@ -99,17 +99,19 @@ const WORKSPACE: usize = 32 << 20;
 // Words in a phrase, at most (the grammar allows 2 to 8).
 const MAX_WORDS: usize = 8;
 
-/// Two cache lines. Tags hold the WHOLE 64-bit hash: for tokens of 16 bytes or fewer the
-/// hash is two AES rounds of the padded token, a bijection, so distinct short tokens can
-/// never collide and equal ones always agree. Longer tokens are rare (the corpus caps them
-/// at 32 bytes) and every hit on one is checked against the term's bytes, so no seed can
-/// turn the long-token mix into a wrong answer. The last action answers for a hash found
-/// in no slot, so that a miss takes the same path as a hit.
+/// One cache line again, now with the WHOLE 64-bit hash as the tag: 4 tags + 5 actions.
+/// For tokens of 16 bytes or fewer the hash is two AES rounds of the padded token, a
+/// bijection, so distinct short tokens can never collide and equal ones always agree.
+/// Longer tokens are rare (generated vocabulary is at most 17 bytes) and every hit on one
+/// is checked against the term's bytes, so no seed can turn the long-token mix into a
+/// wrong answer. Twice as many buckets keep the load low, so overflow stays rare.
 #[repr(C, align(64))]
 struct Bucket {
-    tags: [u64; BUCKET_SLOTS + 1],
+    tags: [u64; BUCKET_SLOTS],
+    // One past the slots: the action for a hash found in no slot (0, or OVERFLOW when the
+    // bucket is full), so that a miss takes the same path as a hit.
     actions: [u32; BUCKET_SLOTS + 1],
-    _pad: [u32; 8],
+    _pad: [u32; 3],
 }
 
 /// A worker's space for a batch of text.
@@ -407,16 +409,11 @@ unsafe fn action_term(run: &Run, action: u32) -> u32 {
 unsafe fn action_in(buckets: *const Bucket, hash: u64) -> u32 {
     let bucket = buckets.add(bucket_of(hash));
     let wanted = _mm256_set1_epi64x(hash as i64);
-    let tags = (*bucket).tags.as_ptr();
-    let low = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-        _mm256_load_si256(tags.cast()),
+    let same = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+        _mm256_load_si256(bucket.cast()),
         wanted,
     ))) as u32;
-    let high = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
-        _mm256_load_si256(tags.add(4).cast()),
-        wanted,
-    ))) as u32;
-    let found = (low | high << 4) | 1 << BUCKET_SLOTS;
+    let found = same | 1 << BUCKET_SLOTS;
     let action = (*bucket).actions[found.trailing_zeros() as usize];
     if action == OVERFLOW {
         return Run::action_past(buckets, hash);
@@ -587,9 +584,7 @@ impl Run {
                 let to = b.lines[line] as usize;
                 while token < to {
                     let ahead = bucket_of(*hashes.add(token + AHEAD));
-                    let far = buckets.add(ahead).cast::<u8>();
-                    _mm_prefetch::<_MM_HINT_T0>(far.cast());
-                    _mm_prefetch::<_MM_HINT_T0>(far.add(64).cast());
+                    _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
                     let mut action = action_in(buckets, *hashes.add(token));
                     if action != 0 {
                         let (from, upto) = span(token);
@@ -633,9 +628,7 @@ impl Run {
                 let to = b.lines[line] as usize;
                 while token < to {
                     let ahead = bucket_of(*hashes.add(token + AHEAD));
-                    let far = buckets.add(ahead).cast::<u8>();
-                    _mm_prefetch::<_MM_HINT_T0>(far.cast());
-                    _mm_prefetch::<_MM_HINT_T0>(far.add(64).cast());
+                    _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
                     let action = action_in(buckets, *hashes.add(token));
                     // All three stores happen, and only the right counts move.
                     *heavy_hits.add(heavy_count) = action;
