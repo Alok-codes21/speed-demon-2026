@@ -237,7 +237,7 @@ public:
     std::sort(heavy_.begin(), heavy_.end());
   }
   u32 weight(const Entry &e) const {
-    if (e.w != 0xFFFF)
+    if (__builtin_expect(e.w != 0xFFFF, 1))
       return e.w;
     return std::lower_bound(heavy_.begin(), heavy_.end(),
                             std::make_pair(&e, 0u))
@@ -276,7 +276,7 @@ struct Rows {
   }
   u32 head(u32 e) const { return e >> wbits; }
   u64 weight(u32 e, size_t i) const {
-    if ((e & mask) != mask)
+    if (__builtin_expect((e & mask) != mask, 1))
       return e & mask;
     return std::lower_bound(escapes.begin(), escapes.end(),
                             std::make_pair(u32(i), u64(0)))
@@ -715,9 +715,8 @@ struct Queue {
   void push(u64 d, u32 v, bool take = true) {
     if (!take)
       return;
-    if ((d >> shift) - cur >= B) {
-      if (take)
-        far.push({d, v});
+    if (__builtin_expect((d >> shift) - cur >= B, 0)) {
+      far.push({d, v});
       return;
     }
     unsigned b = (d >> shift) & (B - 1);
@@ -817,7 +816,7 @@ struct Side {
       }
       u32 u = bk.data[k] & mask;
       u64 d = base | bk.data[k] >> queue.node_bits;
-      if (dist.get(u) != d)
+      if (__builtin_expect(dist.get(u) != d, 0))
         continue;
       ++count;
       g.each(u, [&](u32 e, size_t i) {
