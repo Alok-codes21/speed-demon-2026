@@ -142,13 +142,13 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 
 /// A 64-bit hash of the whole key, multiplied and folded word by word (no
 /// generated token is over 17 bytes, so the last word is nearly always zero).
-#[inline(always)]
-unsafe fn hash(k: __m256i) -> u64 {
-    let w: [u64; 4] = std::mem::transmute(k);
-    let c1 = _mm_crc32_u64(0x243F_6A88_85A3_08D3, w[0]);
-    let c2 = _mm_crc32_u64(w[2], w[1]);
-    let h = (c1 as u64) ^ ((c2 as u64).rotate_left(32));
-    (h ^ (h >> 31)).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+fn hash(k: __m256i) -> u64 {
+    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
+    let a = (w[0] ^ 0x243F_6A88_85A3_08D3).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let b = (w[1] ^ 0x1319_8A2E_0370_7344).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let c = (w[2] ^ w[3].rotate_left(32)).wrapping_mul(0x1656_67B1_9E37_79F9);
+    let h = a ^ b.rotate_left(29) ^ c.rotate_left(43);
+    (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
 
@@ -187,7 +187,7 @@ impl Terms {
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        let h = unsafe { hash(key(term.as_ptr(), term.len())) };
+        let h = hash(unsafe { key(term.as_ptr(), term.len()) });
         let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
         while self.slot[i] != 0 {
             if self.slot[i] >> ID_BITS == h >> ID_BITS {
@@ -766,28 +766,10 @@ fn main() {
         i => {
             let mut at = start[i] as usize;
             let segs = &seg[i * THREADS..][..THREADS];
-            let total_len: usize = segs.iter().map(|&n| n as usize).sum();
-            let mut v = Vec::with_capacity(total_len);
+            let mut v = Vec::with_capacity(segs.iter().map(|&n| n as usize).sum());
             for (&n, &first) in segs.iter().zip(&firsts) {
-                let count = n as usize;
-                let slice = &post[at..at + count];
-                let chunks = count / 8;
-                let base = unsafe { _mm256_set1_epi32(first as i32) };
-                unsafe {
-                    let out_ptr = v.as_mut_ptr().add(v.len());
-                    let in_ptr = slice.as_ptr();
-                    for c in 0..chunks {
-                        let u16_vec = _mm_loadu_si128(in_ptr.add(c * 8) as *const __m128i);
-                        let u32_vec = _mm256_cvtepu16_epi32(u16_vec);
-                        let res = _mm256_add_epi32(u32_vec, base);
-                        _mm256_storeu_si256(out_ptr.add(c * 8) as *mut __m256i, res);
-                    }
-                    v.set_len(v.len() + chunks * 8);
-                }
-                for &d in &slice[chunks * 8..] {
-                    v.push(first + d as u32);
-                }
-                at += count;
+                v.extend(post[at..at + n as usize].iter().map(|&d| first + d as u32));
+                at += n as usize;
             }
             Docs::List(v)
         }
