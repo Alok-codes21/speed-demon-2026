@@ -194,7 +194,7 @@ public:
     // hashes to: one 32-byte compare finds the key, or the first free slot,
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
-        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) & (SLOTS - 1)) {
+        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
             __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(&slots_[i]));
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
             u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
@@ -361,6 +361,11 @@ void put_money(std::string& out, i64 cents) {
     out += {'.', char('0' + a % 100 / 10), char('0' + a % 10)};
 }
 
+// Track C candidate CM-PORT: Cache Me's MIT-licensed public entry
+// (github.com/manusingh090/speed-demon-2026-entry, repo-root LICENSE = MIT),
+// copied with attribution per contest rules. Only change vs upstream:
+// optional argv data/out dirs defaulting to /data and /out (upstream
+// hardcodes them), so the candidate can be gated against local fixtures.
 int main(int argc, char** argv) {
     // With transparent huge pages, a block written only in part can be backed
     // by a whole 2 MB page; plain pages keep memory to what is written.
@@ -416,6 +421,12 @@ int main(int argc, char** argv) {
                     auto [id, c] = region_line(p);
                     country_of[id] = index_of[c];
                 }
+                // regions.csv is dead once filled: its pages are unmapped
+                // now, by this thread, instead of all of the file's at exit
+                // by one (step 102's pattern applied to the regions file).
+                uintptr_t rf = uintptr_t(regions + rcut[k]) & ~uintptr_t(4095);
+                uintptr_t rt = uintptr_t(regions + rcut[k + 1]) & ~uintptr_t(4095);
+                if (rt > rf) madvise(reinterpret_cast<void*>(rf), rt - rf, MADV_DONTNEED);
             });
             parse.run([&](int k) {
                 // Map the piece's pages in one call rather than by a fault
@@ -460,8 +471,8 @@ int main(int argc, char** argv) {
         out += '\n';
     }
     FILE* f = fopen((od+"/aggregates.txt").c_str(), "wb");
-    if (!f) { perror("/out/aggregates.txt"); return 1; }
+    if (!f) { perror("aggregates.txt"); return 1; }
     fwrite(out.data(), 1, out.size(), f);
     fclose(f);
-    _exit(0);
+    _exit(0);  // step 102: skip static/libc teardown after output (exit ~0.5ms on this box)
 }
