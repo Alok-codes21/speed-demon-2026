@@ -49,3 +49,6 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-723f3bca34d8 | 9d5cb696 | 0.019720 | 20.13 | 574 | 83.025664 | Re-run on unchanged Track A source |
 | run-539c59e2c98e | 518d274f | 0.019563 | 20.39 | 574 | 83.057190 | Re-run on unchanged Track A source |
 | run-ad2ccd51ff28 | 4772ef2d | 0.017456 | 20.19 | 574 | 84.337938 | Re-run on unchanged Track A source |
+| run-2bef24dc3281 | a2519bb6 | 0.019758 | 19.95 | 574 | 83.044548 | Re-run on unchanged Track A source |
+| run-7a50c119cbd2 | 9cf30978 | - | - | - | - | Failed image-size gate (2.03 GiB > 2 GiB): single-stage Dockerfile experiment, reverted same hour |
+| run-c00185b3c7de | 49a2dda6 | 0.017245 | 20.40 | 514 | 84.784448 | Step 19 tree: S 514 (main.cpp 507 + Dockerfile 7) |
