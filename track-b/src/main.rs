@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Barrier, Mutex, Once, OnceLock};
 
 extern "C" {
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn _exit(status: i32) -> !;
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn mallopt(param: i32, value: i32) -> i32;
@@ -67,6 +68,12 @@ fn map(path: &str) -> &'static [u8] {
         let p = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0); // PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS
         let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p; // MAP_PRIVATE | MAP_FIXED
         assert!(p as isize != -1 && ok, "mmap {path}");
+        // 1BRC playbook: huge pages cut the minor-fault cost of a 243 MB map,
+        // WILLNEED starts the readahead pipeline before the scan threads land.
+        unsafe {
+            madvise(p, len, 14); // MADV_HUGEPAGE
+            madvise(p, len, 3); // MADV_WILLNEED
+        }
         std::slice::from_raw_parts(p, len)
     }
 }
