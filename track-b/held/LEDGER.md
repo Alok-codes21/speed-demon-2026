@@ -154,3 +154,41 @@ B ~= 71.6; rank 6 guseinov (76.52) B ~= 72.3.
   73 floor while v36 (est 71-75) gets its board reading.
 - Also fixed: v37_main.rs MIT header overcredited Lex (no Lex code in v37);
   corrected to Cache Me only.
+
+
+## 2026-11-01 morning results (all live on speed-demon, board-verified)
+
+Banked best on speed-demon: **72.967812 pts** (run-12afc353dbae, v42 code,
+T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
+
+- v36 (pushed 09:4x under the go): BUST on board - 63.92 pts (T blew up
+  ~2x vs local). Lesson: local timing indicative only, both directions.
+  Reverted same cycle. Retired.
+- v37 (plain Cache Me 2b1da445 + CR strip, corrected MIT header): board
+  71.34 (run-... see PERF.md step 37); arena fix (drop MALLOC_ARENA_MAX=2
+  from Dockerfile) -> 71.81, T -5.7%. Arena contention was the whole gap
+  vs Cache Me's T.
+- v38 = v37 + pair-filter + _exit: 71.17 first reading (slow roll).
+- v39 = v37 + Lex output port (push_u64, stack first-10, streaming phrase
+  eval; MIT, attribution in header): 72.87 new best (run-a24ae7f1a010).
+- v40 = v39 + _exit(0): 72.91 (run-2c594c5daa1e), then PERF doc re-roll
+  72.956095 (run-59934ee436be, T=0.171961).
+- v41 = v40 + S-diet emit helper: S 651 -> 647 confirmed; reading was a
+  slow roll (run-a96e527e91d6, T=0.1868, 72.13).
+- v42 = v41 + MADV_HUGEPAGE | MADV_WILLNEED on docs+queries maps (1BRC
+  playbook): 72.967812 new best (run-12afc353dbae, T=0.171759); re-roll
+  T=0.171544 (run-e905af6a4cdf). T band 0.1715-0.1720 vs v40's
+  0.1720-0.1868 - small real gain, kept.
+
+## Staged candidates (10:43 rule: research-derived items stage HERE, not speed-demon)
+
+- NONE currently. 1BRC audit: only madvise was applicable (shipped as
+  v42). Lemire SIMD galloping / SIMD-BP128 / TREC skip lists audit: all
+  applicable techniques already in the Cache Me base (galloping-style
+  skewed list intersect, rarest-anchor positional verification, adaptive
+  list<->bitmap, empty-list early exit); SIMD-BP128 would LOSE points
+  (M far under cap, decode adds T).
+- PGO: borderline (needs contest data committed to repo) - flagged to
+  Alok 10:40, not staged, not pushed.
+- HighVelocity C++ engine: gated byte-exact locally but 2.3x our CPU
+  work - not worth a board reading. Not staged.
