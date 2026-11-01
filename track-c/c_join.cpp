@@ -289,7 +289,11 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
             u64 q = mask64(lo, hi, '"');
             u64 in = _mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_cvtsi64_si128(q), _mm_set1_epi8(-1), 0)) ^ inside;
             inside = u64(i64(in) >> 63);
-            u64 m = (mask64(lo, hi, ',') | mask64(lo, hi, '\n')) & ~in;
+            const __m256i comma = _mm256_set1_epi8(','), lf = _mm256_set1_epi8('\n');
+            u64 m = (u32(_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(lo, comma), _mm256_cmpeq_epi8(lo, lf)))) |
+                     u64(u32(_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(hi, comma), _mm256_cmpeq_epi8(hi, lf)))))
+                        << 32) &
+                    ~in;
             qmask[b] = q;
             qbefore[b] = quotes;
             quotes += __builtin_popcountll(q);
@@ -414,14 +418,24 @@ int main(int argc, char** argv) {
     const size_t nregions = atoll(last) + 1;
     u8* country_of = zeroed<u8>(nregions);  // 0 = no such region
     std::vector<size_t> rcut = split(regions, strchr(regions, '\n') - regions + 1, rsize, nthreads, "\n");
-    std::vector<std::atomic<u8>> present(1 << 15);
-    std::array<u8, 1 << 15> index_of{};
-    std::vector<u32> codes;  // country index - 1 -> code
-    std::once_flag numbered;
-    auto number_countries = [&] {
-        for (u32 k = 0; k < present.size(); ++k)
-            if (present[k]) codes.push_back(k), index_of[k] = codes.size();
-        if (codes.size() > 255) { fputs("too many countries\n", stderr); _exit(1); }
+    // A country's index (1 to 255; 0 is _UNMATCHED) is given the first time
+    // any thread sees its code, under a lock (240 times in all); the output
+    // sorts them by code.
+    std::vector<std::atomic<u8>> index_of(1 << 15);
+    std::array<u32, 256> code_of{};  // index -> code
+    u32 ncountries = 0;
+    std::mutex numbering;
+    auto index = [&](u32 code) {
+        u8 i = index_of[code].load(std::memory_order_acquire);
+        if (i) return i;
+        std::lock_guard lock(numbering);
+        if (!(i = index_of[code].load(std::memory_order_relaxed))) {
+            if (ncountries == 255) { fputs("too many countries\n", stderr); _exit(1); }
+            i = ++ncountries;
+            code_of[i] = code;
+            index_of[code].store(i, std::memory_order_release);
+        }
+        return i;
     };
 
     // records.csv: skip the BOM and header, then split after CRLFs into eight
@@ -436,24 +450,19 @@ int main(int argc, char** argv) {
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
-    Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
+    Phase fill{.pieces = nthreads}, parse{.pieces = pieces};
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
-            flag.run([&](int k) {
+            fill.run([&](int k) {
                 populate_share(country_of, nregions, k, nthreads);
                 names.populate(k, nthreads);
-                for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];)
-                    present[region_line(p).second].store(1, std::memory_order_relaxed);
-            });
-            std::call_once(numbered, number_countries);
-            fill.run([&](int k) {
-                populate_share(seen.bits, (codes.size() + 1) * NamesSeen::WORDS, k, nthreads);
                 for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];) {
                     auto [id, c] = region_line(p);
-                    country_of[id] = index_of[c];
+                    country_of[id] = index(c);
                 }
             });
+            populate_share(seen.bits, (ncountries + 1) * NamesSeen::WORDS, t, nthreads);
             parse.run([&](int k) {
                 uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
                 madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
@@ -465,9 +474,12 @@ int main(int argc, char** argv) {
         });
     for (auto& th : pool) th.join();
 
+    std::vector<std::pair<u32, u32>> order;  // (code, index), countries by code, then _UNMATCHED
+    for (u32 i = 1; i <= ncountries; ++i) order.push_back({code_of[i], i});
+    std::sort(order.begin(), order.end());
+    order.push_back({0, 0});
     std::string out;
-    for (u32 i = 1; i <= codes.size() + 1; ++i) {
-        u32 c = i % (codes.size() + 1);
+    for (auto [k, c] : order) {
         Totals sum;
         for (const auto& per_thread : totals) {
             const Totals& t = per_thread[c];
@@ -484,7 +496,6 @@ int main(int argc, char** argv) {
         if (c == 0) {
             out += "_UNMATCHED";
         } else {
-            u32 k = codes[c - 1];
             out += {char('A' + (k >> 10)), char('A' + (k >> 5 & 31)), char('A' + (k & 31))};
         }
         for (u64 v : {sum.count, sum.id_sum}) out += ' ' + std::to_string(v);
