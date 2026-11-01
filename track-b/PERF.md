@@ -856,3 +856,9 @@ the fault theory is dead and B is at its plateau.
 - Cost being priced: the v21-era disable banked ~3 MB of M from huge-page rounding; if M lands far over 48 MB the points math sours (~-0.9 pts at 51 MB if T is flat).
 - Gated before push: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact, warm-neutral locally (0.518-0.539 s vs v62 base on the same rig).
 - Revert rule: revert if no repeatable >=3% T gain across board runs, or if M regresses past ~51 MB.
+
+## Step 52: v71 THP probe result + revert to v62 (this push)
+
+- v71 board result (run-45ff0f1cf47f, commit a2e9199b): T 0.173264, M 64,409,600 B, pts 71.651609. T in the usual band (no gain), M +16.4 MB over v62's 48.0 MB - huge-page rounding on the heap structures, the exact bloat the v21-era prctl disable banked.
+- Verdict: THP-on-heap is disqualified on this layout with evidence. This push restores v62 (POPULATE_READ tip) verbatim as the live build; the THP question is closed.
+- Banked best stands: run-9ebd09cd0394, T 0.169129, M 48,037,888 B, pts 73.246666.
