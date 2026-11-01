@@ -820,9 +820,10 @@ struct Side {
       ++count;
       g.each(u, [&](u32 e, size_t i) {
         u32 v = g.head(e);
-        u64 nd = d + g.weight(e, i), *x = dist.slot(v), old = *x;
+        u64 nd = d + g.weight(e, i), old = dist.get(v);
         bool take = nd < old;
-        *x = take ? nd : old;
+        if (take)
+          *dist.slot(v) = nd;
         queue.push(nd, v, take);
         best = std::min(best, nd + other.dist.get(v));
       });
