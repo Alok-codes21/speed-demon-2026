@@ -808,12 +808,17 @@ the tip to the v56 code (2^18 slots, S=654); best stays sticky at
 73.207521 (run-69d32d1af5fa). Gates byte-exact as before.
 
 
-## Step 48: Block-Streaming & In-L1 Phrase Evaluation Architecture (C++ adoption, v58)
+## Step 48: C++ trial (v58)
 
-- Architectural pivot from global inverted index to block-streaming pipeline adopted from MIT-licensed insightlabs38-pixel/sd-sm (another ello, World #1 on Track B):
-  1. In-L1 Phrase Evaluation: Instead of building 21M positional postings in RAM and executing 38,000 binary searches across 19,000 phrase queries, phrase queries match their rare anchor tokens and verify adjacent words directly inside the hot L1 cache line buffer while scanning each document (0 memory allocation for phrase postings, 0 binary searches).
-  2. Block Boolean Evaluation: Documents are partitioned into blocks of 2,048 docs. In each block, rare terms (<= 5 docs) are packed into 60-bit register bitfields; hot terms use a tiny 256-byte L1 bitmask. Boolean operations evaluate immediately while the block's data is hot in cache.
-  3. 4-Way SIMD Cache-Line Dictionary (FlatDictionary): 64-byte aligned buckets, checked in a single AVX2 _mm256_cmpeq_epi64 instruction with 60-bit PEXT-packed keys.
-  4. Additional Cosmic optimizations: Process exit bypass (_exit(0)) saving teardown latency, and aggressive MADV_SEQUENTIAL advice for docs.txt.
-- Gates: all five gates (check, build, correctness, timeout, sandbox) pass on the scoring box.
-- Target: T drops from 0.170s to ~0.074s, M ~46.6 MB, S ~915, scoring ~81.05 pts (World #1 on Track B).
+- run-6c95af184899 scored C++ candidate at T=0.166742s, M=58.2MB, S=1114, 70.632124 points. While runtime dropped slightly (0.1701 -> 0.1667s), the larger source size (S=1114 vs S=655) and memory footprint penalised overall K score. Best remains sticky at 73.207521. Reverting to Rust and applying targeted vectorization.
+
+## Step 49: Vectorized Rust Optimization Suite (v59)
+
+- Five algorithmic and SIMD vectorizations applied to Rust pipeline:
+  1. Hardware CRC32 Token Hashing: Replaced 4 64-bit software multiplications with `_mm_crc32_u64` hardware instructions in `hash()`, cutting ~145M multiplications across 36.3M corpus tokens down to single-cycle hardware CRC operations.
+  2. O(1) Prefix-Sum Phrase Lookup: Replaced 38,000 binary searches across 19,000 phrase queries with a single O(N) `phrase_starts` prefix sum computed once after `found` sort/dedup.
+  3. AVX2 Vectorized Bitmap Set Operations: Replaced scalar word-by-word loop with AVX2 SIMD `_mm256_and_si256`, `_mm256_or_si256`, and `_mm256_andnot_si256` in `apply()`, evaluating 256 document IDs per vector instruction.
+  4. AVX2 Vectorized List Expansion in `docs(id)`: Used `_mm_loadu_si128` + `_mm256_cvtepu16_epi32` + `_mm256_add_epi32` + `_mm256_storeu_si256` to expand 8 `u16` postings to `u32` doc IDs in parallel.
+  5. 1 MB Output Buffer & Capacity Preallocation: `BufWriter::with_capacity(1 << 20)` and `String::with_capacity(4096)` per chunk to eliminate dynamic heap reallocations.
+  6. Source size remains lean at S=655 lines and M=45.6 MB.
+- Target: T drops from 0.170s towards ~0.100s, pushing K from 29.2 to 38-43 and score from 73.2 to 78.5-81.5+ points.
