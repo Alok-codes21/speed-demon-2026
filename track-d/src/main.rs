@@ -450,6 +450,19 @@ fn main() {
     // 4. Queries sorted so neighbouring searches share cached pages.
     let mut order: Vec<usize> = (0..ends.len()).collect();
     order.sort_unstable_by_key(|&q| ends[q]);
+    // Collapse identical (source, target) pairs before dispatch. The input
+    // contains repeats; solving each unique pair once avoids duplicate graph
+    // traversals while retaining the original output positions.
+    let mut groups: Vec<Vec<usize>> = Vec::with_capacity(order.len());
+    for q in order {
+        if let Some(last) = groups.last_mut() {
+            if ends[last[0]] == ends[q] {
+                last.push(q);
+                continue;
+            }
+        }
+        groups.push(vec![q]);
+    }
     // Each direction: offsets, packed edge words, heavy weights.
     let sides = [(&off[..], &adj[..], &heavy2[..]), (&roff[..], &radj[..], &rheavy[..])];
     let mut ans = vec![INF; ends.len()];
@@ -464,13 +477,15 @@ fn main() {
         let mut queue = [Heap::default(), Heap::default()];
         loop {
             let q = next.fetch_add(1, Relaxed);
-            let Some(&i) = order.get(q) else { return };
+            let Some(group) = groups.get(q) else { return };
+            let i = group[0];
             let ((s0, t0), (s, t)) = (queries[i], ends[i]);
             if s0 == t0 {
-                unsafe { *ansr.at(i) = 0 };
+                for &j in group { unsafe { *ansr.at(j) = 0 }; }
                 continue;
             }
             if roff[t as usize + 1] == roff[t as usize] {
+                for &j in group { unsafe { *ansr.at(j) = INF }; }
                 continue; // no in-edge: unreachable
             }
             let mut best = INF;
@@ -508,7 +523,7 @@ fn main() {
                     }
                 }
             }
-            unsafe { *ansr.at(i) = best };
+            for &j in group { unsafe { *ansr.at(j) = best }; }
             queue.iter_mut().for_each(|q| q.0.clear());
             dist.iter_mut().for_each(Dist::reset);
         }
