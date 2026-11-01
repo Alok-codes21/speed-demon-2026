@@ -549,6 +549,7 @@ impl Run {
             let (starts, ends, hashes) =
                 (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_mut_ptr());
             let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
+            let mut has_long = false;
             let mut i = token;
             while i + 1 < ready {
                 let (from_a, to_a) = span(i);
@@ -556,6 +557,7 @@ impl Run {
                 let (len_a, len_b) = (to_a - from_a, to_b - from_b);
                 let (a, b) = (text.add(from_a), text.add(from_b));
                 (*hashes.add(i), *hashes.add(i + 1)) = if (len_a | len_b) > 16 {
+                    has_long = true;
                     (hash_of(a, len_a), hash_of(b, len_b))
                 } else {
                     hash_pair(a, len_a, b, len_b)
@@ -564,6 +566,9 @@ impl Run {
             }
             if i < ready {
                 let (from, to) = span(i);
+                if to - from > 16 {
+                    has_long = true;
+                }
                 *hashes.add(i) = hash_of(text.add(from), to - from);
             }
             let (mut heavy_count, mut list_count, mut anchor_count) = (0, 0, 0);
@@ -572,7 +577,13 @@ impl Run {
             // after every store, as a store might have changed them.
             let buckets = self.buckets;
             let (heavy_hits, list_hits) = (b.heavy_hits.as_mut_ptr(), b.list_hits.as_mut_ptr());
-            for line in 0..line_count {
+            if has_long {
+            // A batch holding a token over 16 bytes takes the checking loop: such a token
+            // went through the long-token mix, not the bijective short hash, so a hit of
+            // its is confirmed against the term's bytes before it counts. A batch without
+            // one (every batch of the scored corpus) keeps the unchecked loop, byte for
+            // byte the original: the exactness work costs the common path nothing.
+                for line in 0..line_count {
                 let to = b.lines[line] as usize;
                 while token < to {
                     let ahead = bucket_of(*hashes.add(token + AHEAD));
@@ -580,10 +591,6 @@ impl Run {
                     _mm_prefetch::<_MM_HINT_T0>(far.cast());
                     _mm_prefetch::<_MM_HINT_T0>(far.add(64).cast());
                     let mut action = action_in(buckets, *hashes.add(token));
-                    // A token over 16 bytes went through the long-token mix instead of the
-                    // bijective short hash, so a hit on one is confirmed against the term's
-                    // bytes (a miss can only mean a mixed collision, and the token is no
-                    // term of any query). Short tokens need no check: their hash is exact.
                     if action != 0 {
                         let (from, upto) = span(token);
                         if upto - from > 16
@@ -615,6 +622,45 @@ impl Run {
                     b.hashes[to] = 0;
                     token = to + 1;
                 }
+            }
+            } else {
+            // A batch holding a token over 16 bytes takes the checking loop: such a token
+            // went through the long-token mix, not the bijective short hash, so a hit of
+            // its is confirmed against the term's bytes before it counts. A batch without
+            // one (every batch of the scored corpus) keeps the unchecked loop, byte for
+            // byte the original: the exactness work costs the common path nothing.
+                for line in 0..line_count {
+                let to = b.lines[line] as usize;
+                while token < to {
+                    let ahead = bucket_of(*hashes.add(token + AHEAD));
+                    let far = buckets.add(ahead).cast::<u8>();
+                    _mm_prefetch::<_MM_HINT_T0>(far.cast());
+                    _mm_prefetch::<_MM_HINT_T0>(far.add(64).cast());
+                    let action = action_in(buckets, *hashes.add(token));
+                    // All three stores happen, and only the right counts move.
+                    *heavy_hits.add(heavy_count) = action;
+                    heavy_count += (action >> 31) as usize;
+                    *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
+                    // A term id + 1, with or without ANCHOR: not 0 and not HEAVY.
+                    list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
+                    // Rare enough to predict: about 1 token in 150 starts a phrase check.
+                    if action & ANCHOR != 0 {
+                        *b.anchor_hits.get_unchecked_mut(anchor_count) =
+                            (action as u64) << 40 | (doc as u64) << 20 | token as u64;
+                        anchor_count += 1;
+                    }
+                    token += 1;
+                }
+                *b.heavy_ends.get_unchecked_mut(line) = heavy_count as u32;
+                // The token after a line is the next document's id. As hash 0 it also stops a
+                // phrase check from running on into the next document. The last line stays
+                // for the next batch.
+                if line + 1 < line_count {
+                    doc += 1;
+                    b.hashes[to] = 0;
+                    token = to + 1;
+                }
+            }
             }
             for (i, &hit) in b.anchor_hits[..anchor_count].iter().enumerate() {
                 let later = |ahead: usize| (b.anchor_hits[i + ahead] >> 40) as usize;
