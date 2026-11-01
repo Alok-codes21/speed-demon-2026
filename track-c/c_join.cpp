@@ -421,12 +421,6 @@ int main(int argc, char** argv) {
                     auto [id, c] = region_line(p);
                     country_of[id] = index_of[c];
                 }
-                // regions.csv is dead once filled: its pages are unmapped
-                // now, by this thread, instead of all of the file's at exit
-                // by one (step 102's pattern applied to the regions file).
-                uintptr_t rf = uintptr_t(regions + rcut[k]) & ~uintptr_t(4095);
-                uintptr_t rt = uintptr_t(regions + rcut[k + 1]) & ~uintptr_t(4095);
-                if (rt > rf) madvise(reinterpret_cast<void*>(rf), rt - rf, MADV_DONTNEED);
             });
             parse.run([&](int k) {
                 // Map the piece's pages in one call rather than by a fault
