@@ -577,6 +577,7 @@ int main() {
       (bytes && mmap(map, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) ==
                     MAP_FAILED))
     fail("map requests");
+  madvise(map, bytes, MADV_HUGEPAGE); // the log is scanned once, densely
   const int fd =
       open((std::string(out ? out : "/out") + "/summary.txt").c_str(),
            O_WRONLY | O_CREAT, 0644); // an old file is overwritten in place
