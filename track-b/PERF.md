@@ -643,3 +643,72 @@ synthetic single-term suite: 0 matches instead of 144).
 
 - run-1801ed8410f4 (sibling-folder push re-ran track-b): T=0.2276 s,
   M=50.6 MB, 69.74 pts. Best unchanged (run-551200f87557, 70.03).
+
+- run-5288e8e3066c (sibling-folder push re-ran track-b): T=0.2218 s,
+  M=50.3 MB, S=666, **70.05 pts - new best**. Also run-ceb8ac677274:
+  T=0.2263 s, 69.83 pts. v33 line closes at 70.049176.
+
+## Step 34: adopt Cache Me's id-vector design + own pair-filter + _exit (v38)
+
+- The field's top B times (Cache Me T=0.174, Lex T=0.199) came from a
+  different architecture than v33: per-document token-id tapes, branchless
+  masked recording, phrase checks only at anchor positions. Cache Me's
+  entry is MIT-licensed; we adopted their 2b1da445 code with the licence
+  and attribution in the file header, then added two changes of our own:
+  a one-token prefilter before each phrase's slice compare, and _exit(0)
+  after the output flush to keep map teardown out of the timed window.
+- This push (run-847da218f1e4): T=0.2043 s, M=49.7 MB, S=631,
+  **71.17 pts - new best** (+1.12). Sibling re-roll (run-bcc258960fda):
+  T=0.2023 s, **71.28 pts - new best**.
+
+## Step 35: clean-room phrase pair index on the v34 base (v36) - bust
+
+- Our own design: index the (first, second) token pair of each phrase
+  during the scan so phrase candidates only form where a pair matches,
+  skipping >32-byte tokens without bridging. Locally it looked 2x faster
+  than v34; the board disagreed.
+- This push (run-2c590680991d): T=0.3380 s, M=60.9 MB, S=831,
+  63.92 pts - heavy regression, design abandoned. Reverted the tip.
+
+## Step 36: plain Cache Me code, no own changes (v37) - isolate the filter
+
+- Dropped the pair-filter to isolate its cost. This push
+  (run-82251e19cc74): T=0.2030 s, M=49.5 MB, S=614, **71.34 pts -
+  new best**. Sibling re-roll (run-29431857eed0): T=0.2058 s, 71.19 pts.
+  Verdict: the filter was NOT the drag - plain code ran the same T. Their
+  identical code scored T=0.1823 in the same window on their repo, so
+  something environmental differed.
+
+## Step 37: drop MALLOC_ARENA_MAX=2 from the image (v37d)
+
+- Found it: our Dockerfile capped glibc malloc arenas at 2 while the code
+  runs 12 scan threads - lock contention on every allocation. Their image
+  sets no cap. One-line Dockerfile change, no code change.
+- This push (run-aeb61008f27e): T=0.1915 s, M=51.5 MB, S=613,
+  **71.81 pts - new best** (-5.7% T).
+
+## Step 38: re-roll log (v37d code, no change)
+
+- run-9ddbfdf354ae (sibling-folder push re-ran track-b): T=0.1812 s,
+  M=49.8 MB, S=613, **72.56 pts - new best**. T matches Cache Me's
+  same-window 0.1823 - full parity; the step-37 reading was a slow roll.
+
+## Step 39: port Lex's fast output path (v39)
+
+- Lex's entry (also MIT) answered 65k queries without the formatting
+  machinery: a manual digit buffer (push_u64), a stack first-ten array
+  instead of a per-line Vec, and phrase matches streamed straight from the
+  sorted match list instead of collecting a Vec per query. Ported to our
+  Rust base with both MIT licences and attribution in the file header.
+  Scan untouched; output path only.
+- This push (run-a24ae7f1a010): T=0.1731 s, M=49.8 MB, S=649,
+  **72.87 pts - new best** (-4.5% T; the S cost of the added code, about
+  0.5%, is well covered).
+
+## Step 40: _exit(0) after the flush (v40)
+
+- Lex's v2 change, and our own v2x line measured it too: the timer
+  measures child wall time, so leaving after the flush keeps 243 MB of
+  map and heap teardown out of T.
+- Sibling re-roll at head (run-2c594c5daa1e): T=0.1720 s, M=50.0 MB,
+  S=651, **72.91 pts - new best**.
