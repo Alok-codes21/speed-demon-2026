@@ -307,7 +307,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         auto quotes_before = [&](u32 x) { return qbefore[x / 64] + __builtin_popcountll(_bzhi_u64(qmask[x / 64], x % 64)); };
         const char* chunk = p;
         for (u32 i = 0; i + 5 <= seps && p < end; i += 5) {
-            if (u8(*p) == 0xEF) p += 3;  // a byte order mark before the id
+            if (u8(*p) == 0xEF) p += 3;  // a byte order mark before the id: the generator emits concatenated parts
             const char *f1 = chunk + at[i], *f2 = chunk + at[i + 1], *f3 = chunk + at[i + 2];
             const char *f4 = chunk + at[i + 3], *eol = chunk + at[i + 4];
             u32 q1 = quotes_before(at[i]), q2 = quotes_before(at[i + 1]), q3 = quotes_before(at[i + 2]);
@@ -367,34 +367,24 @@ struct Phase {
     }
 };
 
-// Cuts of [from, size) into n ranges, each starting just after a delimiter.
-// With guided set (n a multiple of 4), the first half of the ranges are 1.5
-// times the average size, the next quarter 0.75 and the last quarter 0.25:
-// threads claiming them in turn then finish close together.
-template <size_t N>
-std::vector<size_t> split(const char* data, size_t from, size_t size, int n, const char (&delim)[N], bool guided = false) {
-    std::vector<size_t> cut(n + 1, size);
-    cut[0] = from;
-    auto at = [&](int t) {  // the share of the work before range t, in units of 1/(8n)
-        if (!guided) return u64(8 * t);
-        if (t <= n / 2) return u64(12 * t);
-        if (t <= 3 * n / 4) return u64(6 * n + 6 * (t - n / 2));
-        return u64(6 * n + 6 * (n / 4) + 2 * (t - 3 * n / 4));
-    };
-    for (int t = 1; t < n; ++t) {
-        size_t c = std::max(cut[t - 1], from + size_t((size - from) * at(t) / (8 * u64(n))));
-        auto* hit = static_cast<const char*>(memmem(data + c, size - c, delim, N - 1));
-        cut[t] = hit ? hit - data + N - 1 : size;
-    }
-    return cut;
-}
-
+// The start of piece t of n over [from, size) is the first delimiter at or
+// after t's nominal share of the work. Each worker computes the two bounds of
+// a piece it claims instead of main pre-cutting serially: the nominal shares
+// never decrease, the delimiters used ("\n", "\r\n") never overlap themselves,
+// and both give cuts that tile [from, size) starting right after a delimiter.
+// Which thread a boundary record lands with can differ from a sequential cut,
+// but every total is an integer sum, min or max over per-thread rows and every
+// distinct count is a shared first-sighting, so the merged output is identical.
 void put_money(std::string& out, i64 cents) {
     u64 a = cents < 0 ? -u64(cents) : u64(cents);
     out += cents < 0 ? " -" : " ";
     out += std::to_string(a / 100);
     out += {'.', char('0' + a % 100 / 10), char('0' + a % 10)};
 }
+
+// Country-code numbering lives in BSS: 32 KB zeroed by the loader, not at run
+// time on the main thread.
+std::array<std::atomic<u8>, 1 << 15> index_of;
 
 // Track C candidate CM-PORT: Cache Me's MIT-licensed public entry
 // (github.com/manusingh090/speed-demon-2026-entry, repo-root LICENSE = MIT),
@@ -417,11 +407,10 @@ int main(int argc, char** argv) {
     const char* last = static_cast<const char*>(memrchr(regions, '\n', rsize - 1)) + 1;
     const size_t nregions = atoll(last) + 1;
     u8* country_of = zeroed<u8>(nregions);  // 0 = no such region
-    std::vector<size_t> rcut = split(regions, strchr(regions, '\n') - regions + 1, rsize, nthreads, "\n");
+    const size_t rfrom = strchr(regions, '\n') - regions + 1;
     // A country's index (1 to 255; 0 is _UNMATCHED) is given the first time
     // any thread sees its code, under a lock (240 times in all); the output
     // sorts them by code.
-    std::vector<std::atomic<u8>> index_of(1 << 15);
     std::array<u32, 256> code_of{};  // index -> code
     u32 ncountries = 0;
     std::mutex numbering;
@@ -443,36 +432,66 @@ int main(int argc, char** argv) {
     // (more first sightings of names) is evened out by the others.
     size_t start = size ? static_cast<const char*>(memchr(records, '\n', size)) - records + 1 : 0;
     const int pieces = 8 * nthreads;
-    std::vector<size_t> cut = split(records, start, size, pieces, "\r\n", true);
-    std::vector<std::array<Totals, 256>> totals(nthreads);
+    auto at = [&](int t) {  // the share of the work before piece t, in units of 1/(8*pieces)
+        if (t <= pieces / 2) return u64(12 * t);
+        if (t <= 3 * pieces / 4) return u64(6 * pieces + 6 * (t - pieces / 2));
+        return u64(6 * pieces + 6 * (pieces / 4) + 2 * (t - 3 * pieces / 4));
+    };
+    auto bound = [&](int t) {  // the start of records piece t
+        if (t == 0) return start;
+        if (t == pieces) return size;
+        size_t c = start + size_t((size - start) * at(t) / (8 * u64(pieces)));
+        auto* hit = static_cast<const char*>(memmem(records + c, size - c, "\r\n", 2));
+        return hit ? size_t(hit - records) + 2 : size;
+    };
+    auto rbound = [&](int t) {  // the start of regions piece t
+        if (t == 0) return rfrom;
+        if (t == nthreads) return rsize;
+        auto* hit = static_cast<const char*>(memchr(regions + rfrom + (rsize - rfrom) * t / nthreads, '\n',
+                                                    rsize - rfrom - (rsize - rfrom) * t / nthreads));
+        return hit ? size_t(hit - regions) + 1 : rsize;
+    };
+    // Each thread value-initializes its own totals row when it starts, so main
+    // neither touches 192 KB here nor pre-cuts the files: it spawns right
+    // after the maps and waits at the end.
+    auto* totals = static_cast<std::array<Totals, 256>*>(::operator new(sizeof(std::array<Totals, 256>) * nthreads, std::align_val_t(64)));
     NameTable names;
     NamesSeen seen;
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
     Phase fill{.pieces = nthreads}, parse{.pieces = pieces};
+    std::atomic<int> ready{0};
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
+            totals[t] = std::array<Totals, 256>{};
+            if (++ready == nthreads) ready.notify_all();
             fill.run([&](int k) {
                 populate_share(country_of, nregions, k, nthreads);
                 names.populate(k, nthreads);
-                for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];) {
+                for (const char* p = regions + rbound(k); p < regions + rbound(k + 1);) {
                     auto [id, c] = region_line(p);
                     country_of[id] = index(c);
                 }
             });
             populate_share(seen.bits, (ncountries + 1) * NamesSeen::WORDS, t, nthreads);
             parse.run([&](int k) {
-                uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
-                madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
-                parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
-                              seen, totals[t].data());
-                uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
+                uintptr_t from = uintptr_t(records + bound(k)) & ~uintptr_t(4095);
+                madvise(reinterpret_cast<void*>(from), uintptr_t(records + bound(k + 1)) - from, MADV_POPULATE_READ);
+                parse_records(records + bound(k), records + bound(k + 1), records + size, country_of, nregions,
+                              names, seen, totals[t].data());
+                uintptr_t to = uintptr_t(records + bound(k + 1)) & ~uintptr_t(4095);
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
         });
-    for (auto& th : pool) th.join();
+    // Main waits for the work instead of joining: every store a piece makes
+    // happens before its ++done, so once all pieces are done the merge below
+    // sees the final totals. It also waits for every thread to have started,
+    // because a fast thread can claim all the pieces before a slow one has
+    // value-initialized the slow one's totals row. _exit skips the destructors.
+    for (int d; (d = parse.done) < pieces;) parse.done.wait(d);
+    for (int r; (r = ready) < nthreads;) ready.wait(r);
 
     std::vector<std::pair<u32, u32>> order;  // (code, index), countries by code, then _UNMATCHED
     for (u32 i = 1; i <= ncountries; ++i) order.push_back({code_of[i], i});
@@ -481,8 +500,8 @@ int main(int argc, char** argv) {
     std::string out;
     for (auto [k, c] : order) {
         Totals sum;
-        for (const auto& per_thread : totals) {
-            const Totals& t = per_thread[c];
+        for (int th = 0; th < nthreads; ++th) {
+            const Totals& t = totals[th][c];
             sum.count += t.count;
             sum.id_sum += t.id_sum;
             sum.name_bytes += t.name_bytes;
