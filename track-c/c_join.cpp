@@ -30,6 +30,7 @@
 #include <sys/prctl.h>
 #include <thread>
 #include <unistd.h>
+
 #include <vector>
 
 using u8 = uint8_t;
@@ -62,6 +63,7 @@ void populate_share(T* p, size_t n, int t, int nthreads) {
 const char* map_file(const char* path, size_t& size) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror(path); _exit(1); }
+
     size = lseek(fd, 0, SEEK_END);
     auto* p = static_cast<char*>(
         mmap(nullptr, size + 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -94,6 +96,7 @@ u64 fold(u64 v, size_t n) {
     v = (v * 10 + (v >> 8)) & 0x00FF00FF00FF00FF;
     v = (v * 100 + (v >> 16)) & 0x0000FFFF0000FFFF;
     return (v * 10000 + (v >> 32)) & 0xFFFFFFFF;
+
 }
 
 // The value of the 1 to 8 decimal digits in [s, e).
@@ -126,6 +129,7 @@ const char* comma_after(const char* p) {
 // "" pair).
 struct Text {
     const char* at;
+
     u32 raw, length;
 };
 
@@ -159,6 +163,7 @@ struct Text {
     return {s + 1, u32(q - s - 1), u32(q - s - 1 - pairs)};
 }
 
+
 // Names, interned by their raw bytes between the quotes. Escaping is one to
 // one, so equal raw bytes mean equal values (and the empty name is one value
 // whether quoted or not). A name's key is a 64-bit hash of those bytes and
@@ -190,6 +195,7 @@ public:
 
     // Slots are probed four at a time, from the aligned group of four the key
     // hashes to: one 32-byte compare finds the key, or the first free slot,
+
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
         for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
@@ -222,6 +228,7 @@ struct alignas(64) Totals {
 // by all threads. Most marks are first sightings, so they are atomic ORs.
 struct NamesSeen {
     static constexpr u32 WORDS = NameTable::SLOTS / 64;
+
     std::atomic<u64>* bits = zeroed<std::atomic<u64>>(256 * WORDS);
 
     std::atomic<u64>& word(u32 c, u32 name) { return bits[c * WORDS + name / 64]; }
@@ -240,76 +247,91 @@ struct NamesSeen {
     }
 };
 
-// Parse every record that starts in [p, end). A record's region row and name
-// slot are prefetched when it is parsed; LAG records later its country is
-// read, its sums go to totals, its name is looked up and that name's bitset
-// word prefetched; LAG records after that the name is marked. So each of the
-// three random reads (region table, name table, bitsets) has a steady lead.
+// Parse every record that starts in [p, end), BATCH records at a time, in two
+// passes over batch arrays small enough to stay in L2. Pass 1 only scans: it
+// reads fields, decodes numbers and hashes the name, and has no load that can
+// miss in cache. Pass 2 has the random reads (region row, name slot, bitset
+// word) and runs them over the whole batch with a steady AHEAD lead: first the
+// country, sums and name id of every record, then the bitset marks, whose
+// locked ORs stay out of the name-lookup stream. All sums are integer and
+// order-free, and a distinct count is the number of 0-to-1 bit flips, so the
+// batch order changes no output byte.
 void parse_records(const char* p, const char* end, const char* file_end, const u8* country_of,
                    size_t regions, NameTable& names, NamesSeen& seen, Totals* totals) {
-    constexpr u64 LAG = 16;
-    struct Pending {
-        u64 name;
-        u32 region, id, name_bytes, note_bytes;
-        i64 cents;
-    } pending[LAG];
-    struct Mark {
-        u32 country, id;
-    } marks[LAG];
-    u64 n = 0, last = UINT64_MAX;
-    auto advance = [&]() __attribute__((always_inline)) {
-        u32 k = n % LAG;
-        if (n >= 2 * LAG && n - 2 * LAG < last) totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
-        if (n >= LAG && n - LAG < last) {
-            const Pending& old = pending[k];
-            u32 c = old.region < regions ? country_of[old.region] : 0;
+    constexpr u32 BATCH = 2048, AHEAD = 16;
+    struct {
+        u64 key[BATCH];
+
+        i64 cents[BATCH];
+        u32 region[BATCH], id[BATCH], name_bytes[BATCH], note_bytes[BATCH], name_id[BATCH];
+        u8 country[BATCH];
+    } b;
+    auto resolve = [&](u32 m) {
+        for (u32 i = 0; i < std::min(m, AHEAD); ++i) {
+            names.prefetch(b.key[i]);
+            _mm_prefetch(reinterpret_cast<const char*>(country_of + b.region[i]), _MM_HINT_T0);
+        }
+        for (u32 i = 0; i < m; ++i) {
+            u32 j = std::min(i + AHEAD, m - 1), r = b.region[i];
+            names.prefetch(b.key[j]);
+            _mm_prefetch(reinterpret_cast<const char*>(country_of + b.region[j]), _MM_HINT_T0);
+            u32 c = r < regions ? country_of[r] : 0;
             Totals& t = totals[c];
             ++t.count;
-            t.id_sum += old.id;
-            t.amount_sum += old.cents;
-            t.amount_min = std::min(t.amount_min, old.cents);
-            t.amount_max = std::max(t.amount_max, old.cents);
-            t.name_bytes += old.name_bytes;
-            t.note_bytes += old.note_bytes;
-            marks[k] = {c, names.id(old.name)};
-            seen.prefetch(c, marks[k].id);
+            t.id_sum += b.id[i];
+            t.amount_sum += b.cents[i];
+            t.amount_min = std::min(t.amount_min, b.cents[i]);
+            t.amount_max = std::max(t.amount_max, b.cents[i]);
+            t.name_bytes += b.name_bytes[i];
+            t.note_bytes += b.note_bytes[i];
+            b.country[i] = c;
+            b.name_id[i] = names.id(b.key[i]);
+        }
+        for (u32 i = 0; i < std::min(m, AHEAD); ++i) seen.prefetch(b.country[i], b.name_id[i]);
+        for (u32 i = 0; i < m; ++i) {
+            u32 j = std::min(i + AHEAD, m - 1);
+            seen.prefetch(b.country[j], b.name_id[j]);
+            totals[b.country[i]].distinct += seen.mark(b.country[i], b.name_id[i]);
         }
     };
 
+
     while (p < end) {
-        // The file's pages are scattered in memory, and the hardware prefetcher
-        // stops at each 4 KB page; this reaches into the next one in time.
-        _mm_prefetch(p + 2048, _MM_HINT_T0);
-        if (u8(*p) == 0xEF) p += 3;
-        const char* f1 = comma_after(p);
-        u64 id = digits(p, f1);
-        p = f1 + 1;
-        Text name = text(p), note = text(p);
-        // The region (at most 7 digits) and the amount (at most 9 bytes) end
-        // within the 32 bytes at p, so one load gives both the comma and the
-        // LF, if any.
-        u32 lf = match32(p, '\n');
-        const char* f4 = p + __builtin_ctz(match32(p, ','));
-        u64 region = digits(p, f4);
-        const char* amount = f4 + 1;
-        const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
-        const char* amount_end = eol - (eol[-1] == '\r');
-        bool negative = *amount == '-';
-        i64 cents = money(amount + negative, amount_end);
-        if (negative) cents = -cents;
+        u32 m = 0;
+        for (; m < BATCH && p < end; ++m) {
+            // The file's pages are scattered in memory, and the hardware prefetcher
+            // stops at each 4 KB page; this reaches into the next one in time.
+            _mm_prefetch(p + 2048, _MM_HINT_T0);
+            if (u8(*p) == 0xEF) p += 3;
+            const char* f1 = comma_after(p);
+            u64 id = digits(p, f1);
+            p = f1 + 1;
+            Text name = text(p), note = text(p);
+            // The region (at most 7 digits) and the amount (at most 9 bytes) end
+            // within the 32 bytes at p, so one load gives both the comma and the
+            // LF, if any.
+            u32 lf = match32(p, '\n');
+            const char* f4 = p + __builtin_ctz(match32(p, ','));
+            u64 region = digits(p, f4);
+            const char* amount = f4 + 1;
+            const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
+            const char* amount_end = eol - (eol[-1] == '\r');
+            bool negative = *amount == '-';
+            i64 cents = money(amount + negative, amount_end);
+            if (negative) cents = -cents;
 
-        // Region ids are below 10^7 (fit u32); one past the table means none.
-        u32 r = region < regions ? u32(region) : u32(regions);
-        _mm_prefetch(reinterpret_cast<const char*>(country_of + r), _MM_HINT_T0);
-        advance();
-        u64 key = NameTable::key(name.at, name.raw);
-        pending[n++ % LAG] = {key, r, u32(id), name.length, note.length, cents};
-        names.prefetch(key);
-        p = eol + 1;
+            // Region ids are below 10^7 (fit u32); one past the table means none.
+            b.key[m] = NameTable::key(name.at, name.raw);
+            b.region[m] = region < regions ? u32(region) : u32(regions);
+            b.id[m] = u32(id);
+            b.name_bytes[m] = name.length;
+            b.note_bytes[m] = note.length;
+            b.cents[m] = cents;
+
+            p = eol + 1;
+        }
+        resolve(m);
     }
-
-    for (last = n; n < last + 2 * LAG; ++n)
-        advance();
 }
 
 // 15-bit code of a three-letter country; numeric order is alphabetical order.
@@ -338,6 +360,7 @@ struct Phase {
         for (int d; (d = done) < pieces;) done.wait(d);
     }
 };
+
 
 // Cuts of [from, size) into n ranges, each starting just after a delimiter.
 template <size_t N> std::vector<size_t> split(const char* data, size_t from, size_t size, int n, const char (&delim)[N]) {
@@ -370,6 +393,7 @@ int main(int argc, char** argv) {
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     const int nthreads = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     size_t rsize, size;
+
     std::string dd = argc>1?argv[1]:"/data", od = argc>2?argv[2]:"/out";
     const char* regions = map_file((dd+"/regions.csv").c_str(), rsize);
     const char* records = map_file((dd+"/records.csv").c_str(), size);
@@ -402,6 +426,7 @@ int main(int argc, char** argv) {
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
+
     Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
@@ -434,6 +459,7 @@ int main(int argc, char** argv) {
     std::string out;
     for (u32 i = 1; i <= codes.size() + 1; ++i) {
         u32 c = i % (codes.size() + 1);
+
         Totals sum;
         for (const auto& per_thread : totals) {
             const Totals& t = per_thread[c];
