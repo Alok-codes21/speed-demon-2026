@@ -100,13 +100,8 @@ def _run_queries(q_raw, n, fp, fc, fw, rp, rc, rw):
     res = [None] * (len(q_raw) // 2)
     answer_cache = {}
 
-    # Group queries by source/target to improve graph and distance-array locality.
-    # Keep the original index so the output remains in the input's required order.
-    queries = [(int(q_raw[k]), int(q_raw[k + 1]), k // 2)
-               for k in range(0, len(q_raw), 2)]
-    queries.sort()
-
-    for s, t, out_idx in queries:
+    for k in range(0, len(q_raw), 2):
+        s, t, out_idx = int(q_raw[k]), int(q_raw[k + 1]), k // 2
 
         if s == t:
             res[out_idx] = 0
