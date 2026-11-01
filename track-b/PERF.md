@@ -902,3 +902,17 @@ the fault theory is dead and B is at its plateau.
 - Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites. Local native-flag bench (full dataset): v92 median 0.470 s vs v90 0.521 s (~10% faster).
 - v91 (ChatGPT full rewrite) staged on speed-demon-held (track-b/held/v91_main.rs): byte-exact but a true regression (threading infra rewrite; 2.5s locally even accounting for flags context). Held, not live.
 - Revert rule: if board T regresses >3% vs v90 (0.165647/0.166093) on two runs, restore step-56 file.
+
+## Step 59: v93 - ChatGPT AVX2 insert (ONE variable, no gain)
+
+- ChatGPT loop round 3: AVX2 in the insert path. Byte-exact (official tiny/sample/full sha256 EXACT, 70/70 suites). Local native-flag bench: ~1% vs v92 - inside noise, below the 3% promotion bar.
+- Held, not live: staged on speed-demon-held (track-b/held/v93_main.rs). Stall 1 of 3.
+
+## Step 60: v94 - ChatGPT fused tokenizer (ONE variable, regression)
+
+- ChatGPT loop round 4: fused tokenizer (new token classes + hash_block). Byte-exact (3 official shas EXACT, 70/70 suites) but a clear local regression: 0.874 s vs 0.523 s median (-67%). Rejected, not staged. Stall 2 of 3.
+
+## Step 61: v95 - ChatGPT batched occurrence recording (ONE variable, no gain) - loop ends
+
+- ChatGPT loop round 5: the two u16 postings writes in Units::add fused into one 32-bit unaligned store. Byte-exact (3 official shas EXACT, 70/70 suites). Bench: 15 interleaved full-dataset native-flag runs, v92 fast-cluster min 0.447 s vs v95 min 0.448 s - no gain. Rejected. Stall 3 of 3.
+- Stop rule met: three consecutive no-gain rounds (insert ~1%, fused tokenizer -67%, batched recording ~0%). The ChatGPT loop ends here; v92 (step 58) stays live. Revert rule unchanged: if board T regresses >3% vs v90 (0.165647/0.166093) on two runs, restore step-56 file.
