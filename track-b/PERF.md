@@ -712,3 +712,27 @@ synthetic single-term suite: 0 matches instead of 144).
   map and heap teardown out of T.
 - Sibling re-roll at head (run-2c594c5daa1e): T=0.1720 s, M=50.0 MB,
   S=651, **72.91 pts - new best**.
+
+
+## Step 38 re-roll log (continued)
+
+- PERF.md doc push re-roll (run-59934ee436be, v40 code): T=0.1720 s,
+  M=49.5 MB, S=651, **72.956095 pts - new best**.
+
+## Step 41: emit helper diet (v41)
+
+- Folded the repeated result-line formatting into one emit helper; pure
+  S-diet, no behaviour change. Gated byte-exact on the full corpus.
+- This push (run-a96e527e91d6): T=0.1868 s (a slow roll), M=49.5 MB,
+  S=647, 72.13 pts. The diet itself is confirmed: S 651 -> 647.
+
+## Step 42: MADV_HUGEPAGE + MADV_WILLNEED on the data maps (v42)
+
+- From the 1BRC playbook: advise the kernel to back the docs and queries
+  maps with huge pages and to read them ahead. Four lines, no algorithm
+  change. Gated byte-exact on the full corpus.
+- First reading, sibling-folder re-roll at head (run-12afc353dbae):
+  T=0.1718 s, M=49.5 MB, S=652, **72.967812 pts - new best**.
+- Re-roll (run-e905af6a4cdf): T=0.1715 s, M=49.9 MB, S=652, 72.94 pts.
+  T band across the two readings: 0.1715-0.1720 s (v40 measured
+  0.1720-0.1868 s) - a small real gain, kept.
