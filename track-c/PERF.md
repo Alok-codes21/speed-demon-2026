@@ -1152,3 +1152,18 @@ Every step from the reference to your final version, each with the live-board ru
   run-6ea466090b03 (commit 3e953c6f12): T 0.028562 s (mid-band), M 9.14 MB,
   S 408, 79.3115 pts. Verdict: KEEP - two samples straddle the v170 band, no
   regression shown; banked best 79.6396 is unaffected.
+
+## Step 112 - ChatGPT candidates 2-3: measured, rejected on points
+- Candidate 2 (ChatGPT, four-way interleaved name lookup): gates green (full-seed
+  sha d8088b1c exact, 6/6 fixtures, TSAN clean) but locally 12.5% SLOWER
+  (0.1079 s vs 0.0959 s). The 16-record prefetch already hides probe latency.
+  Never pushed.
+- Candidate 3 (ChatGPT, packed 3-field AVX2 numeric conversion + single
+  delimiter load): gates green; local 0.0931 s vs 0.0965 s = -3.5% T.
+- Run run-bf87b481be7d (commit af1a23d90c): T 0.028047 s - our best T ever -
+  M 9.24 MB, S 462, 79.0558 pts. But S grew 404 -> 462: the T win is worth
+  ~+0.11 pts at the measured ~0.385 pts/ms while 58 added lines cost ~-1.45 pts
+  at ~0.025 pts/line. Net negative, and no possible M roll lets it beat the
+  banked 79.6396. REVERTED to v170 (banked code) on the points math.
+- Lesson, fed back to the loop: a candidate is a gain only if
+  0.385*dT(ms) > 0.025*dS + 0.49*dM(MB).
