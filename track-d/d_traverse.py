@@ -50,19 +50,21 @@ def _load_fast(path):
         del outdeg, indeg
         fc, fw = array("I", [0]) * fp[n], array("I", [0]) * fp[n]
         rc, rw = array("I", [0]) * rp[n], array("I", [0]) * rp[n]
-        fp_pos, rp_pos = fp[:-1], rp[:-1]
         i = 0
         number(); number()
         for _ in range(m):
             u, v, w = number(), number(), number()
             if u == v:
                 continue
-            x = fp_pos[u]
+            x = fp[u]
             fc[x], fw[x] = v, w
-            fp_pos[u] = x + 1
-            x = rp_pos[v]
+            fp[u] = x + 1
+            x = rp[v]
             rc[x], rw[x] = u, w
-            rp_pos[v] = x + 1
+            rp[v] = x + 1
+        for v in range(n, 0, -1):
+            fp[v], rp[v] = fp[v - 1], rp[v - 1]
+        fp[0] = rp[0] = 0
         data.close()
     return n, (fp, fc, fw), (rp, rc, rw)
 
