@@ -874,3 +874,10 @@ the fault theory is dead and B is at its plateau.
 
 - v62-revert re-roll banked a new best (run-738a35639585): T 0.168961, M 47,636,480 B, pts 73.293899. The lottery pays.
 - v84 first reading (run-fa26643b74ee): T 0.177488 (+2.6% over the band top, inside noise), M 46,972,928 B (dropped ~1 MB from 48.0 as designed). Ambiguous on T; this PERF-only commit re-rolls v84 unchanged for a second reading. Keep if T lands in the 0.169-0.175 band; revert to the v62 tip otherwise.
+
+## Step 55: v84 reverted - the M-diet's T cost is real (this push)
+
+- v84 second reading (run-9fbae99759d1): T 0.178186, M 46,460,928 B, pts 72.825239. Two consecutive v84 runs above the band (0.177488, 0.178186 vs v62's 0.168961) - the regression is real, not noise: 196 terms moved from bitmaps to lists cost more eval merge time than the bitmap work they saved.
+- Points math: T +3.4% costs ~1.7% of K; the M drop (48.0 -> 46.5) returns ~0.6%. Net about -0.4 pts. Verdict: revert.
+- This push restores v62 (the run-738a35639585 code) verbatim. Banked best stands: T 0.168961, M 47,636,480 B, pts 73.293899.
+- Ledger note: the bitmap/list threshold is NOT a free M dial on the board - bitmaps earn their 31.3 KB in eval speed at this query mix.
