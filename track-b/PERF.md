@@ -1000,3 +1000,10 @@ the fault theory is dead and B is at its plateau.
 - Build: their Cargo.toml (package solution) + Dockerfile (x86-64-v3, +aes+vaes+crt-static, relocation-model=static); our previous build files + v115 main.rs saved in ~/sd/build/repo-v115/ for one-push restore; v107 main.rs still the gate-failure restore.
 - Local (1 vCPU, 4-pair ABBA mins): AVENGERS 0.355 vs v115 0.430 (-17% even single-threaded).
 - +610 lines (S ~1004-1220 vs 666) = about -3 to -4 pts of S; the T drop (0.135 -> ~0.094 if the box agrees) is worth about +9. Expected net: +4 to +5 pts.
+
+## Step 73: AVENGERS engine board trial result - NEW BEST 78.11
+
+- run-9b56f64b8693 (commit 1114b91f): T 0.098419, M 42,070,016, S 1005, K 36.495721, points 78.112097. All gates pass (check/build/correctness/timeout/sandbox). +2.42 over v115's 75.690069.
+- Our T 0.0984 vs their own board T 0.0943 with the same code = 4% run-to-run draw variance on the box. One run only; this PERF push (no source change) forces run #2 for a median.
+- Board at push time: another ello 82.41 (C++, T 0.0643, M 46.7 MB - no 44 MB cap after all) / ALL STAR 81.19 (T 0.0732) / SALAAR 79.47 / Cause Of Death 79.30 / Cosmic 78.11 (#5).
+- Freeze rule (owner): AVENGERS code stays tip only if board median beats v115 AND the holdout can't differ from scored data; otherwise hybridize with our exact hashing or restore v115.
