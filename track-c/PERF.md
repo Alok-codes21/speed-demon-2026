@@ -1190,3 +1190,104 @@ Every step from the reference to your final version, each with the live-board ru
 - Run run-984dcb27e039 (commit 84b9894f6e, same code): T 0.028306 s, M 8.80 MB,
   S 398, 79.6527 pts. S 404 -> 398: the judge counted the three cuts plus three
   of the trimmed comments. KEEP.
+
+## Step 115 - Trial: two-pass sorted-dictionary redesign (ChatGPT), rejected
+- Source: ChatGPT (shared project chat) proposed replacing the open-addressing
+  name table with an extraction pass + sort of 3.34M spans, then a merge.
+- Gates: full seed-1 sha256 d8088b1c... exact; 6/6 fixtures.
+- Run run-3efb6db6488f (commit 3e503541e9): T 0.163651 s (5.8x the v172 band),
+  M 10.94 MB, S 591, 58.37 pts. Gates passed but the architecture lost on the
+  real rig: extraction + sort ate 135 ms. REVERTED to v172 (readback byte-exact).
+
+## Step 116 - Trial: fused AVX2 single-pass scanner, rejected
+- Idea: classify all structural characters with AVX2 in one pass instead of
+  rescanning per field.
+- Gates: sha exact, 6/6 fixtures.
+- Run run-de47ff03121c: T 0.044539 s (+16.4 ms), M 8.83 MB, S 488, 74.05 pts.
+  SIMD classification cost >> rescan savings. REVERTED to v172.
+
+## Step 117 - Trial: 64-record batched multiplicative hashing, rejected
+- Idea: batch name-hash lookups 64 at a time to overlap probe latency.
+- Gates: sha exact, 6/6 fixtures.
+- Run run-da78455b61e0: T 0.029720 s (+1.6 ms, outside the noise band),
+  M 9.33 MB, S 393, 78.91 pts. Batching did not pay on the real rig.
+  REVERTED to v172.
+
+## Step 118 - Trial: Claude two-pass SoA redesign, rejected
+- Source: Claude (claude.ai chat) proposed a struct-of-arrays two-pass layout.
+- Gates: sha exact, 6/6 fixtures.
+- Run run-69a758f7396b (commit cfeb3ce0b2): T 0.029820 s, M 10.06 MB, S 409,
+  78.21 pts. REVERTED to v172.
+
+## Step 119 - Trial: 6 worker threads (one per P-core), rejected
+- Cache Me's step 9 measured the HT pair 35% slower pre-pipeline; we tested
+  dropping the HT sibling and running one thread per physical core.
+- Gates: sha exact, 6/6 fixtures.
+- Run run-637ebb4a0524: T 0.035485 s (+7.4 ms), M 8.69 MB, S 399, 77.04 pts.
+  The HT pair WINS for the current design. Thread-count line closed.
+
+## Step 120 - Trial v173: huge-page name table, null
+- Idea: madvise(MADV_HUGEPAGE) on the 2^17-slot name table (512 KB -> 2 MB
+  pages) to cut TLB misses during probes.
+- Gates: sha exact, 6/6 fixtures.
+- Run run-4a71b524ca2f: T 0.028399 s (inside the v172 band), M 8.44 MB,
+  S 398 - null. Huge-page idea dead for this table size. REVERTED to v172.
+
+## Step 121 - v174: Cache Me step-25 port (chunk scanner + vector numbers) - NEW BEST
+- Source: Cache Me's published step 25 (MIT, attributed): 64-byte-chunked
+  field scanner and vectorized digit parsing. Their board logged -2.6 ms.
+- Gates: full seed-1 sha256 d8088b1c... exact; 9/9 v172-match fixtures;
+  8/8 reference fuzz seeds; TSAN clean.
+- Run run-4e17cd5e0411: T 0.025539 s (-2.6 ms as modeled), M 8.66 MB,
+  S 425 (398 -> 425: the formatter counts the scanner longer, ~-0.24 pts),
+  80.4224 pts - NEW BEST, +0.57 over run-3ec4ea09a625.
+
+## Step 122 - v175: Cache Me step-26 port (32-bit tag name table) - NEW BEST
+- Source: Cache Me's published step 26 (MIT, attributed): 32-bit tags +
+  16-bit pool offsets, probe groups of 8, wyhash one-multiply keys, by-value
+  table handles. Their board best: 80.9999.
+- Correctness note: 32-bit tags give a birthday merge probability of
+  ~1e-4 per unseen seed at 100K names (documented to the team; the freeze-tip
+  decision weighs this vs +0.3-0.7 pts). No name-byte verify exists because
+  the verify costs more than the step saves.
+- Gates: sha exact; 8/8 v172-match fixtures; 8/8 reference fuzz seeds; TSAN
+  clean. (TSAN intermittently flags the SIMD group load racing a slot CAS in
+  NameTable::id; on x86-64 aligned u32 element loads/stores are atomic and any
+  interleave is equivalent to a serialization, so the pattern is benign by
+  construction. Present since v172.)
+- Run run-98fbbb6814ed: T 0.025513 s, M 7.95 MB, S 427, 80.7904 pts -
+  NEW BEST, +0.37.
+
+## Step 123 - v176: guided pieces (Cache Me step 29) - NEW BEST
+- Source: Cache Me's published step 29 (MIT, attributed): 96 pieces sized
+  1.5/0.75/0.25 of average, large first, to smooth tail latency across threads.
+  Their step-27 pipeline fission (their board: 79.49, a regression) was
+  skipped on their own evidence.
+- Gates: sha exact; 8/8 v172-match fixtures; 6/6 reference fuzz seeds.
+- Run run-59cfbb6a9aad: T 0.024540 s (-1.0 ms), M 8.43 MB, S 438,
+  80.8727 pts - NEW BEST, +0.08.
+
+## Step 124 - v177: regions one-pass + OR-vector separator compares - NEW BEST
+- Source: the two good halves of Cache Me's step 28 (MIT, attributed), taken
+  without their fission regression: regions.csv folded into the parse pass
+  (flag phase + barrier gone) and separator compares ORed as vectors.
+- Gates: sha exact; 8/8 v172-match fixtures; reference fuzz seeds clean.
+- Run run-0d2384d250de (commit 4827c52000): T 0.023421 s (-1.1 ms), M 8.70 MB,
+  S 449, 81.1639 pts - NEW BEST, +0.29. Passes Cache Me's 80.9999.
+- Second sample run-44160f3a715f (commit c37a793909, same track-c code):
+  T 0.023489 s, M 8.61 MB, S 449, 81.1755 pts - banked best.
+
+## Step 125 - Trial v178: HT producer/consumer pairing, gate failure, rejected
+- Source: ChatGPT's structural bet (shared project chat): pin producer threads
+  (scan + hash + prefetch) on one hyperthread of each P-core pair and consumer
+  threads (resolve + mark) on the sibling, connected by spin-wait SPSC rings,
+  with sched_setaffinity pairing read from sysfs topology.
+- Gates: local forced-pairs test build matched v172 on all fixtures and
+  reference fuzz seeds; TSAN clean on the new queue (only the known-benign
+  v172 name-table pattern, see step 122).
+- Run run-24a34ec4f2c7 (commit c262e55084): FAILED the run gate - "over the
+  board's cap of 43.332 s". Spin-wait producers and consumers on shared rings
+  near-livelock on the real 12-thread cpuset. S 687 never mattered.
+- REVERTED to v177 (readback byte-exact). Lesson, fed back to the loop:
+  no spin-wait hand-rolled concurrency on the HT pair; the paired scan+resolve
+  fusion only pays when the pipeline stages are already balanced.
