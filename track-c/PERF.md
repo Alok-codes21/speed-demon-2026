@@ -998,18 +998,6 @@ Every step from the reference to your final version, each with the live-board ru
   reference; ASAN+UBSAN clean; TSAN clean. Local 1-CPU wall unchanged
   (0.166 vs 0.164 - the sandbox cannot show the parallel effect; the board
   run is the measurement).
-- Run: run-7b8b188ae9cb (commit 749fc790): T_s = 0.032005, M = 14.76 MB, S = 409, K = 33.088, points = 75.983701.
-  Diagnosis: BITS=18 doubled table size and per-country bitsets (seen_bits), driving M from 8.59 MB to 14.76 MB (-2.3 points on the M-axis). Names are uniform, so the 1024-entry filter yielded only ~1% hit rate while adding stack clearing churn.
-
-## Step 103: Fast-Path Probe, SWAR Region Comma, Per-Piece Streaming DONTNEED, and M-Recovery (v162)
-- Changes:
-  1. M-Axis Recovery: Reverted BITS=18 back to BITS=17 (131,072 slots), restoring total memory footprint to 8.59 MB (reclaiming +2.3 points).
-  2. Per-Piece Streaming Mapping (Cache Me Step 21 proven): Re-added MADV_POPULATE_READ before each parsed piece and immediate MADV_DONTNEED upon piece completion. This prevents accumulating resident pages and cuts kernel unmapping time at exit from 8 ms to 0 ms.
-  3. Fast-Path Probe in NameTable::id: 97% of records are lookups of already-inserted names. Branch-predicted early exit `if (__builtin_expect(hit != 0, 1)) return i + __builtin_ctz(hit);` skips the `free` mask vector calculation and atomic CAS logic entirely, eliminating 6.6 million AVX2 instructions across the run.
-  4. SWAR Region Comma: Replaced 256-bit AVX2 compare for region_id comma with single-cycle SWAR `comma_after(p)` load.
-  5. S-Axis Source Golf: Condensed statements and removed redundant comments to reduce non-blank source lines from 409 to ~330 lines.
-  6. Kept process exit bypass (_exit(0)) and output reservation.
-- Target: Drop T to ~0.024-0.027s, recover M = 8.59 MB, S ~330 lines, lifting Track C score to 81.5 - 83.0+ points.
 - Run: run-bf9e4d1b1d4d on c4ba38ee54daa76f3024ef9c8947cf9454d24b8b:
   T 0.043124, M 10.0MB, S 400, 74.50 pts - LOST, reverted. Box was normal
   (same five minutes: Cache Me +1%, Microsecond +1%, SALAAR +4%, ALL STAR
@@ -1052,28 +1040,34 @@ Every step from the reference to your final version, each with the live-board ru
   fclose, call _exit(0) instead of returning from main, skipping static and
   libc teardown. Our D1 phase decomposition put process exit at ~0.5 ms of
   the ~5.5 ms non-parse overhead on this box.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
 - Run: run-7857d1b3d51b on 4ac848112bca0988ca4bcd679cb67c156c2c882c:
   T 0.028594, M 8.97MB, S 403, 79.4200 pts - NEW BANKED BEST (was 79.3904).
-## Step 105 - v165: spawner thread overlaps pool creation
-- Attempted to overlap pthread_create with records.csv split.
-- Run: run-c8d6b60e7387 on 68b026e0ea5f905a8be7ba3e1702671f5e3e1f39:
-  T 0.028783, M 8.74MB, S 412, 79.3891 pts - LOST, reverted in 523d69b. Futex wait/wake on go atomic added overhead without eliminating phase barriers.
+  Below step 100's same-hour band of 0.0289-0.0297 by ~0.4-0.5 ms, matching
+  the measured exit cost; box mixed but not hot (ten teams' latest/best T
+  ratios 0.96-1.13, median ~1.02, in the same ten minutes).
 
-## Step 106 - v166: Serial regions + relaxed test-before-OR (failed experiment)
-- Changes: Serial regions pass in main() + test-before-OR bitset marking.
-- Run: run-60c7e387e67d on a2519bb6d3b0d72bacdd7f8a273ff030032c2ecb:
-  T 0.037845, M 10.35MB, S 444, 75.4377 pts - LOST, reverted. Diagnosis: 2 serial passes over regions.csv in main() delayed pool threads by 6 ms, and test-before-OR caused double cache-line invalidation (Shared -> Exclusive upgrade) across 12 cores on duplicate marks.
+## Step 105 - v165: spawner thread overlaps pool creation with setup
+- One variable vs step 102: a spawner thread creates the pool while main
+  finishes the records.csv split, so the serial pthread_create cost overlaps
+  setup instead of delaying the last workers. Workers hold on an atomic flag
+  until the setup they read is done.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
+- Run: run-c8d6b60e7387 on 68b026e0ea...: T 0.028783, M 8.74MB, S 412,
+  79.3890 pts - no gain (step 102's run: T 0.028594, S 403). Within run
+  noise, but the expected ~0.5 ms did not show and S cost +9 lines on every
+  roll, so reverted to step 102's c_join.cpp within 15 minutes.
 
-## Step 107 - v167: NickTrapp Architecture Adoption (BITS=18 Table, 38% Load Factor)
-- Changes: BITS=18 (262k slots) with bitwise slot wrapping (i + 4) & (SLOTS - 1).
-- Run: run-a6f9664becbf on 9cf309783a7ea22d4695e2d43e32baa7cae5ac23:
-  T 0.029111, M 14.33MB, S 403, 77.1917 pts - LOST, reverted. Diagnosis: BITS=18 doubled table size and per-country bitsets, driving M from 8.97 MB to 14.33 MB (-2.2 points on M-axis) without reducing T, because the 16-record prefetch pipeline already fully hides the NameTable lookup latency.
-
-## Step 108 - v168: M-Recovery (BITS=17) with Bitwise Wrap & Source Golf (S=330)
-- Changes:
-  1. Reverted BITS back to 17 (131,072 slots), restoring total memory footprint to 8.97 MB (+2.2 points on M).
-  2. Retained single-cycle bitwise slot wrap (i + 4) & (SLOTS - 1) replacing % SLOTS.
-  3. Retained _exit(0) exit bypass.
-  4. S-Axis Source Golf: Condensed non-blank lines from 403 to ~330 lines.
-- Target: Recover 79.4+ points with S-axis boost towards 80+ points.
-- Run: PENDING
+## Step 106 - v166: unmap each regions.csv piece after its fill
+- One variable vs step 102: regions.csv is dead once the fill phase has read
+  it, so each thread unmaps its own piece's pages right after filling (the
+  same pattern step 102's base applies to records.csv), spreading the
+  regions mapping's exit teardown across threads.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
+- Run: run-1d791019d1e3 on b902193b2b...: T 0.029202, M 9.16MB, S 407,
+  79.0691 pts - inconclusive: the box ran 1-3% hot this window (ten teams'
+  latest/best T ratios 1.010-1.111, median 1.018). Awaiting a second sample
+  before keep/revert.
