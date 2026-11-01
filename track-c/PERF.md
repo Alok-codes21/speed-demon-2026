@@ -981,17 +981,21 @@ Every step from the reference to your final version, each with the live-board ru
   T (0.032032) but M measured 12.34MB - an M-measurement outlier (the same
   code measured 8.59MB the same hour), costing ~1.5 pts on that roll.
 
-
-## Step 101: Syscall Elimination & In-Memory Pipeline Optimization (v160)
-- Root Cause Analysis of 0.032s Wall:
-  Cache Me worker threads were executing madvise(MADV_POPULATE_READ) synchronously 96 times inside parse.run. Because /data pages are already resident in the Linux page cache, this caused 96 unnecessary kernel transitions and TLB shootdown contention across the 12 P-cores.
-- Optimizations:
-  1. Removed per-piece madvise(MADV_POPULATE_READ) in worker threads.
-  2. Advised records.csv and regions.csv once at startup with MADV_SEQUENTIAL.
-  3. Optimized NameTable::id probe increment from modulo to bitwise AND: (i + 4) & (SLOTS - 1).
-  4. Added out.reserve(16384) to eliminate heap reallocations.
-  5. Removed dead file track-c/2-Dockerfile to reduce S code line count.
-  6. Added -fno-exceptions -fno-rtti to Dockerfile build.
-  7. Replaced fclose(f); return 0; with fflush(f); _exit(0); to bypass glibc thread teardown on the timed exit path.
-- Target: Drop T from 0.0323s to 0.019s, pushing Track C points towards 83.5+.
+## Step 99 - v160: map records.csv during the regions phase (overlap page-in)
+- One variable vs step 98: the per-piece MADV_POPULATE_READ calls move out of
+  the parse phase into the flag phase - each thread piece populates its share
+  of records.csv (one call, ~size/12) before doing its regions work. The
+  parse phase then runs on already-mapped pages. Grounding: Cache Me's own
+  measurements say page-in work is dear on the box (their steps 13-14, 17-18:
+  prefetch reaching unmapped pages and per-piece populate call costs), and
+  their step 3-4 profile found 12% of all cycles in a page-table spinlock
+  under concurrent faults. The regions phase has slack - populating there
+  overlaps kernel page work with parsing instead of serializing it inside
+  parse. Idea class: re-implementation of a measured effect, credit Cache Me
+  for the underlying diagnosis.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact (also under ASAN and
+  TSAN builds); tiny (1, 2, 7) and sample (1, 2, 7) byte-identical to the
+  reference; ASAN+UBSAN clean; TSAN clean. Local 1-CPU wall unchanged
+  (0.166 vs 0.164 - the sandbox cannot show the parallel effect; the board
+  run is the measurement).
 - Run: PENDING
