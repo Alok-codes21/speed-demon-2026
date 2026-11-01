@@ -839,7 +839,7 @@ struct Side {
 
 // Exact forward probe, then bidirectional Dijkstra balancing settled vertices;
 // stops once f + b >= best. The probe limit is configurable with SD_PROBE.
-static size_t PROBE = 128;
+static size_t PROBE = 64;
 struct Worker {
   Side fwd, bwd;
   explicit Worker(const Graph &g) : fwd(*g.fwd), bwd(*g.rev) {}
@@ -896,31 +896,34 @@ int main() {
   std::vector<u32> order(queries.size());
   std::iota(order.begin(), order.end(), 0);
   // Sort by both endpoints so identical shortest-path queries are adjacent.
-  // The first index in each group computes the answer once; duplicates reuse it.
   std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
     if (queries[a].from != queries[b].from)
       return queries[a].from < queries[b].from;
     return queries[a].to < queries[b].to;
   });
+  // Compact duplicate queries into independent tasks. Workers claim only
+  // unique (source, target) groups, then scatter one answer to original slots.
+  std::vector<std::pair<size_t, size_t>> groups;
+  for (size_t begin = 0; begin < order.size();) {
+    size_t end = begin + 1;
+    const Query &q = queries[order[begin]];
+    while (end < order.size() && queries[order[end]].from == q.from &&
+           queries[order[end]].to == q.to)
+      ++end;
+    groups.push_back({begin, end});
+    begin = end;
+  }
   std::atomic<size_t> next{0};
-  parallel(std::min<size_t>(threads, std::max<size_t>(1, queries.size())),
+  parallel(std::min<size_t>(threads, std::max<size_t>(1, groups.size())),
            [&](unsigned) {
              Worker worker(g);
-             for (size_t k; (k = next.fetch_add(1, std::memory_order_relaxed)) <
-                            queries.size();) {
-               const Query &q = queries[order[k]];
-               // Non-first members are handled by the first member's group.
-               if (k && queries[order[k - 1]].from == q.from &&
-                   queries[order[k - 1]].to == q.to)
-                 continue;
-
+             for (size_t task;
+                  (task = next.fetch_add(1, std::memory_order_relaxed)) <
+                  groups.size();) {
+               const auto [begin, end] = groups[task];
+               const Query &q = queries[order[begin]];
                const int64_t answer = worker.solve(q.from, q.to);
-               size_t end = k + 1;
-               while (end < order.size() &&
-                      queries[order[end]].from == q.from &&
-                      queries[order[end]].to == q.to)
-                 ++end;
-               for (size_t j = k; j < end; ++j)
+               for (size_t j = begin; j < end; ++j)
                  answers[order[j]] = answer;
              }
            });
