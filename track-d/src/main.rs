@@ -533,8 +533,27 @@ fn main() {
         }
     });
 
-    // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
-    let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
+    // Write decimal answers directly into one byte buffer; avoid one
+    // temporary String allocation and formatting machinery per query.
+    let mut out = Vec::with_capacity(ans.len() * 12);
+    for &value in &ans {
+        let value = value as i64; // INF becomes -1; real distances fit i64.
+        if value < 0 {
+            out.extend_from_slice(b"-1\n");
+            continue;
+        }
+        let mut digits = [0u8; 20];
+        let mut x = value as u64;
+        let mut p = digits.len();
+        loop {
+            p -= 1;
+            digits[p] = b'0' + (x % 10) as u8;
+            x /= 10;
+            if x == 0 { break; }
+        }
+        out.extend_from_slice(&digits[p..]);
+        out.push(b'\n');
+    }
     std::fs::write("/out/distances.txt", out).unwrap();
 }
 
