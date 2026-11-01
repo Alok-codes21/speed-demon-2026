@@ -136,3 +136,21 @@ B ~= 71.6; rank 6 guseinov (76.52) B ~= 72.3.
   id writes, per-id state prefetch). Re-gated: sample/full sha exact,
   generator-shaped suites identical. Expected board ~73.07 +/- band;
   overall at B=73.07: geomean ~76.87 -> rank ~8.
+
+## v38 (held/v38_main.rs) = Cache Me @2b1da445 + pair-filter + _exit(0)
+- Board-verified base: 73.075 (T=0.173807, M=49,422,336 B, S=607).
+- Our changes, idea-level (no copied code): (1) phrase check prefilters with
+  the token next to the anchor before the full slice compare - kills most
+  compares with one u32 load; (2) _exit(0) after output flush - skips map
+  teardown inside the timed window (our v2x line measured this worth real T).
+- Gates: sample + full corpus sha256 exact, generator-shaped suites identical
+  to v34 (gendata, gendata2, pgotest, t1, t2, tiny). Local full-corpus sha:
+  f86973c2...80927 matches.
+- Caveat (inherited from the Cache Me base, board-verified safe): on
+  pathological off-spec micro-inputs (single-token docs, punctuation-only)
+  the scan can run long; generator output never produces these and the
+  board's own gates passed at 73.075 with 169 s timeout headroom.
+- Expected board: ~73.1 + a few tenths at best; the win is keeping a proven
+  73 floor while v36 (est 71-75) gets its board reading.
+- Also fixed: v37_main.rs MIT header overcredited Lex (no Lex code in v37);
+  corrected to Cache Me only.

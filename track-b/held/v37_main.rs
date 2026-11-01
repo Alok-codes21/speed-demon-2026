@@ -1,7 +1,6 @@
-// This file incorporates code from the Cache Me and Lex teams' Speed Demon
-// 2026 entries (https://github.com/manusingh090/speed-demon-2026-entry and
-// https://github.com/Aryanxp1/speed-demon-2026, track-b), used under the MIT
-// License:
+// This file incorporates code from the Cache Me team's Speed Demon 2026
+// entry (https://github.com/manusingh090/speed-demon-2026-entry, track-b),
+// used under the MIT License:
 //
 // MIT License
 //
