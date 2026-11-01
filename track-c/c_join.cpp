@@ -194,11 +194,11 @@ public:
     // hashes to: one 32-byte compare finds the key, or the first free slot,
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
-        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) & (SLOTS - 1)) {
+        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
             __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(&slots_[i]));
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
-            if (__builtin_expect(hit != 0, 1)) return i + __builtin_ctz(hit);
             u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
+            if (hit) return i + __builtin_ctz(hit);
             for (; free; free &= free - 1) {
                 u32 j = i + __builtin_ctz(free);
                 u64 s = 0;
@@ -290,9 +290,8 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         // The region (at most 7 digits) and the amount (at most 9 bytes) end
         // within the 32 bytes at p, so one load gives both the comma and the
         // LF, if any.
-        __m256i vp = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
-        u32 lf = _mm256_movemask_epi8(_mm256_cmpeq_epi8(vp, _mm256_set1_epi8('\n')));
-        const char* f4 = p + __builtin_ctz(_mm256_movemask_epi8(_mm256_cmpeq_epi8(vp, _mm256_set1_epi8(','))));
+        u32 lf = match32(p, '\n');
+        const char* f4 = p + __builtin_ctz(match32(p, ','));
         u64 region = digits(p, f4);
         const char* amount = f4 + 1;
         const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
@@ -371,12 +370,11 @@ int main(int argc, char** argv) {
     // With transparent huge pages, a block written only in part can be backed
     // by a whole 2 MB page; plain pages keep memory to what is written.
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-    const int nthreads = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
+    const int nthreads = std::clamp<int>(std::thread::hardware_concurrency(), 1, 8);  // step 108 A/B: 8 workers vs 12
     size_t rsize, size;
     std::string dd = argc>1?argv[1]:"/data", od = argc>2?argv[2]:"/out";
     const char* regions = map_file((dd+"/regions.csv").c_str(), rsize);
     const char* records = map_file((dd+"/records.csv").c_str(), size);
-    if (size) madvise(const_cast<char*>(records), size, MADV_SEQUENTIAL);
 
     // regions.csv: a header, then "id,ABC\n" lines in ascending id order, so
     // the last line holds the largest id.
@@ -425,10 +423,14 @@ int main(int argc, char** argv) {
                 }
             });
             parse.run([&](int k) {
+                // Map the piece's pages in one call rather than by a fault
+                // every 16 pages as the parse reaches them.
                 uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
                 madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
+                // The piece is not read again: its pages are unmapped now, by
+                // this thread, instead of all of the file's at exit by one.
                 uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
