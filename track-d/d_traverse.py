@@ -27,14 +27,11 @@ def _load_fast(path):
             nonlocal i
             while i < size and data[i] <= 32:
                 i += 1
-            x = 0
-            while i < size:
-                c = data[i]
-                if c < 48 or c > 57:
-                    i += 1
-                    break
-                x = x * 10 + c - 48
-                i += 1
+            j = i
+            while j < size and data[j] > 32:
+                j += 1
+            x = int(data[i:j])
+            i = j
             return x
         n, m = number(), number()
         outdeg, indeg = array("I", [0]) * n, array("I", [0]) * n
