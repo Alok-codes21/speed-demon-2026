@@ -228,7 +228,10 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
     let (mut n, mut out) = (0usize, ids.len());
     loop {
         // A window adds at most 32 ids, and the document's end LAG more.
-        (ids.set_len(out), ids.reserve(32 + LAG));
+        if out + 32 + LAG > ids.capacity() {
+            ids.reserve(1024);
+        }
+        ids.set_len(out);
         let buf = ids.as_mut_ptr();
         let mut look = |&h: &u64| {
             let id = t.find(h);
@@ -475,6 +478,7 @@ struct Units {
 }
 
 impl Units {
+    #[inline(always)]
     fn put(&mut self, x: u16) {
         if self.at == self.end {
             self.grow();
@@ -620,7 +624,7 @@ fn main() {
         // in this share, and the last one's offset + 1.
         let (mut count, mut last, mut mine) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
         // Per document: the list terms new to it, and where the phrase anchors are.
-        let (mut kept, mut anchors) = (vec![], vec![]);
+        let (mut kept, mut anchors) = (vec![0u32; 4096], vec![0usize; 4096]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
         let first = firsts[t];
         // Each bitmap term's bits for the current 64 documents (one more word
@@ -646,8 +650,10 @@ fn main() {
             // after which captured values would be loaded again for every token.
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
-            kept.resize(toks.len(), 0);
-            anchors.resize(toks.len(), 0);
+            if kept.len() < toks.len() {
+                kept.resize(toks.len().max(4096), 0);
+                anchors.resize(toks.len().max(4096), 0);
+            }
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
                 let i = (id as usize).min(nkeep);
@@ -728,6 +734,13 @@ fn main() {
     let mut found = found.into_inner().unwrap();
     found.sort_unstable();
     found.dedup();
+    let mut phrase_starts = vec![0u32; spans.len() + 1];
+    for m in &found {
+        phrase_starts[m.0 as usize + 1] += 1;
+    }
+    for i in 0..spans.len() {
+        phrase_starts[i + 1] += phrase_starts[i];
+    }
 
     // Answers, 64 queries at a time on every thread. Large lists come and go
     // here, so they now reuse heap memory instead of a fresh mapping each.
@@ -751,15 +764,15 @@ fn main() {
     on_threads(|_| loop {
         let k = next.fetch_add(1, Relaxed);
         let Some(chunk) = chunks.get(k) else { return };
-        let mut out = String::new();
+        let mut out = String::with_capacity(4096);
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let r = from as usize..to as usize;
             let (tids, ops) = (&ids[r.clone()], &ops[r]);
             if phrase {
                 // Matches are (query, doc) sorted, so a phrase's docs ascend:
-                // count, sum and the first ten straight from the match list.
-                let at = found.partition_point(|m| m.0 < q as u32);
-                let end = at + found[at..].partition_point(|m| m.0 == q as u32);
+                // count, sum and the first ten straight from the match list in O(1).
+                let at = phrase_starts[q] as usize;
+                let end = phrase_starts[q + 1] as usize;
                 let (mut sum, mut first, mut nfirst) = (0u64, [0u32; 10], 0usize);
                 for m in &found[at..end] {
                     sum += m.1 as u64;
@@ -782,7 +795,7 @@ fn main() {
     });
     // Chunk by chunk, so the answers are never held twice.
     let file = std::fs::File::create("/out/results.txt").expect("/out/results.txt");
-    let mut out = std::io::BufWriter::new(file);
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
     for c in chunks {
         std::io::Write::write_all(&mut out, c.into_inner().unwrap().as_bytes()).unwrap();
     }

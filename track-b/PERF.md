@@ -822,3 +822,15 @@ the tip to the v56 code (2^18 slots, S=654); best stays sticky at
   5. 1 MB Output Buffer & Capacity Preallocation: `BufWriter::with_capacity(1 << 20)` and `String::with_capacity(4096)` per chunk to eliminate dynamic heap reallocations.
   6. Source size remains lean at S=655 lines and M=45.6 MB.
 - Target: T drops from 0.170s towards ~0.100s, pushing K from 29.2 to 38-43 and score from 73.2 to 78.5-81.5+ points.
+
+
+## Step 50: Zero-memset scan buffers, O(1) phrase lookup, inline put and buffered I/O (v60)
+
+- Targeted optimizations to the proven v56 Rust pipeline:
+  1. Zero-memset scan buffers: preallocate `kept` and `anchors` buffers (capacity 4096) once per thread and guard resize, eliminating 250,000 zeroing memset calls during the scan.
+  2. Bounded reservation in `tokens`: check `out + 32 + LAG > ids.capacity()` before calling `reserve`, eliminating inner-loop reservation overhead on every 64-byte window.
+  3. `#[inline(always)]` on `Units::put`: inlines posting bit-packing directly into `Units::add`.
+  4. O(1) Prefix-sum phrase lookup: replaces 38,000 binary searches across 19,000 phrase queries with `phrase_starts` index after sort/dedup.
+  5. 1 MB output buffer and preallocated 4 KB chunk strings: `BufWriter::with_capacity(1 << 20)` reduces write syscalls from ~200 down to 1-2.
+- Retained full multi-port software multiplier hash and corpus next-page prefetch.
+- Board evaluation pending.
