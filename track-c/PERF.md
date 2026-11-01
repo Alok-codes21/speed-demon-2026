@@ -1092,48 +1092,14 @@ Every step from the reference to your final version, each with the live-board ru
   through other work (step 21's per-piece pattern), never bunched at a
   phase boundary (here and step 106). Reverted to step 102's c_join.cpp.
 
-## Step 109 - v168: AVX2 unquoted short-name fast-path, drop 96 per-piece madvise, S=299 golf
-- Three high-certainty microarchitectural optimizations applied to c_join.cpp:
-  1. AVX2 Unquoted Short-Name Fast-Path: 99.9% of company names in records.csv
-     are short (<20 characters) and unquoted. Instead of entering the multi-vector
-     quote-escape scanning loop for every record, test *p != '"' with a single
-     32-byte load and find the comma in 1 cycle (_mm256_movemask_epi8(cmpeq(v, ','))).
-     Eliminates over 13 million redundant SIMD operations.
-  2. Drop 96 Per-Piece MADV_DONTNEED / MADV_POPULATE_READ Calls: 12 worker threads
-     previously called madvise 96 times across pieces. On Linux, MADV_DONTNEED
-     takes kernel mmap_lock and broadcasts Inter-Processor Interrupts (IPIs)
-     to shoot down TLB entries across all 12 cores. Removing this drops kernel
-     lock contention and eliminates 4–5 ms of wall time stall. Single sequential
-     madvise(MADV_SEQUENTIAL) at mapping time suffices.
-  3. NameTable Fast-Path Probe: Check hit before computing the free vector mask,
-     skipping mask generation for the >99% hash hits.
-  4. S-axis Code Golf: Reduced source code lines from 403 to 299 lines (S < S_ref = 300),
-     maximizing (S_ref / S)^0.15 to the full 1.000 factor (+4.5% score multiplier).
-  5. Process Exit Bypass: Retained _exit(0) to bypass static teardown.
-- Target: T ~0.019s, M ~8.6MB, S=299 -> ~83.0 - 83.5 pts (+3.6 - +4.1 pts).
-
-## Step 108 - v169: Drop 96 per-piece madvise, hit-first NameTable probe, coalesced vector load
-- Four microarchitectural optimizations applied cleanly to c_join.cpp:
-  1. Drop 96 Per-Piece MADV_DONTNEED / MADV_POPULATE_READ Calls: 12 worker threads
-     previously called madvise 96 times across pieces. On Linux, MADV_DONTNEED
-     takes kernel mmap_lock and broadcasts Inter-Processor Interrupts (IPIs)
-     to shoot down TLB entries across all 12 cores. Removing this drops kernel
-     lock contention and eliminates 4–5 ms of wall time stall. Single sequential
-     madvise(MADV_SEQUENTIAL) at mapping time replaces it.
-  2. NameTable Fast-Path Probe: Check hit before computing the free vector mask,
-     skipping mask generation for the >99% hash hits.
-  3. Coalesced 32-byte Vector Load in parse_records: Load the 32 bytes once
-     at p for both the comma and LF movemasks.
-  4. Preserved rock-solid C++20 atomic Phase barrier (done.wait / done.notify_all)
-     guaranteeing 100% hash correctness across all worker threads.
-- Target: T ~0.023s, M ~8.9MB, S=403 -> ~81.5 - 82.5 pts (+2.1 - +3.1 pts).
-
-## Step 110 - v170: NickTrapp architecture: BITS=18, bitwise wrap, hit-first probe
-- Matching leader NickTrapp's memory and hashing configuration:
-  1. BITS = 18 (262,144 slots): drops load factor to 38%, eliminating linear probing
-     chains and reducing lookup to a single AVX2 vector hit.
-  2. Bitwise slot wrapping: (i + 4) & (SLOTS - 1) replaces integer division/modulo.
-  3. Fast-path hit check in NameTable::id before free mask evaluation.
-  4. Parallel piece MADV_POPULATE_READ and MADV_DONTNEED preserved across 12 threads.
-  5. Coalesced 32-byte vector load in parse_records.
-- Target: T <= 0.020s, M ~12.75MB, S=403 -> ~83.0 - 83.8 pts.
+## Step 108 - v168: eight workers instead of twelve (A/B, Alok's ask)
+- One variable vs step 102: the worker clamp drops from 12 to 8. The box has
+  6 cores with two threads each; Cache Me's notes say the second thread on a
+  core fills the first's load-latency gaps, which is exactly what a
+  memory-latency-bound parse needs - but the board run is the judge.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
+- Run: run-fbdb530b86a6 on f2d11be32b...: T 0.033495, M 10.51MB, S 403,
+  77.0160 pts - LOST, reverted within minutes. Box normal (six teams'
+  latest/best T ratios 0.998-1.074, five of them under 1.014), so +17% is
+  the change: the hyperthread mates were carrying the parse. Twelve stands.
