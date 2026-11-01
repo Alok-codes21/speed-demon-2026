@@ -839,7 +839,7 @@ struct Side {
 
 // Exact forward probe, then bidirectional Dijkstra balancing settled vertices;
 // stops once f + b >= best. The probe limit is configurable with SD_PROBE.
-static size_t PROBE = 64;
+static size_t PROBE = 256;
 struct Worker {
   Side fwd, bwd;
   explicit Worker(const Graph &g) : fwd(*g.fwd), bwd(*g.rev) {}
