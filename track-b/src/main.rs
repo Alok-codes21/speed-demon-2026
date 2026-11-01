@@ -1,6 +1,7 @@
-// This file incorporates code from the Cache Me team's Speed Demon 2026
-// entry (https://github.com/manusingh090/speed-demon-2026-entry, track-b),
-// used under the MIT License:
+// This file incorporates code from the Cache Me and Lex teams' Speed Demon
+// 2026 entries (https://github.com/manusingh090/speed-demon-2026-entry and
+// https://github.com/Aryanxp1/speed-demon-2026, track-b), used under the MIT
+// License:
 //
 // MIT License
 //
@@ -377,30 +378,54 @@ unsafe fn bit_sums(b: &[u64]) -> (u64, u64) {
     (total(6), sum)
 }
 
+/// Digits without the formatting machinery (ported from the Lex team's
+/// MIT-licensed entry: a digit buffer filled from the back).
+fn push_u64(out: &mut String, mut v: u64) {
+    if v == 0 {
+        out.push('0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = 20;
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&buf[i..]) });
+}
+
 /// "count sum id1 ... id10" for a set of documents.
 fn line(out: &mut String, docs: &Docs) {
-    let (mut count, mut sum, mut first) = (0u64, 0u64, Vec::with_capacity(10));
+    let (mut count, mut sum, mut first, mut nfirst) = (0u64, 0u64, [0u32; 10], 0usize);
     match docs {
         Docs::List(v) => {
             (count, sum) = (v.len() as u64, v.iter().map(|&d| d as u64).sum());
-            first.extend(v.iter().take(10));
+            nfirst = v.len().min(10);
+            first[..nfirst].copy_from_slice(&v[..nfirst]);
         }
         Docs::Bits(b) => {
             (count, sum) = unsafe { bit_sums(b) };
             for (w, &x) in b.iter().enumerate().filter(|(_, &x)| x != 0) {
                 let mut m = x;
-                while m != 0 && first.len() < 10 {
-                    first.push(w as u32 * 64 + m.trailing_zeros());
+                while m != 0 && nfirst < 10 {
+                    first[nfirst] = w as u32 * 64 + m.trailing_zeros();
+                    nfirst += 1;
                     m &= m - 1;
                 }
-                if first.len() == 10 {
+                if nfirst == 10 {
                     break;
                 }
             }
         }
     }
-    write!(out, "{count} {sum}").unwrap();
-    first.iter().for_each(|d| write!(out, " {d}").unwrap());
+    push_u64(out, count);
+    out.push(' ');
+    push_u64(out, sum);
+    for d in &first[..nfirst] {
+        out.push(' ');
+        push_u64(out, *d as u64);
+    }
     out.push('\n');
 }
 
@@ -719,17 +744,34 @@ fn main() {
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let r = from as usize..to as usize;
             let (tids, ops) = (&ids[r.clone()], &ops[r]);
-            let set = if phrase {
+            if phrase {
+                // Matches are (query, doc) sorted, so a phrase's docs ascend:
+                // count, sum and the first ten straight from the match list.
                 let at = found.partition_point(|m| m.0 < q as u32);
                 let end = at + found[at..].partition_point(|m| m.0 == q as u32);
-                Docs::List(found[at..end].iter().map(|m| m.1).collect())
-            } else {
-                let (cur, steps) = (docs(tids[0]), ops.iter().zip(&tids[1..]));
-                steps.fold(cur, |cur, (&op, &id)| match &cur {
-                    Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                    _ => apply(cur, op, docs(id), words),
-                })
-            };
+                let (mut sum, mut first, mut nfirst) = (0u64, [0u32; 10], 0usize);
+                for m in &found[at..end] {
+                    sum += m.1 as u64;
+                    if nfirst < 10 {
+                        first[nfirst] = m.1;
+                        nfirst += 1;
+                    }
+                }
+                push_u64(&mut out, (end - at) as u64);
+                out.push(' ');
+                push_u64(&mut out, sum);
+                for d in &first[..nfirst] {
+                    out.push(' ');
+                    push_u64(&mut out, *d as u64);
+                }
+                out.push('\n');
+                continue;
+            }
+            let (cur, steps) = (docs(tids[0]), ops.iter().zip(&tids[1..]));
+            let set = steps.fold(cur, |cur, (&op, &id)| match &cur {
+                Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
+                _ => apply(cur, op, docs(id), words),
+            });
             line(&mut out, &set);
         }
         *chunk.lock().unwrap() = out;
