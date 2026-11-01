@@ -226,3 +226,17 @@ T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
   if the sandbox answers sched_setaffinity with SIGSYS instead of EPERM
   the probe run fails - best stays sticky, one reading lost. AWAITING
   Alok's go (queued behind v52's probe).
+- v54 (staged 11:56 IST, file track-b/held/v54_main.rs): Cache Me's
+  hash-only terms table (their commit fae41d5e of 06:14Z, MIT, header
+  credits it): full 64-bit token hash, slot stores the top 46 hash bits
+  above id+1, find compares hash bits ONLY - the keys array and every
+  key compare are gone, and the scan ring carries 8-byte hashes instead
+  of 32-byte keys. Removes the keys[] dependent miss outright (the one
+  v52 only prefetches). False-match chance ~2^-63 per probe pair;
+  negligible, and their board run passed the gates. Gates: full sha OK,
+  sample OK, 6 suites byte-exact vs v34test_bin. Local t8 ~equal to v42
+  (551-562ms vs 549-578ms). S: 620 local (~642 board est, -10 vs v42).
+  M: keys array + its renumber clone gone (~-2.4MB; Cache Me's M fell
+  49.2 -> 47.8 with this change). Their first board run with it scored
+  73.234 on a mid T roll (0.173163) - the T win has not shown yet.
+  SUPERSEDES v52 as the next probe candidate.
