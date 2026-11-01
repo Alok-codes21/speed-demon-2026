@@ -169,7 +169,13 @@ impl Heap {
         unsafe {
             while 4 * i + 1 < n {
                 let c = 4 * i + 1;
-                let m = (c + 1..n.min(c + 4)).fold(c, |m, j| if (*h.add(j)).0 < (*h.add(m)).0 { j } else { m });
+                let end = n.min(c + 4);
+                // Select the smallest child with straight-line comparisons.
+                // This avoids the iterator/fold machinery in the heap hot path.
+                let mut m = c;
+                if c + 1 < end && (*h.add(c + 1)).0 < (*h.add(m)).0 { m = c + 1; }
+                if c + 2 < end && (*h.add(c + 2)).0 < (*h.add(m)).0 { m = c + 2; }
+                if c + 3 < end && (*h.add(c + 3)).0 < (*h.add(m)).0 { m = c + 3; }
                 if (*h.add(m)).0 >= x.0 {
                     break;
                 }
