@@ -60,6 +60,15 @@ void populate_share(T* p, size_t n, int t, int nthreads) {
     if (to > from) madvise(reinterpret_cast<char*>(p) + from * 4096, (to - from) * 4096, MADV_POPULATE_WRITE);
 }
 
+// The mirror for memory a phase has finished with: thread t of n drops its
+// share of the pages now, so they are not all torn down by one thread at
+// process exit (the same effect step 102's base gets for records.csv).
+template <class T>
+void drop_share(T* p, size_t bytes, int t, int nthreads) {
+    const size_t pages = bytes / 4096, from = pages * t / nthreads, to = pages * (t + 1) / nthreads;
+    if (to > from) madvise(reinterpret_cast<char*>(p) + from * 4096, (to - from) * 4096, MADV_DONTNEED);
+}
+
 // Map a file over a spare zero page, so 64-byte loads past its end are safe.
 const char* map_file(const char* path, size_t& size) {
     int fd = open(path, O_RDONLY);
@@ -209,6 +218,7 @@ public:
 
     // Each of n threads populates its share up front (see zeroed).
     void populate(int t, int n) const { populate_share(slots_, SLOTS, t, n); }
+    void drop(int t, int n) const { drop_share(slots_, SLOTS * sizeof(std::atomic<u64>), t, n); }
 
 private:
     std::atomic<u64>* slots_ = zeroed<std::atomic<u64>>(SLOTS);  // 0 = free
@@ -404,7 +414,7 @@ int main(int argc, char** argv) {
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
-    Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
+    Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces}, teardown{.pieces = nthreads};
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
@@ -433,6 +443,13 @@ int main(int argc, char** argv) {
                 // this thread, instead of all of the file's at exit by one.
                 uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
+            });
+            // Dead once parsed: the shared tables are dropped share by share
+            // now, by every thread, instead of all at exit by one.
+            teardown.run([&](int k) {
+                drop_share(country_of, nregions, k, nthreads);
+                names.drop(k, nthreads);
+                drop_share(seen.bits, 256 * NamesSeen::WORDS * sizeof(std::atomic<u64>), k, nthreads);
             });
         });
     for (auto& th : pool) th.join();
