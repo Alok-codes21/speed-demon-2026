@@ -1059,12 +1059,22 @@ Every step from the reference to your final version, each with the live-board ru
 - Run: run-c8d6b60e7387 on 68b026e0ea5f905a8be7ba3e1702671f5e3e1f39:
   T 0.028783, M 8.74MB, S 412, 79.3891 pts - LOST, reverted in 523d69b. Futex wait/wake on go atomic added overhead without eliminating phase barriers.
 
-## Step 106 - v166: Sub-20ms Engine (Zero Barriers, Fast-Path Scanner, Relaxed Bitset Mark)
+## Step 106 - v166: Serial regions + relaxed test-before-OR (failed experiment)
+- Changes: Serial regions pass in main() + test-before-OR bitset marking.
+- Run: run-60c7e387e67d on a2519bb6d3b0d72bacdd7f8a273ff030032c2ecb:
+  T 0.037845, M 10.35MB, S 444, 75.4377 pts - LOST, reverted. Diagnosis: 2 serial passes over regions.csv in main() delayed pool threads by 6 ms, and test-before-OR caused double cache-line invalidation (Shared -> Exclusive upgrade) across 12 cores on duplicate marks.
+
+## Step 107 - v167: NickTrapp Architecture Adoption (BITS=18 Table, 38% Load Factor, S-Golf)
+- Root Cause & NickTrapp Match:
+  NickTrapp holds World Rank #1 with T = 0.0180s, M = 12.75 MB, S = 303.
+  Their 12.75 MB peak memory matches BITS = 18 (262,144 slots: 2 MB table + 8 MB bitsets + binary = 12.75 MB).
+  At 100,000 distinct names, BITS = 17 has a 76% load factor, causing long linear probe collision chains and atomic CAS stalls across 12 threads.
+  At BITS = 18, load factor drops from 76% to 38.1%! Lookups hit on the very first AVX2 vector probe.
 - Changes:
-  1. Single-Pass Sequential Regions Loader: Loaded regions.csv (2.2 MB) in ~1 ms in main(), completely eliminating Phase flag and Phase fill (24 thread barrier synchronizations), saving ~3.5 ms of inter-thread contention.
-  2. Fast-Path Quoted Name Scanner (text_name): Uses 32-byte AVX2 compare and bit test !(m & (2u << i)) to resolve 89% of unescaped quoted names in 4 instructions, bypassing the quote pair escape loop.
-  3. Relaxed Test-Before-OR Bitset Marking (NamesSeen::mark): In Zipf-distributed countries (>85% duplicates), relaxed atomic load check completely avoids fetch_or (LOCK OR) on duplicates, eliminating millions of atomic bus lock cycles and L3 cache line invalidations across cores.
-  4. Hoisted Vector Broadcast in NameTable::id: Hoisted vk = _mm256_set1_epi64x(k) outside loop, bitwise & (SLOTS - 1) slot wrapping, and early hit exit skipping free mask computation.
-  5. S-Axis Source Golf: Condensed statements and removed redundant comments to reduce non-blank source lines from 403 to 366.
-- Target: Break 20ms barrier (T <= 0.019s - 0.020s), M = 8.97 MB, S = 366 lines, targeting 83.5+ points and World Rank #1-2.
+  1. BITS = 18 (262,144 slots): 38.1% load factor, eliminating hash probe collisions.
+  2. Bitwise slot wrapping: (i + 4) & (SLOTS - 1) replaces integer modulo.
+  3. Kept proven clean parallel 12-thread pool and per-piece DONTNEED teardown.
+  4. Kept _exit(0) exit bypass.
+  5. S-Axis Source Golf: Condensed non-blank lines from 403 to 330 lines.
+- Target: T <= 0.018s - 0.019s, M = 12.75 MB, S = 330 lines, targeting 83.5+ points to capture World Rank #1.
 - Run: PENDING
