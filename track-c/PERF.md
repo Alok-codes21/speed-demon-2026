@@ -1064,17 +1064,16 @@ Every step from the reference to your final version, each with the live-board ru
 - Run: run-60c7e387e67d on a2519bb6d3b0d72bacdd7f8a273ff030032c2ecb:
   T 0.037845, M 10.35MB, S 444, 75.4377 pts - LOST, reverted. Diagnosis: 2 serial passes over regions.csv in main() delayed pool threads by 6 ms, and test-before-OR caused double cache-line invalidation (Shared -> Exclusive upgrade) across 12 cores on duplicate marks.
 
-## Step 107 - v167: NickTrapp Architecture Adoption (BITS=18 Table, 38% Load Factor, S-Golf)
-- Root Cause & NickTrapp Match:
-  NickTrapp holds World Rank #1 with T = 0.0180s, M = 12.75 MB, S = 303.
-  Their 12.75 MB peak memory matches BITS = 18 (262,144 slots: 2 MB table + 8 MB bitsets + binary = 12.75 MB).
-  At 100,000 distinct names, BITS = 17 has a 76% load factor, causing long linear probe collision chains and atomic CAS stalls across 12 threads.
-  At BITS = 18, load factor drops from 76% to 38.1%! Lookups hit on the very first AVX2 vector probe.
+## Step 107 - v167: NickTrapp Architecture Adoption (BITS=18 Table, 38% Load Factor)
+- Changes: BITS=18 (262k slots) with bitwise slot wrapping (i + 4) & (SLOTS - 1).
+- Run: run-a6f9664becbf on 9cf309783a7ea22d4695e2d43e32baa7cae5ac23:
+  T 0.029111, M 14.33MB, S 403, 77.1917 pts - LOST, reverted. Diagnosis: BITS=18 doubled table size and per-country bitsets, driving M from 8.97 MB to 14.33 MB (-2.2 points on M-axis) without reducing T, because the 16-record prefetch pipeline already fully hides the NameTable lookup latency.
+
+## Step 108 - v168: M-Recovery (BITS=17) with Bitwise Wrap & Source Golf (S=330)
 - Changes:
-  1. BITS = 18 (262,144 slots): 38.1% load factor, eliminating hash probe collisions.
-  2. Bitwise slot wrapping: (i + 4) & (SLOTS - 1) replaces integer modulo.
-  3. Kept proven clean parallel 12-thread pool and per-piece DONTNEED teardown.
-  4. Kept _exit(0) exit bypass.
-  5. S-Axis Source Golf: Condensed non-blank lines from 403 to 330 lines.
-- Target: T <= 0.018s - 0.019s, M = 12.75 MB, S = 330 lines, targeting 83.5+ points to capture World Rank #1.
+  1. Reverted BITS back to 17 (131,072 slots), restoring total memory footprint to 8.97 MB (+2.2 points on M).
+  2. Retained single-cycle bitwise slot wrap (i + 4) & (SLOTS - 1) replacing % SLOTS.
+  3. Retained _exit(0) exit bypass.
+  4. S-Axis Source Golf: Condensed non-blank lines from 403 to ~330 lines.
+- Target: Recover 79.4+ points with S-axis boost towards 80+ points.
 - Run: PENDING
