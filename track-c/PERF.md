@@ -1074,3 +1074,20 @@ Every step from the reference to your final version, each with the live-board ru
   regions teardown does not pay: its madvise calls bunch at the fill/parse
   boundary against the parse phase's MADV_POPULATE_READ calls (same kernel
   lock contention pattern as step 99). Reverted to step 102's c_join.cpp.
+
+
+## Step 107 - v167: drop the shared tables share by share after parse
+- One variable vs step 102: a teardown phase after parse where each thread
+  MADV_DONTNEEDs its share of the dead tables (country_of ~1 MB, the name
+  table 1 MB, the country bitsets 4 MB), instead of one thread tearing them
+  down at exit. Grounding: step 21's effect for records.csv.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
+- Run: run-759ac86875a0 on f0d7344602...: T 0.030445, M 10.15MB, S 419,
+  78.0739 pts - LOST, reverted. Box drift was +1-3% (19 teams' latest/best
+  T ratios 1.000-1.135, median ~1.01), so +6% vs step 102's band is the
+  change. Mechanism: twelve threads madvise-DONTNEED at once serialize on
+  the same mmap lock, so the teardown is not actually parallel - the work
+  just moves, plus S grew to 419. Teardown only pays when it is spread
+  through other work (step 21's per-piece pattern), never bunched at a
+  phase boundary (here and step 106). Reverted to step 102's c_join.cpp.
