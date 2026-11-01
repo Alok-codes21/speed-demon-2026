@@ -940,3 +940,10 @@ the fault theory is dead and B is at its plateau.
 - Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites.
 - Bench: 64 interleaved full-dataset native-flag runs (ABBA order): v97 min 0.474-0.475 s vs v99 min 0.458-0.461 s (~3.2-3.4% on mins, ~1-2.7% on medians). Line-negative and points-positive under conservative reads: T -2% -> +1.0% K, S -5 lines -> +0.1% K. Over the bar -> LIVE, this push.
 - Revert rule: if board points land below 74.02 (v92's reading) on TWO v99 runs, or T > ~0.169 on two runs, restore the step-63 (v97) file; v90 banked best 74.14792 is sticky regardless.
+
+## Step 66: v107 - combined held micro-wins, promoted on the strike rule (LIVE)
+
+- Combination of three byte-exact held changes, all measured vs v99 and under the 3% bar individually: df sample 1/64 (v100, zero-line), record-loop op strip (v103: unclamped token ids via nterms+1 last vec + pending dump-slot OR, line-neutral). v98's bits_new fusion was priced and left out (+14 lines, zero extra gain).
+- Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites. Line-neutral vs v99 (S unchanged).
+- Bench: fresh 31-pair 3-way interleaved ABBA, 62 runs/engine: v99 min 0.456 s vs v107 min 0.451 s (+1.1% mins, +0.8% median). Under the promotion bar, so held - UNTIL the board gave v99 its second sub-74.02 run (run-9cb0135dd81d: T 0.165363, M 46,989,312, pts 73.771138; first was run-4f27f68a3c35, 74.018248). Strike rule fired with v107 as the designated successor (owner decision, 19:41 IST) -> LIVE, this push.
+- Same strike rule on v107: two sub-74.02 runs (or T > ~0.169 twice) -> restore the step-63 (v97) file. Trial phase (structural redesigns) may supersede; v90 banked best 74.14792 is sticky regardless.
