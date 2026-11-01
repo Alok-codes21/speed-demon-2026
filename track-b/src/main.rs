@@ -28,7 +28,6 @@
 
 use std::arch::x86_64::*;
 use std::borrow::Cow;
-use std::fmt::Write;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Barrier, Mutex, OnceLock};
@@ -153,6 +152,21 @@ impl Terms {
         }
         self.n as u32 - 1
     }
+}
+
+// v in decimal after a space (or none, first on a line), without the
+// formatting machinery: 600,000 numbers are written.
+fn num(out: &mut String, space: bool, mut v: u64) {
+    let (mut buf, mut i) = ([b' '; 21], 21);
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&buf[i - space as usize..]) });
 }
 
 unsafe fn classes(p: *const u8) -> (u64, u64) {
@@ -324,17 +338,17 @@ fn line(out: &mut String, docs: &Docs) {
     match docs {
         Docs::List(v) => {
             let sum: u64 = v.iter().map(|&d| d as u64).sum();
-            write!(out, "{} {sum}", v.len()).unwrap();
-            v.iter().take(10).for_each(|d| write!(out, " {d}").unwrap());
+            (num(out, false, v.len() as u64), num(out, true, sum));
+            v.iter().take(10).for_each(|&d| num(out, true, d as u64));
         }
         Docs::Bits(b) => {
             let (count, sum) = unsafe { bit_sums(b) };
-            write!(out, "{count} {sum}").unwrap();
+            (num(out, false, count), num(out, true, sum));
             let mut rem = 10;
             for (w, &x) in b.iter().enumerate() {
                 let mut m = x;
                 while m != 0 && rem > 0 {
-                    write!(out, " {}", w as u32 * 64 + m.trailing_zeros()).unwrap();
+                    num(out, true, w as u64 * 64 + m.trailing_zeros() as u64);
                     (m, rem) = (m & (m - 1), rem - 1);
                 }
                 if rem == 0 {
@@ -554,8 +568,11 @@ fn main() {
                 for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
                     let span = spans[q as usize];
                     let phrase = &ids[span.1 as usize..span.2 as usize];
-                    let s = at.wrapping_sub(j as usize);
-                    if toks.get(s..s.wrapping_add(phrase.len())) == Some(phrase) {
+                    // One term other than the anchor is compared first, so most
+                    // windows are turned down without the slice compare's call.
+                    let (s, e) = (at.wrapping_sub(j as usize), if j == 0 { phrase.len() - 1 } else { 0 });
+                    let near = toks.get(s.wrapping_add(e)) == phrase.get(e);
+                    if near && toks.get(s..s.wrapping_add(phrase.len())) == Some(phrase) {
                         mine.push((q, doc));
                     }
                 }
@@ -565,6 +582,11 @@ fn main() {
                 count[i as usize] += 1;
             }
         });
+        // The share is not read again: its pages go now, on every thread,
+        // rather than all of the file's on one thread at exit.
+        let page = |n: usize| share.as_ptr() as usize + n & !4095;
+        let (a, b) = (page(4095), page(share.len()));
+        unsafe { madvise(a as *mut u8, b.saturating_sub(a), 4) };
         flush(&mut pending, block);
         buckets.iter_mut().for_each(Units::finish);
         found.lock().unwrap().extend(mine);
