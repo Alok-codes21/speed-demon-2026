@@ -590,11 +590,7 @@ fn main() {
     // phrases read (their tokens need no state). Within a class the most
     // frequent come first, so the state of common terms shares cache lines.
     let class = |i: usize| match (in_bool[i], anchor[i]) {
-        // v84: bitmap/list break-even priced for M, not eval speed - a bitmap
-        // costs 31.3 KB per term, a list 2 B per document, so lists win up to
-        // df = docs/16. Fewer, denser bitmaps: -6.1 MB of bits for +3.9 MB of
-        // postings (measured on the full corpus).
-        (true, false) => (df[i] as usize * 16 <= sampled) as usize,
+        (true, false) => (df[i] as usize * 32 <= sampled) as usize,
         (true, true) => 2,
         (false, true) => 3,
         (false, false) => 4,
