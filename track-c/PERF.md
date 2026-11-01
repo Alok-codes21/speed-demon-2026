@@ -1291,3 +1291,36 @@ Every step from the reference to your final version, each with the live-board ru
 - REVERTED to v177 (readback byte-exact). Lesson, fed back to the loop:
   no spin-wait hand-rolled concurrency on the HT pair; the paired scan+resolve
   fusion only pays when the pipeline stages are already balanced.
+
+## Step 126 - Trial v179: main thread off the critical path, rejected
+- Source: Claude (claude.ai chat) review of v177: let workers compute their own
+  piece boundaries (independent per-piece next-delimiter cuts; provably the
+  same tiling up to which thread a boundary record lands with, which the
+  order-free merge makes identical), move index_of to BSS, value-initialize
+  each totals row in its owner thread behind a ready counter (a fast thread
+  can otherwise claim every piece before a slow one zeroes the slow one's
+  row), and replace the joins with a wait on parse.done.
+- Local gating caught two traps before they cost a board run: a plain
+  ::operator new under-aligns the alignas(64) totals rows (found by core
+  dump: vmovdqa on a 16-byte-aligned base), and Claude's companion "delete
+  the per-record BOM check" idea is wrong about the file shape - the
+  generator emits per-part BOMs before individual records mid-file.
+- Gates: full seed-1 sha256 d8088b1c... exact (byte-identical output to
+  v177), 6/6 fixtures, 8/8 reference fuzz seeds, TSAN 0 races (thread-leak
+  report only: the _exit-without-join is intentional).
+- Run run-a77946248908 (commit 5672f2b07d): T 0.024320 s (+0.9 ms vs the
+  v177 band), M 9.09 MB, S 459, 80.49 pts. REVERTED. Lesson: thread-start
+  skew on the real box already hides main's serial setup; moving it into
+  the workers only added code and cache pressure.
+
+## Step 127 - Trial v180: NTA hint on the file-stream prefetch, rejected
+- Source: Claude's second candidate: _MM_HINT_T0 -> _MM_HINT_NTA on the
+  block + 2048 stream prefetch, to keep the file stream out of the shared
+  L2 so name-table and region lines stay resident.
+- Gates: sha exact, 6/6 fixtures, 8/8 reference fuzz seeds.
+- Run run-99e37213a2c0 (commit 9fc4f027f0): T 0.024399 s (+0.9 ms), M 8.98
+  MB, S 450, 80.57 pts. REVERTED. Either the NTA line is evicted before
+  use at a 32-block lead, or disturbing the T0 stream costs more than the
+  L2 residency saves. Control: the v177 restore run-4a5071a8bdab landed
+  back at T 0.023397 s, so the +0.9 ms on both trials was real code cost,
+  not box drift.
