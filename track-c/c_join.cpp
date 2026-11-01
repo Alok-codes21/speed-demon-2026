@@ -283,7 +283,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         u64 inside = 0;
         for (u32 b = 0; b < blocks; ++b) {
             const char* block = p + 64 * b;
-            _mm_prefetch(block + 2048, _MM_HINT_T0);
+            _mm_prefetch(block + 2048, _MM_HINT_NTA);  // keep the file stream out of L2 so table lines stay resident
             __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block));
             __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block + 32));
             u64 q = mask64(lo, hi, '"');
