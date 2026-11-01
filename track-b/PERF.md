@@ -745,3 +745,11 @@ synthetic single-term suite: 0 matches instead of 144).
   S=652, 72.82 pts.
 - Sibling-folder re-roll (run-baba82a58b29): T=0.1728 s, M=49.5 MB,
   S=652, 72.90 pts. v42 T band across five readings: 0.1715-0.1733 s.
+
+- Sibling-folder re-roll (run-3410fee5aa6f): T=0.1750 s, S=652,
+  72.75 pts.
+- Sibling-folder re-roll (run-411e20a416a3): T=0.1928 s, S=652,
+  71.79 pts - the slow-roll tail (E-core landing suspicion; see the
+  held ledger's v53 note).
+- Sibling-folder re-roll (run-1424f5aaabc6): T=0.1792 s, S=652,
+  72.42 pts. v42 T band across eight readings: 0.1715-0.1928 s.
