@@ -1149,4 +1149,6 @@ Every step from the reference to your final version, each with the live-board ru
 - Run run-d54eabd3ea8f (commit 777be7345e): T 0.028814 s, M 9.29 MB, S 408,
   79.1427 pts. T at the top of the v170 band 0.0283-0.0287 with box drift normal
   (median latest/best 1.014); S +4 lines is the only clear cost. Second sample
-  via this doc push; revert to v170 if the band does not improve.
+  run-6ea466090b03 (commit 3e953c6f12): T 0.028562 s (mid-band), M 9.14 MB,
+  S 408, 79.3115 pts. Verdict: KEEP - two samples straddle the v170 band, no
+  regression shown; banked best 79.6396 is unaffected.
