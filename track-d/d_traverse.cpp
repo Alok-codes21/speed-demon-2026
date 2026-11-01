@@ -891,16 +891,34 @@ int main() {
   std::vector<int64_t> answers(queries.size(), -1);
   std::vector<u32> order(queries.size());
   std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(),
-            [&](u32 a, u32 b) { return queries[a].from < queries[b].from; });
+  // Sort by both endpoints so identical shortest-path queries are adjacent.
+  // The first index in each group computes the answer once; duplicates reuse it.
+  std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
+    if (queries[a].from != queries[b].from)
+      return queries[a].from < queries[b].from;
+    return queries[a].to < queries[b].to;
+  });
   std::atomic<size_t> next{0};
   parallel(std::min<size_t>(threads, std::max<size_t>(1, queries.size())),
            [&](unsigned) {
              Worker worker(g);
              for (size_t k; (k = next.fetch_add(1, std::memory_order_relaxed)) <
-                            queries.size();)
-               answers[order[k]] =
-                   worker.solve(queries[order[k]].from, queries[order[k]].to);
+                            queries.size();) {
+               const Query &q = queries[order[k]];
+               // Non-first members are handled by the first member's group.
+               if (k && queries[order[k - 1]].from == q.from &&
+                   queries[order[k - 1]].to == q.to)
+                 continue;
+
+               const int64_t answer = worker.solve(q.from, q.to);
+               size_t end = k + 1;
+               while (end < order.size() &&
+                      queries[order[end]].from == q.from &&
+                      queries[order[end]].to == q.to)
+                 ++end;
+               for (size_t j = k; j < end; ++j)
+                 answers[order[j]] = answer;
+             }
            });
   std::string text;
   for (int64_t x : answers)
