@@ -30,11 +30,11 @@ use std::arch::x86_64::*;
 use std::borrow::Cow;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
+
 use std::sync::{Barrier, Mutex, OnceLock};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn munmap(addr: *mut u8, len: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
@@ -48,6 +48,7 @@ const GAP: u32 = 15;
 const ID_BITS: u32 = 18;
 const ID_MASK: u64 = (1 << ID_BITS) - 1;
 const BIG: usize = 768;
+static ARENA: AtomicUsize = AtomicUsize::new(0);
 
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
@@ -62,6 +63,7 @@ fn map(path: &str) -> &'static [u8] {
 
 type Job = &'static (dyn Fn(usize) + Sync);
 static JOB: Mutex<Option<Job>> = Mutex::new(None);
+
 static GATE: OnceLock<Barrier> = OnceLock::new();
 
 fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
@@ -94,6 +96,7 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     static KEEP: [u128; 4] = [!0, !0, 0, 0];
     let mask = _mm256_loadu_si256(KEEP.as_ptr().cast::<u8>().add(32 - len).cast());
     let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
+
     let w: [u64; 4] = std::mem::transmute(_mm256_and_si256(v, mask));
     let a = (w[0] ^ w[2].rotate_left(23)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let b = (w[1] ^ w[3].rotate_left(23)).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
@@ -126,6 +129,7 @@ impl Terms {
                 if m != 0 {
                     let s = *p.add(i + m.trailing_zeros() as usize);
                     return ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32);
+
                 }
                 i = (i + 4) & mask;
             }
@@ -158,6 +162,7 @@ impl Terms {
 // formatting machinery: 600,000 numbers are written.
 fn num(out: &mut String, space: bool, mut v: u64) {
     let (mut buf, mut i) = ([b' '; 21], 21);
+
     loop {
         i -= 1;
         buf[i] = b'0' + (v % 10) as u8;
@@ -190,6 +195,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
         (ids.set_len(out), ids.reserve(32 + LAG));
+
         let buf = ids.as_mut_ptr();
         let mut look = |&h: &u64| {
             let id = t.find(h);
@@ -222,6 +228,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         }
         if nl != 0 {
             (n..n + LAG).for_each(|i| look(&ring[i % LAG]));
+
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
@@ -232,10 +239,6 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
 enum Docs<'a> {
     List(Vec<u32>),
     Bits(Cow<'a, [u64]>),
-}
-
-fn has(bits: &[u64], d: u32) -> bool {
-    bits[d as usize / 64] >> (d % 64) & 1 != 0
 }
 
 fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
@@ -253,11 +256,12 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             Bits(a)
         }
         (Bits(b), b'A', List(mut v)) | (List(mut v), b'A' | b'N', Bits(b)) => {
-            (v.retain(|&d| has(&b, d) == (op == b'A')), List(v)).1
+            (v.retain(|&d| (b[d as usize / 64] >> (d % 64) & 1 != 0) == (op == b'A')), List(v)).1
         }
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
             for (w, m) in b.into_iter().map(bit) {
+
                 x[w] = if op == b'O' { x[w] | m } else { x[w] & !m };
             }
             Bits(a)
@@ -290,6 +294,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             let (mut i, mut j, mut k) = (0, 0, 0);
             while i < a.len() && j < b.len() {
                 let (x, y) = (a[i], b[j]);
+
                 a[k] = x;
                 k += if op == b'A' { x == y } else { x < y } as usize;
                 (i, j) = (i + (x <= y) as usize, j + (y <= x) as usize);
@@ -322,6 +327,7 @@ unsafe fn bit_sums(b: &[u64]) -> (u64, u64) {
             _mm256_maddubs_epi16(pcb, w8),
             _mm256_maddubs_epi16(fb, ones8),
         );
+
         pos = _mm256_add_epi32(pos, _mm256_madd_epi16(s, ones16));
         cnt = _mm256_add_epi64(cnt, _mm256_sad_epu8(pcb, z));
         wsum = _mm256_add_epi64(wsum, cnt); // running prefix: S = sum_j c_j * (N - j)
@@ -354,6 +360,7 @@ fn line(out: &mut String, docs: &Docs) {
                 if rem == 0 {
                     break;
                 }
+
             }
         }
     }
@@ -378,7 +385,7 @@ fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32,
 
 #[derive(Default)]
 struct Units {
-    chunks: Vec<Vec<u16>>,
+    chunks: Vec<&'static [u16]>,
     at: usize,
     end: usize,
     prev: u32,
@@ -386,6 +393,7 @@ struct Units {
 
 impl Units {
     fn put(&mut self, x: u16) {
+
         if self.at == self.end {
             self.grow();
         }
@@ -396,9 +404,9 @@ impl Units {
     #[inline(never)]
     fn grow(&mut self) {
         self.finish();
-        let c = Vec::<u16>::with_capacity(1 << 17);
-        (self.at, self.end) = (c.as_ptr() as usize, c.as_ptr() as usize + 2 * c.capacity());
-        self.chunks.push(c);
+        let p = ARENA.fetch_add(1 << 18, Relaxed);
+        (self.at, self.end) = (p, p + (1 << 18));
+        self.chunks.push(unsafe { std::slice::from_raw_parts(p as *const u16, 1 << 17) });
     }
 
     fn add(&mut self, offset: u32, doc: u32) {
@@ -411,13 +419,14 @@ impl Units {
 
     fn finish(&mut self) {
         if let Some(c) = self.chunks.last_mut() {
-            unsafe { c.set_len((self.at - c.as_ptr() as usize) / 2) };
+            *c = unsafe { std::slice::from_raw_parts(c.as_ptr(), (self.at - c.as_ptr() as usize) / 2) };
         }
     }
 }
 
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
+
     let qtext = map("data/queries.txt");
     let n = (qtext.len() / 8).next_power_of_two().max(4);
     // Mapped on its own and handed back after the scan. Every token's lookup
@@ -450,12 +459,14 @@ fn main() {
     let mut ids: Vec<u32> = (0..ids.len())
         .map(|k| {
             let ahead = ids.get(k + 16).map_or(0, |&h| h as usize & (terms.slot.len() - 4));
+
             unsafe { _mm_prefetch::<_MM_HINT_T0>(slot.add(ahead).cast()) };
             terms.insert(ids[k])
         })
         .collect();
     let nterms = terms.n;
     let text = map("data/docs.txt");
+    ARENA.store(unsafe { mmap(std::ptr::null_mut(), text.len() * 2 + (BUCKETS * THREADS << 18), 3, 0x4022, -1, 0) } as usize, Relaxed);
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
     for c in &mut cut[1..THREADS] {
         while *c < text.len() && text[*c - 1] != b'\n' {
@@ -481,6 +492,7 @@ fn main() {
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
                 let mark = (doc + 1) as u16;
                 for &id in toks {
+
                     if std::mem::replace(&mut last[id as usize], mark) != mark {
                         df[id as usize] += 1;
                     }
@@ -513,6 +525,7 @@ fn main() {
         let [nbits, a0, lists, nkeep] = [0, 1, 2, 3].map(at_most);
         let mut new = vec![0; nterms];
         for (r, &k) in packed.iter().enumerate() {
+
             new[k as usize & 0xFF_FFFF] = r as u32;
         }
         terms.renumber(&new);
@@ -545,6 +558,7 @@ fn main() {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
+
             }
             let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
@@ -577,6 +591,7 @@ fn main() {
                     }
                 }
             }
+
             for &i in &kept[..n] {
                 buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
                 count[i as usize] += 1;
@@ -592,7 +607,7 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 8) };
+    unsafe { madvise(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 8, 4) };
 
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
@@ -609,20 +624,24 @@ fn main() {
             for (c, i) in cursor.iter_mut().zip((b..lists).step_by(BUCKETS)) {
                 let before: u32 = seg[i * THREADS..][..t].iter().map(|&n| n as u32).sum();
                 *c = start[i] + before;
+
             }
             let (mut doc, mut term) = (0u32, NONE);
-            for x in units.chunks.into_iter().flatten() {
-                if term == NONE {
-                    term = (x >> 4) as u32;
-                    if x as u32 & GAP == GAP {
-                        continue;
+            for ch in units.chunks {
+                for &x in ch {
+                    if term == NONE {
+                        term = (x >> 4) as u32;
+                        if x as u32 & GAP == GAP {
+                            continue;
+                        }
+                        doc += x as u32 & GAP;
+                    } else {
+                        doc += x as u32;
                     }
-                    doc += x as u32 & GAP;
-                } else {
-                    doc += x as u32;
+                    let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
+                    (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
                 }
-                let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
-                (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
+                unsafe { madvise(ch.as_ptr() as *mut u8, ch.len() * 2, 4) };
             }
         }
     });
@@ -638,6 +657,7 @@ fn main() {
             let mut at = start[i] as usize;
             let segs = &seg[i * THREADS..][..THREADS];
             let mut v = Vec::with_capacity(segs.iter().map(|&n| n as usize).sum());
+
             for (&n, &first) in segs.iter().zip(&firsts) {
                 v.extend(post[at..at + n as usize].iter().map(|&d| first + d as u32));
                 at += n as usize;
@@ -645,8 +665,7 @@ fn main() {
             Docs::List(v)
         }
     };
-    let n = spans.len().div_ceil(64);
-    let chunks: Vec<Mutex<String>> = (0..n).map(|_| Mutex::default()).collect();
+    let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     on_threads(|_| loop {
         let k = next.fetch_add(1, Relaxed);
@@ -671,6 +690,7 @@ fn main() {
         *chunk.lock().unwrap() = out;
     });
     let file = std::fs::File::create("out/results.txt").expect("out/results.txt");
+
     let mut out = std::io::BufWriter::new(file);
     for c in chunks {
         std::io::Write::write_all(&mut out, c.into_inner().unwrap().as_bytes()).unwrap();
