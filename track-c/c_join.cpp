@@ -26,7 +26,6 @@
 #include <immintrin.h>
 #include <string>
 #include <mutex>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <thread>
@@ -34,7 +33,6 @@
 #include <vector>
 
 using u8 = uint8_t;
-using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 using i64 = int64_t;
@@ -71,8 +69,7 @@ const char* map_file(const char* path, size_t& size) {
         perror("mmap");
         _exit(1);
     }
-    madvise(p, size, MADV_HUGEPAGE);  // step 109: 2 MB file pages where the fs allows (52K -> ~100 page setups)
-
+    madvise(p, size, MADV_HUGEPAGE);
     close(fd);
     return p;
 }
@@ -88,7 +85,6 @@ u32 match32(const char* p, char c) {
     __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
     return _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c)));
 }
-
 
 // The value of the last n (1 to 8) of the eight digit bytes in v (the first
 // byte is the lowest): reduced to digit values, the bytes before them masked
@@ -146,7 +142,7 @@ struct Text {
     const char* q = s + 1;
     for (u64 m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;;) {
         u32 i = m ? __builtin_ctzll(m) : 64;
-        if (i >= 63) {  // none, or the byte after it is out of view: move on
+        if (i >= 63) {
             q += i;
             m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;
             continue;
@@ -168,12 +164,10 @@ struct Text {
 // whether quoted or not). A name's key is a 64-bit hash of those bytes and
 // their length; two of the 100,000 pool names share one with a chance of
 // about 3 in 10^10. A key's slot in the open-addressed table is the name's id;
-// an empty slot is claimed with a compare-and-swap. At 8 bytes a slot the
-// table is 1 MB, small enough to stay in a core's L2 while the input streams
-// past, and eight slots share a cache line, so a probe rarely leaves it.
+// an empty slot is claimed with a compare-and-swap.
 class NameTable {
 public:
-    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;  // the pool holds 100,000 names
+    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;
 
     static u64 key(const char* s, u32 len) {
         static constexpr char KEEP[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
@@ -187,10 +181,12 @@ public:
         }
         h = (h ^ h >> 31) * 0xD6E8FEB86659FD93ull;
         h ^= h >> 32;
-        return h + (h == 0);  // 0 marks a free slot
+        return h + (h == 0);
     }
 
-    void prefetch(u64 k) const { _mm_prefetch(reinterpret_cast<const char*>(&slots_[k >> (64 - BITS)]), _MM_HINT_T0); }
+    void prefetch(u64 k) const {
+        _mm_prefetch(reinterpret_cast<const char*>(&slots_[k >> (64 - BITS)]), _MM_HINT_T0);
+    }
 
     // Slots are probed four at a time, from the aligned group of four the key
     // hashes to: one 32-byte compare finds the key, or the first free slot,
@@ -213,7 +209,7 @@ public:
     void populate(int t, int n) const { populate_share(slots_, SLOTS, t, n); }
 
 private:
-    std::atomic<u64>* slots_ = zeroed<std::atomic<u64>>(SLOTS);  // 0 = free
+    std::atomic<u64>* slots_ = zeroed<std::atomic<u64>>(SLOTS);
 };
 
 // One country's running aggregates (per thread, summed at the end).
@@ -260,8 +256,8 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
     struct Mark {
         u32 country, id;
     } marks[LAG];
-    u64 n = 0, last = UINT64_MAX;  // records started; all of them once known
-    auto advance = [&]() __attribute__((always_inline)) {  // retire ring slot n % LAG
+    u64 n = 0, last = UINT64_MAX;
+    auto advance = [&]() __attribute__((always_inline)) {
         u32 k = n % LAG;
         if (n >= 2 * LAG && n - 2 * LAG < last) totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
         if (n >= LAG && n - LAG < last) {
@@ -284,7 +280,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         // The file's pages are scattered in memory, and the hardware prefetcher
         // stops at each 4 KB page; this reaches into the next one in time.
         _mm_prefetch(p + 2048, _MM_HINT_T0);
-        if (u8(*p) == 0xEF) p += 3;  // a byte order mark before the id
+        if (u8(*p) == 0xEF) p += 3;
         const char* f1 = comma_after(p);
         u64 id = digits(p, f1);
         p = f1 + 1;
@@ -311,18 +307,17 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         names.prefetch(key);
         p = eol + 1;
     }
-    for (last = n; n < last + 2 * LAG; ++n) advance();
+
+    for (last = n; n < last + 2 * LAG; ++n)
+        advance();
 }
 
 // 15-bit code of a three-letter country; numeric order is alphabetical order.
 u32 code(const char* p) { return (p[0] - 'A') << 10 | (p[1] - 'A') << 5 | (p[2] - 'A'); }
 
-// The region line "id,ABC" at p, moving p to the next line. An id has at most
-// 7 digits, so the comma is the lowest zero byte of the line's first 8 bytes
-// XOR ','.
+// The region line "id,ABC" at p, moving p to the next line.
 std::pair<u64, u32> region_line(const char*& p) {
-    u64 x = load8(p) ^ 0x2C2C2C2C2C2C2C2C;
-    const char* comma = p + __builtin_ctzll((x - 0x0101010101010101) & ~x & 0x8080808080808080) / 8;
+    const char* comma = comma_after(p);
     std::pair<u64, u32> line{digits(p, comma), code(comma + 1)};
     for (p = comma + 4; *p++ != '\n';) {}
     return line;
@@ -345,13 +340,13 @@ struct Phase {
 };
 
 // Cuts of [from, size) into n ranges, each starting just after a delimiter.
-std::vector<size_t> split(const char* data, size_t from, size_t size, int n, std::string_view delim) {
+template <size_t N> std::vector<size_t> split(const char* data, size_t from, size_t size, int n, const char (&delim)[N]) {
     std::vector<size_t> cut(n + 1, size);
     cut[0] = from;
     for (int t = 1; t < n; ++t) {
         size_t c = std::max(cut[t - 1], from + (size - from) * t / n);
-        auto* hit = static_cast<const char*>(memmem(data + c, size - c, delim.data(), delim.size()));
-        cut[t] = hit ? hit - data + delim.size() : size;
+        auto* hit = static_cast<const char*>(memmem(data + c, size - c, delim, N - 1));
+        cut[t] = hit ? hit - data + N - 1 : size;
     }
     return cut;
 }
@@ -368,6 +363,7 @@ void put_money(std::string& out, i64 cents) {
 // copied with attribution per contest rules. Only change vs upstream:
 // optional argv data/out dirs defaulting to /data and /out (upstream
 // hardcodes them), so the candidate can be gated against local fixtures.
+
 int main(int argc, char** argv) {
     // With transparent huge pages, a block written only in part can be backed
     // by a whole 2 MB page; plain pages keep memory to what is written.
@@ -425,14 +421,10 @@ int main(int argc, char** argv) {
                 }
             });
             parse.run([&](int k) {
-                // Map the piece's pages in one call rather than by a fault
-                // every 16 pages as the parse reaches them.
                 uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
                 madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
-                // The piece is not read again: its pages are unmapped now, by
-                // this thread, instead of all of the file's at exit by one.
                 uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
@@ -441,7 +433,7 @@ int main(int argc, char** argv) {
 
     std::string out;
     for (u32 i = 1; i <= codes.size() + 1; ++i) {
-        u32 c = i % (codes.size() + 1);  // countries 1..N, then _UNMATCHED (0)
+        u32 c = i % (codes.size() + 1);
         Totals sum;
         for (const auto& per_thread : totals) {
             const Totals& t = per_thread[c];
@@ -470,5 +462,5 @@ int main(int argc, char** argv) {
     if (!f) { perror("aggregates.txt"); return 1; }
     fwrite(out.data(), 1, out.size(), f);
     fclose(f);
-    _exit(0);  // step 102: skip static/libc teardown after output (exit ~0.5ms on this box)
+    _exit(0);
 }
