@@ -514,12 +514,26 @@ impl Units {
 }
 
 
+
+// Best-effort THP for a big hot allocation; ignored where unsupported.
+fn huge<T>(v: &mut Vec<T>) {
+    unsafe {
+        let lo = v.as_ptr() as usize & !4095;
+        let hi = (v.as_ptr() as usize + v.len() * size_of::<T>() + 4095) & !4095;
+        if hi > lo { madvise(lo as *mut u8, hi - lo, 14); } // MADV_HUGEPAGE
+    }
+}
+
 fn main() {
     unsafe { mallopt(-3, 1 << 16) }; // M_MMAP_THRESHOLD: freed buffers go back to the kernel
     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
-    unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
+    // v71 probe: THP re-enabled (v21's process-wide disable saved ~3 MB M;
+    // this probe prices the T side of that trade on the board).
+    unsafe { prctl(41, 0u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
-    let mut terms = Terms { slot: vec![0; (qtext.len() / 8).next_power_of_two()], n: 0 };
+    let mut slot = vec![0; (qtext.len() / 8).next_power_of_two()];
+    huge(&mut slot);
+    let mut terms = Terms { slot, n: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
@@ -615,7 +629,9 @@ fn main() {
     let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
     let words = ndocs.div_ceil(256) * 4; // whole 4-word vectors, for bit_sums
     // Zero pages from the kernel, written only where a bit is set.
-    let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
+    let mut bits_raw = vec![0u64; nbits * words];
+    huge(&mut bits_raw);
+    let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(bits_raw) };
 
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
     let found = Mutex::new(vec![]); // (query, document) phrase matches
@@ -701,7 +717,9 @@ fn main() {
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
     // Written by every thread at its own positions; relaxed stores are plain stores.
-    let post: Vec<AtomicU16> = unsafe { std::mem::transmute(vec![0u16; end as usize]) };
+    let mut post_raw = vec![0u16; end as usize];
+    huge(&mut post_raw);
+    let post: Vec<AtomicU16> = unsafe { std::mem::transmute(post_raw) };
     on_threads(|t| {
         let buckets = std::mem::take(&mut *scans[t].1.lock().unwrap());
         let mut cursor = vec![0u32; lists.div_ceil(BUCKETS)];
