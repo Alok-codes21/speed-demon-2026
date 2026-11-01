@@ -61,3 +61,5 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-1920124aeb98 | 163ded7d | 0.020109 | 20.30 | 514 | 83.136272 | Re-run on unchanged Track A source |
 | run-04c1b1e28407 | 007bc818 | 0.019931 | 20.20 | 514 | 83.255424 | Re-run on unchanged Track A source |
 | run-fcb783432bb0 | 06566e24 | 0.018473 | 20.76 | 514 | 83.960111 | Re-run on unchanged Track A source |
+| run-7c7a24162d3d | 51d80e15 | 0.019710 | 20.32 | 514 | 83.350528 | Re-run on unchanged Track A source |
+| run-f80da880e9c2 | ffe639ad | 0.020305 | 19.99 | 514 | 83.098319 | Re-run on unchanged Track A source |
