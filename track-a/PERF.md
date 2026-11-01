@@ -30,3 +30,4 @@ Record each live-board measurement here using its actual run ID and measured res
 | run-47538ecc0d25 | 7d309ba6 | 0.020862 | 20.10 | 584 | 82.365772 | Re-run on unchanged Track A source; new best |
 | run-403ac5d19d5d | fec7e935 | 0.019348 | 20.43 | 584 | 83.111775 | Re-run on unchanged Track A source; new best |
 | run-0a761af5c6dc | b99b78e1 | 0.018129 | 19.83 | 584 | 83.948962 | Re-run on unchanged Track A source; new best |
+| run-e8d0c8c7c746 | 2488b0ed | 0.017199 | 21.03 | 584 | 84.264893 | Re-run on unchanged Track A source; new best |
