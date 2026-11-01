@@ -316,26 +316,41 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
 }
 
 unsafe fn bit_sums(b: &[u64]) -> (u64, u64) {
-    const NIB: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
-    let nib = _mm256_broadcastsi128_si256(_mm_loadu_si128(NIB.as_ptr().cast()));
+    const PC: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+    const FLO: [u8; 16] = [0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6];
+    const FHI: [u8; 16] = [0, 4, 5, 9, 6, 10, 11, 15, 7, 11, 12, 16, 13, 17, 18, 22];
+    let ld = |t: &[u8; 16]| _mm256_broadcastsi128_si256(_mm_loadu_si128(t.as_ptr().cast()));
+    let (pc, flo, fhi) = (ld(&PC), ld(&FLO), ld(&FHI));
     let (low, z) = (_mm256_set1_epi8(0x0F), _mm256_setzero_si256());
-    let h = |v: __m256i| _mm256_shuffle_epi8(nib, _mm256_and_si256(v, low));
-    let pop = |v: __m256i| _mm256_sad_epu8(_mm256_add_epi8(h(v), h(_mm256_srli_epi16::<4>(v))), z);
-    let sel = |k: usize| _mm256_set1_epi64x(!(u64::MAX / ((1u64 << (1 << k)) + 1)) as i64);
-    let (mut acc, mut word) = ([z; 8], _mm256_setr_epi64x(0, 1, 2, 3));
+    let (ones8, ones16) = (_mm256_set1_epi8(1), _mm256_set1_epi16(1));
+    // byte k of each 64-bit lane gets weight 8*(k%8): 0,8,16,...,56
+    let w8 = _mm256_set1_epi64x(0x3830_2820_1810_0800);
+    let four = _mm256_set1_epi64x(4);
+    let (mut cnt, mut wsum, mut pos) = (z, z, z);
+    let mut word = _mm256_setr_epi64x(0, 1, 2, 3);
     for q in b.chunks_exact(4) {
         let v = _mm256_loadu_si256(q.as_ptr().cast());
-        let c = pop(v);
-        acc[6] = _mm256_add_epi64(acc[6], c);
-        acc[7] = _mm256_add_epi64(acc[7], _mm256_mul_epu32(c, word));
-        for k in 0..6 {
-            acc[k] = _mm256_add_epi64(acc[k], pop(_mm256_and_si256(v, sel(k))));
-        }
-        word = _mm256_add_epi64(word, _mm256_set1_epi64x(4));
+        let lo = _mm256_and_si256(v, low);
+        let hi = _mm256_and_si256(_mm256_srli_epi16::<4>(v), low);
+        // per-byte popcount and per-byte sum of set-bit positions (0..7)
+        let pcb = _mm256_add_epi8(_mm256_shuffle_epi8(pc, lo), _mm256_shuffle_epi8(pc, hi));
+        let fb = _mm256_add_epi8(_mm256_shuffle_epi8(flo, lo), _mm256_shuffle_epi8(fhi, hi));
+        // in-word position sum: 8*byte_index*popcount + in-byte positions
+        let s = _mm256_add_epi16(
+            _mm256_maddubs_epi16(pcb, w8),
+            _mm256_maddubs_epi16(fb, ones8),
+        );
+        pos = _mm256_add_epi32(pos, _mm256_madd_epi16(s, ones16));
+        // per-word popcount, weighted by word index for the 64*word term
+        let c = _mm256_sad_epu8(pcb, z);
+        cnt = _mm256_add_epi64(cnt, c);
+        wsum = _mm256_add_epi64(wsum, _mm256_mul_epu32(c, word));
+        word = _mm256_add_epi64(word, four);
     }
-    let total = |k: usize| -> u64 { std::mem::transmute::<_, [u64; 4]>(acc[k]).iter().sum() };
-    let sum = 64 * total(7) + (0..6).map(|k| total(k) << k).sum::<u64>();
-    (total(6), sum)
+
+    let t64 = |x: __m256i| -> u64 { std::mem::transmute::<_, [u64; 4]>(x).iter().sum() };
+    let in_word: u64 = std::mem::transmute::<_, [u32; 8]>(pos).iter().map(|&x| x as u64).sum();
+    (t64(cnt), 64 * t64(wsum) + in_word)
 }
 
 fn line(out: &mut String, docs: &Docs) {
