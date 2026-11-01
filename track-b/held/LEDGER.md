@@ -247,3 +247,26 @@ T=0.171759 s, M=49.5 MB, S=652). Overall geomean 75.8715, rank 10.
   (the board builds track-b/src/main.rs), doubling S to 1298 for one
   reading; the stray was deleted. All future code pushes go to
   track-b/src/main.rs.
+
+
+- v58 (REJECTED at gate, never pushed): 16KB Units chunks to cut allocator
+  slack. Measured peak anon went UP ~10MB - 16KB allocations fall under
+  M_MMAP_THRESHOLD (64KB) and land in the malloc arena; 64KB chunks mmap
+  and return. Theory wrong; dead.
+- v59 (REJECTED at gate, never pushed): branchy non-term early-out in the
+  per-doc recording pass (skip the ~6-8 masked ops for the 88% of tokens
+  that are no term). Gates byte-exact, but local t8 was 3-4% SLOWER than
+  v57 (567-602ms vs 544-574ms) - the branchless masked form wins, which is
+  why Cache Me wrote it that way. No board latency story flips this
+  (branches are not the latency-bound part); dead.
+- v60 (staged 12:57 IST, file track-b/held/v60_main.rs): = live v57 +
+  MADV_POPULATE_READ (advice 23, Linux 5.14+) on the text map. Probe for
+  the last uninstrumented T suspect: is the board scan page-fault bound?
+  WILLNEED today starts async readahead, but if 12 scan threads outrun it
+  they eat per-page minor faults mid-scan; POPULATE_READ pages the whole
+  254MB in through the kernel's batched path before scanning starts. Zero
+  output-semantics risk (advice only; no-op on kernels < 5.14). Gates: full
+  sha OK, sample OK, tiny OK. Local warm timing flat (expected - no faults
+  when cached). Verdict read: if board T improves, scan was fault-bound
+  and a smarter racer is worth building; if flat, the fault theory is dead
+  permanently. AWAITING Alok's "Hn" for the probe run.
