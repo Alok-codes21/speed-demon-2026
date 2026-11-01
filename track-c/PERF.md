@@ -1047,3 +1047,15 @@ Every step from the reference to your final version, each with the live-board ru
   Below step 100's same-hour band of 0.0289-0.0297 by ~0.4-0.5 ms, matching
   the measured exit cost; box mixed but not hot (ten teams' latest/best T
   ratios 0.96-1.13, median ~1.02, in the same ten minutes).
+
+## Step 105 - v165: spawner thread overlaps pool creation with setup
+- One variable vs step 102: a spawner thread creates the pool while main
+  finishes the records.csv split, so the serial pthread_create cost overlaps
+  setup instead of delaying the last workers. Workers hold on an atomic flag
+  until the setup they read is done.
+- Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
+  sample (1, 2, 7) byte-identical to the reference; TSAN clean.
+- Run: run-c8d6b60e7387 on 68b026e0ea...: T 0.028783, M 8.74MB, S 412,
+  79.3890 pts - no gain (step 102's run: T 0.028594, S 403). Within run
+  noise, but the expected ~0.5 ms did not show and S cost +9 lines on every
+  roll, so reverted to step 102's c_join.cpp within 15 minutes.
