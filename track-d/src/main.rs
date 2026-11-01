@@ -450,18 +450,18 @@ fn main() {
     // 4. Queries sorted so neighbouring searches share cached pages.
     let mut order: Vec<usize> = (0..ends.len()).collect();
     order.sort_unstable_by_key(|&q| ends[q]);
-    // Collapse identical (source, target) pairs before dispatch. The input
-    // contains repeats; solving each unique pair once avoids duplicate graph
-    // traversals while retaining the original output positions.
-    let mut groups: Vec<Vec<usize>> = Vec::with_capacity(order.len());
-    for q in order {
-        if let Some(last) = groups.last_mut() {
-            if ends[last[0]] == ends[q] {
-                last.push(q);
-                continue;
-            }
+    // Store duplicate-query groups as ranges into one flat index array. This
+    // avoids one heap allocation per group while solving each pair only once.
+    let mut groups: Vec<(usize, usize)> = Vec::with_capacity(order.len());
+    let mut start = 0;
+    while start < order.len() {
+        let key = ends[order[start]];
+        let mut end = start + 1;
+        while end < order.len() && ends[order[end]] == key {
+            end += 1;
         }
-        groups.push(vec![q]);
+        groups.push((start, end));
+        start = end;
     }
     // Each direction: offsets, packed edge words, heavy weights.
     let sides = [(&off[..], &adj[..], &heavy2[..]), (&roff[..], &radj[..], &rheavy[..])];
@@ -477,17 +477,17 @@ fn main() {
         let mut queue = [Heap::default(), Heap::default()];
         loop {
             let q = next.fetch_add(1, Relaxed);
-            let Some(group) = groups.get(q) else { return };
-            let i = group[0];
+            let Some(&(lo_q, hi_q)) = groups.get(q) else { return };
+            let i = order[lo_q];
             let ((s0, t0), (s, t)) = (queries[i], ends[i]);
             if s0 == t0 {
-                for &j in group { unsafe { *ansr.at(j) = 0 }; }
+                for &j in &order[lo_q..hi_q] { unsafe { *ansr.at(j) = 0 }; }
                 continue;
             }
             if off[s as usize + 1] == off[s as usize]
                 || roff[t as usize + 1] == roff[t as usize]
             {
-                for &j in group {
+                for &j in &order[lo_q..hi_q] {
                     unsafe { *ansr.at(j) = INF };
                 }
                 continue; // no outgoing source edge or no incoming target edge
@@ -527,7 +527,7 @@ fn main() {
                     }
                 }
             }
-            for &j in group { unsafe { *ansr.at(j) = best }; }
+            for &j in &order[lo_q..hi_q] { unsafe { *ansr.at(j) = best }; }
             queue.iter_mut().for_each(|q| q.0.clear());
             dist.iter_mut().for_each(Dist::reset);
         }
