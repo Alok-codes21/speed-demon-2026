@@ -44,7 +44,7 @@
 
 namespace {
 constexpr uint32_t kHours = 72, kIds = 2048, kBlock = 256 << 10, kStreams = 4;
-constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 2, kPartCap = kIds * 256;
+constexpr uint32_t kLag = 2, kNever = 1000, kKeep = 0, kPartCap = kIds * 256;
 constexpr uint32_t kMaxLine = 178, kRunCap = kBlock / 40 + 16;
 const char *const kDays[] = {"2026-10-30", "2026-10-31", "2026-11-01",
                              "2026-11-02"};
