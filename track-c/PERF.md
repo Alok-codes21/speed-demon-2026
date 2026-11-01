@@ -1042,4 +1042,8 @@ Every step from the reference to your final version, each with the live-board ru
   the ~5.5 ms non-parse overhead on this box.
 - Gates: full seed-1 sha256 d8088b1c...a0f536 byte-exact; tiny (1, 2, 7) and
   sample (1, 2, 7) byte-identical to the reference; TSAN clean.
-- Run: pending (pushed 2026-11-01 ~06:53 UTC).
+- Run: run-7857d1b3d51b on 4ac848112bca0988ca4bcd679cb67c156c2c882c:
+  T 0.028594, M 8.97MB, S 403, 79.4200 pts - NEW BANKED BEST (was 79.3904).
+  Below step 100's same-hour band of 0.0289-0.0297 by ~0.4-0.5 ms, matching
+  the measured exit cost; box mixed but not hot (ten teams' latest/best T
+  ratios 0.96-1.13, median ~1.02, in the same ten minutes).
