@@ -916,3 +916,16 @@ the fault theory is dead and B is at its plateau.
 
 - ChatGPT loop round 5: the two u16 postings writes in Units::add fused into one 32-bit unaligned store. Byte-exact (3 official shas EXACT, 70/70 suites). Bench: 15 interleaved full-dataset native-flag runs, v92 fast-cluster min 0.447 s vs v95 min 0.448 s - no gain. Rejected. Stall 3 of 3.
 - Stop rule met: three consecutive no-gain rounds (insert ~1%, fused tokenizer -67%, batched recording ~0%). The ChatGPT loop ends here; v92 (step 58) stays live. Revert rule unchanged: if board T regresses >3% vs v90 (0.165647/0.166093) on two runs, restore step-56 file.
+
+## Step 62: v96 - Claude round 1, dummy-slot rotation (ONE variable, no gain)
+
+- First Claude-loop round (claude.ai, Sonnet 5.5 Effort High): rotate the dummy pending slot over 8 slots in the scan loop to break the store-forwarding chain (3-line diff). Byte-exact (3 official shas EXACT, 70/70 suites). Bench: 25 interleaved runs, v92 min 0.459 s vs v96 min 0.462 s - ~0%, noise. Scan loop is throughput-bound, not latency-bound on that chain.
+- Held, not live: staged on speed-demon-held (track-b/held/v96_main.rs). Claude stall 1 of 3.
+
+## Step 63: v97 - Claude round 2, nibble-LUT bit_sums (ONE variable, LIVE)
+
+- bit_sums rewritten: per-byte popcount and set-bit position sums from two pshufb nibble lookups instead of 7 masked popcounts per vector (~20 ops vs ~63). Same (count, sum) return, drop-in. One function, one variable.
+- Gated byte-exact: official tiny/sample/full sha256 EXACT, 70/70 suites.
+- Bench: 50 interleaved full-dataset native-flag runs (rig under external load, absolute times inflated ~2x; interleaving keeps the comparison fair). v92 min 0.827-0.831 s vs v97 min 0.794-0.799 s on the calm batches (-3.5 to -4.5%); v97 won 19 of the last 20 pairs. Over the 3% bar -> LIVE, this push.
+- v92's first board reading (run-32e0c25064e2, commit be1cde23): T 0.163987 (beats v90's 0.165231, revert rule NOT triggered), M 46,018,560 B, S 606, pts 74.021657 - below v90's banked 74.14792 on the M/S lottery, so the banked best stands (sticky per track).
+- Revert rule: if board T regresses >3% vs the v90 band (0.165647/0.166093) on two runs, restore the step-56 (v90) file; if it regresses vs v92's local profile only, restore step-58 (v92) file.
