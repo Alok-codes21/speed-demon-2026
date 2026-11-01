@@ -243,7 +243,34 @@ impl Filed {
 
 /// The weight of edge e stored as all ones: its entry in the sorted list.
 fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
-    heavy[h    // 1. Parse once, filing each edge under its tail's part.
+    heavy[heavy.partition_point(|h| h.0 < e)].1
+}
+
+fn main() {
+    // Plain pages (a part-touched array with huge pages would count whole
+    // 2 MB pages), and freed arrays really go back to the kernel.
+    unsafe {
+        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
+        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
+    }
+    let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
+    let qtext = map("/data/queries.txt");
+    let mut queries = Vec::new();
+    let mut i = 0;
+    while i < qtext.len() {
+        let s = number(qtext, &mut i);
+        queries.push((s, number(qtext, &mut i)));
+    }
+    let text = map("/data/graph.txt");
+    let mut i = 0;
+    let n = number(text, &mut i) as usize;
+    number(text, &mut i);
+    let hb = 32 - (n as u32 | 1).leading_zeros(); // bits for a node id
+    let (hmask, big) = ((1u32 << hb) - 1, u32::MAX >> hb);
+    let sh = PART_BITS.min(hb);
+    let parts = (n >> sh) + 1;
+
+    // 1. Parse once, filing each edge under its tail's part.
     let cut = cuts(text, i, nt);
     let filed: Vec<Filed> = on_threads(nt, |t| {
         // A line takes at least 6 bytes, and each part leaves one chunk part full.
@@ -277,33 +304,6 @@ fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
     let mut base = vec![0u32; parts + 1];
     for p in 0..parts {
         base[p + 1] = base[p] + filed.iter().map(|f| f.len[p] as u32).sum::<u32>();
-    }
-
- number(text, &mut i);
-            let v = number(text, &mut i);
-            let mut w = number(text, &mut i);
-            if u == v {
-                continue; // a self-loop never shortens a path
-            }
-            let b = &mut out[(u >> sh) as usize];
-            if w >= big {
-                b.1.push(w);
-                w = big;
-            }
-            b.0.push(((u & ((1 << sh) - 1)) as u64) << 32 | (v | w << hb) as u64);
-        }
-        out
-    });
-    // Part p's edges start where part p - 1's end.
-    let mut base = vec![0u32; parts + 1];
-    for p in 0..parts {
-        base[p + 1] = base[p] + filed.iter().map(|f| f[p].0.len() as u32).sum::<u32>();
-    }
-    let buckets: Vec<Mutex<Bucket>> = (0..parts * nt).map(|_| Mutex::default()).collect();
-    for (t, f) in filed.into_iter().enumerate() {
-        for (p, b) in f.into_iter().enumerate() {
-            *buckets[p * nt + t].lock().unwrap() = b;
-        }
     }
 
     // 2. Build each part's adjacency on its own.
