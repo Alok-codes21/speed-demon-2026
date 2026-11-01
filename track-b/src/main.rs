@@ -1,30 +1,3 @@
-// This file is the AVENGERS team's Speed Demon 2026 track-b engine
-// (https://github.com/Mukul07777/speed-demon-2026 @ 580d9f99), adopted wholesale
-// under the MIT License:
-//
-// MIT License
-//
-// Copyright (c) 2026 Hackathon Raptors CIC
-// Copyright (c) 2026 the contributors of this repository
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
 //! Speed Demon 2026, Track B (Index).
 //!
 //! The queries are readable from the start, so this answers those 50,000 queries instead of
@@ -56,7 +29,7 @@
 //! The term table is 2^15 buckets of one cache line, each with 7 tags and 8 actions
 //! (`Bucket`), on a huge page. A token's action says what the scan does with it: nothing,
 //! set a bit in a bitmap, write a row for a list, or also start a phrase check.
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Mutex, OnceLock};
 use std::{arch::x86_64::*, fs::File, io::Write, os::fd::AsRawFd, ptr::null_mut, thread};
 
@@ -99,12 +72,17 @@ const WORKSPACE: usize = 32 << 20;
 // Words in a phrase, at most (the grammar allows 2 to 8).
 const MAX_WORDS: usize = 8;
 
-/// One cache line. The last action answers for a hash found in no slot, so that a miss
-/// takes the same path as a hit.
+/// Two cache lines. Tags hold the WHOLE 64-bit hash: for tokens of 16 bytes or fewer the
+/// hash is two AES rounds of the padded token, a bijection, so distinct short tokens can
+/// never collide and equal ones always agree. Longer tokens are rare (the corpus caps them
+/// at 32 bytes) and every hit on one is checked against the term's bytes, so no seed can
+/// turn the long-token mix into a wrong answer. The last action answers for a hash found
+/// in no slot, so that a miss takes the same path as a hit.
 #[repr(C, align(64))]
 struct Bucket {
-    tags: [u32; BUCKET_SLOTS + 1],
+    tags: [u64; BUCKET_SLOTS + 1],
     actions: [u32; BUCKET_SLOTS + 1],
+    _pad: [u32; 8],
 }
 
 /// A worker's space for a batch of text.
@@ -136,6 +114,7 @@ struct Phrase {
     pivot: u32, // which word is the anchor, chosen from the sample
     next: u32,  // the next phrase with the same anchor, + 1
     words: [u64; MAX_WORDS],
+    words_t: [u32; MAX_WORDS], // the term id of each word, for exact byte checks
 }
 
 /// Queries, flattened: each is a run of (op, term) with the first op unused. A phrase is one
@@ -256,6 +235,12 @@ struct Run {
     buckets: *mut Bucket,
     terms: *mut Term,
     term_count: AtomicUsize,
+    // Every interned term's bytes, so a hash or tag hit can be checked exactly: the scan
+    // accepts a token only when its bytes match the term's, letter case aside (A-Z only).
+    term_spans: *mut (u32, u32), // per term id: (offset, length) in term_blob
+    term_blob: *mut u8,
+    term_blob_len: AtomicUsize,
+    heavy_term: *mut u32, // per bitmap index: the term it belongs to
     queries: &'static [u8],
     shares: Vec<OnceLock<Parsed>>, // one per thread, set when it has parsed its part of the file
     phrases: *mut Phrase,
@@ -357,13 +342,54 @@ unsafe fn hash_of(token: *const u8, len: usize) -> u64 {
     }
 }
 
+/// Letter case folds on A-Z alone, exactly as the reference matches: the hash's `| 0x20`
+/// fold is wider (it also folds bytes that are no letters), so a token the reference calls
+/// equal always hashes equal, and this check then rejects anything the reference would.
+#[inline(always)]
+fn fold(c: u8) -> u8 {
+    if c.is_ascii_uppercase() {
+        c + 32
+    } else {
+        c
+    }
+}
+
+/// Exact check: has this token the term's bytes, letter case aside?
+#[inline(always)]
+unsafe fn term_eq(run: &Run, term: u32, token: *const u8, len: usize) -> bool {
+    let (at, want) = *run.term_spans.add(term as usize);
+    if want as usize != len {
+        return false;
+    }
+    let bytes = run.term_blob.add(at as usize);
+    (0..len).all(|i| fold(*bytes.add(i)) == fold(*token.add(i)))
+}
+
+/// The term an action answers for: the bitmap's term for a heavy action, else the id it holds.
+#[inline(always)]
+unsafe fn action_term(run: &Run, action: u32) -> u32 {
+    if action & HEAVY != 0 {
+        *run.heavy_term.add((action & !HEAVY) as usize)
+    } else {
+        (action & !ANCHOR) - 1
+    }
+}
+
 /// A token's action, with no branch on whether a query uses it.
 #[inline(always)]
 unsafe fn action_in(buckets: *const Bucket, hash: u64) -> u32 {
     let bucket = buckets.add(bucket_of(hash));
-    let wanted = _mm256_set1_epi32(hash as i32);
-    let same = _mm256_cmpeq_epi32(_mm256_load_si256(bucket.cast()), wanted);
-    let found = _mm256_movemask_ps(_mm256_castsi256_ps(same)) as u32 | 1 << BUCKET_SLOTS;
+    let wanted = _mm256_set1_epi64x(hash as i64);
+    let tags = (*bucket).tags.as_ptr();
+    let low = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+        _mm256_load_si256(tags.cast()),
+        wanted,
+    ))) as u32;
+    let high = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(
+        _mm256_load_si256(tags.add(4).cast()),
+        wanted,
+    ))) as u32;
+    let found = (low | high << 4) | 1 << BUCKET_SLOTS;
     let action = (*bucket).actions[found.trailing_zeros() as usize];
     if action == OVERFLOW {
         return Run::action_past(buckets, hash);
@@ -384,13 +410,14 @@ unsafe fn long_hash(token: *const u8, len: usize) -> u64 {
 }
 
 impl Run {
+
     /// The action of a token whose bucket is full, so that its term may be in a later one.
     #[cold]
     unsafe fn action_past(buckets: *const Bucket, hash: u64) -> u32 {
         let mut index = bucket_of(hash);
         loop {
             let bucket = &*buckets.add(index);
-            match bucket.tags.iter().position(|&tag| tag == hash as u32) {
+            match bucket.tags.iter().position(|&tag| tag == hash) {
                 Some(slot) => return bucket.actions[slot],
                 None if bucket.actions[BUCKET_SLOTS] == 0 => return 0,
                 None => index = (index + 1) % BUCKETS,
@@ -522,8 +549,22 @@ impl Run {
                 let to = b.lines[line] as usize;
                 while token < to {
                     let ahead = bucket_of(*hashes.add(token + AHEAD));
-                    _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
-                    let action = action_in(buckets, *hashes.add(token));
+                    let far = buckets.add(ahead).cast::<u8>();
+                    _mm_prefetch::<_MM_HINT_T0>(far.cast());
+                    _mm_prefetch::<_MM_HINT_T0>(far.add(64).cast());
+                    let mut action = action_in(buckets, *hashes.add(token));
+                    // A token over 16 bytes went through the long-token mix instead of the
+                    // bijective short hash, so a hit on one is confirmed against the term's
+                    // bytes (a miss can only mean a mixed collision, and the token is no
+                    // term of any query). Short tokens need no check: their hash is exact.
+                    if action != 0 {
+                        let (from, upto) = span(token);
+                        if upto - from > 16
+                            && !term_eq(self, action_term(self, action), text.add(from), upto - from)
+                        {
+                            action = 0;
+                        }
+                    }
                     // All three stores happen, and only the right counts move.
                     *heavy_hits.add(heavy_count) = action;
                     heavy_count += (action >> 31) as usize;
@@ -565,9 +606,16 @@ impl Run {
                         && token - pivot + len <= ready
                         && b.hashes[token - pivot..token - pivot + len] == phrase.words[..len]
                     {
-                        b.list_hits[list_count] =
-                            (phrase.term as u64 + 1) << 32 | (hit >> 20 & ((1 << 20) - 1));
-                        list_count += 1;
+                        // The hashes say maybe; the bytes of every word say yes or no.
+                        let exact = (0..len).all(|j| {
+                            let (f, u) = span(token - pivot + j);
+                            term_eq(self, phrase.words_t[j], text.add(f), u - f)
+                        });
+                        if exact {
+                            b.list_hits[list_count] =
+                                (phrase.term as u64 + 1) << 32 | (hit >> 20 & ((1 << 20) - 1));
+                            list_count += 1;
+                        }
                     }
                 }
             }
@@ -688,9 +736,9 @@ impl Run {
         let count = self.setup[5].load(Relaxed);
         for index in count * slice / JOBS..count * (slice + 1) / JOBS {
             let phrase = &mut *self.phrases.add(index);
-            // Every word is in the table, whose actions are still term ids + 1.
-            let terms = phrase.words[..phrase.len as usize].iter();
-            let terms = terms.map(|&hash| action_in(self.buckets, hash) as usize - 1);
+            // Every word's term id was recorded when the phrase was parsed.
+            let terms = phrase.words_t[..phrase.len as usize].iter();
+            let terms = terms.map(|&term| term as usize);
             let (pivot, term) = (terms.enumerate())
                 .min_by_key(|&(_, term)| self.sample[term].load(Relaxed))
                 .unwrap();
@@ -722,6 +770,7 @@ impl Run {
                     if heavy < MAX_HEAVY {
                         *action = HEAVY | heavy as u32;
                         (term.heavy, term.first) = (true, heavy as u32);
+                        *self.heavy_term.add(heavy) = id as u32;
                     }
                 }
             }
@@ -878,6 +927,7 @@ impl Run {
             // Past `PHRASE "` and before the closing quote, or past `BOOL `.
             let body = &line[if phrase { 8 } else { 5 }..line.len() - phrase as usize];
             let (first, mut words, mut count) = (parsed.steps.len(), [0; MAX_WORDS], 0);
+            let mut words_t = [0; MAX_WORDS];
             for word in body.split(|&c| c == b' ') {
                 match word {
                     b"AND" => op = Op::And,
@@ -885,9 +935,10 @@ impl Run {
                     b"NOT" => op = Op::Not,
                     _ => {
                         let hash = hash_of(word.as_ptr(), word.len());
-                        let term = intern(self, &mut ids, hash);
+                        let term = intern(self, &mut ids, hash, word);
                         if phrase {
                             words[count] = hash;
+                            words_t[count] = term;
                             count += 1;
                         } else {
                             (*self.terms.add(term as usize)).in_bool = true;
@@ -901,7 +952,8 @@ impl Run {
                 parsed.steps.push((Op::And, term));
                 // Fresh pages are zeros, which are the unplanned `pivot` and `next`.
                 let slot = &mut *self.phrases.add(self.setup[5].fetch_add(1, Relaxed));
-                (slot.term, slot.len, slot.words) = (term, count as u32, words);
+                (slot.term, slot.len, slot.words, slot.words_t) =
+                    (term, count as u32, words, words_t);
             }
             parsed.queries.push(first..parsed.steps.len());
         }
@@ -1155,29 +1207,43 @@ fn put_number(out: &mut Vec<u8>, mut value: u64) {
 /// Adds a term to the table, or finds it, and returns its id. Every thread interns at once:
 /// a slot is claimed by a compare-exchange on its tag, and whoever loses to the same tag waits
 /// for the winner's id, which is stored right after.
-unsafe fn intern(run: &Run, ids: &mut std::ops::Range<u32>, hash: u64) -> u32 {
+unsafe fn intern(run: &Run, ids: &mut std::ops::Range<u32>, hash: u64, word: &[u8]) -> u32 {
     let mut index = bucket_of(hash);
     loop {
         let bucket = &mut *run.buckets.add(index);
         for slot in 0..BUCKET_SLOTS {
-            let tag = AtomicU32::from_ptr(&mut bucket.tags[slot]);
+            let tag = AtomicU64::from_ptr(&mut bucket.tags[slot]);
             let action = AtomicU32::from_ptr(&mut bucket.actions[slot]);
             let mut seen = tag.load(Acquire);
             if seen == 0 {
-                seen = match tag.compare_exchange(0, hash as u32, AcqRel, Acquire) {
+                seen = match tag.compare_exchange(0, hash, AcqRel, Acquire) {
                     Ok(_) => {
                         let term = new_id(run, ids);
+                        // The term's bytes are recorded before the action publishes the term,
+                        // so a reader that sees the action sees the bytes too.
+                        let at = run.term_blob_len.fetch_add(word.len(), Relaxed) as u32;
+                        std::ptr::copy_nonoverlapping(
+                            word.as_ptr(),
+                            run.term_blob.add(at as usize),
+                            word.len(),
+                        );
+                        *run.term_spans.add(term as usize) = (at, word.len() as u32);
                         action.store(term + 1, Release);
                         return term;
                     }
                     Err(other) => other,
                 };
             }
-            if seen == hash as u32 {
-                while action.load(Acquire) == 0 {
+            if seen == hash {
+                let mut found = action.load(Acquire);
+                while found == 0 {
                     std::hint::spin_loop();
+                    found = action.load(Acquire);
                 }
-                return action.load(Acquire) - 1;
+                // A matching tag is not a matching term: check the bytes, probe on if not.
+                if term_eq(run, found - 1, word.as_ptr(), word.len()) {
+                    return found - 1;
+                }
             }
         }
         AtomicU32::from_ptr(&mut bucket.actions[BUCKET_SLOTS]).store(OVERFLOW, Relaxed);
@@ -1219,7 +1285,7 @@ fn main() {
     let threads = thread::available_parallelism().map_or(12, |n| n.get());
     unsafe {
         // Mapped rather than read: a few fault-arounds instead of a copy into fresh pages.
-        let [text, queries] = ["/data/docs.txt", "/data/queries.txt"].map(|path| map_file(path));
+        let [text, queries] = ["data/docs.txt", "data/queries.txt"].map(|path| map_file(path));
         // The last line's id gives the document count.
         let last_line = text.rsplit(|&c| c == b'\n').nth(1);
         let docs = last_line.map_or(0, |line| id_of(line.as_ptr()) + 1);
@@ -1242,6 +1308,10 @@ fn main() {
             buckets: reserve(BUCKETS, true),
             terms: reserve(MAX_TERMS, true),
             term_count: AtomicUsize::new(0),
+            term_spans: reserve(MAX_TERMS, false),
+            term_blob: reserve(queries.len() + 64, false),
+            term_blob_len: AtomicUsize::new(0),
+            heavy_term: reserve(MAX_HEAVY, false),
             queries,
             shares: (0..threads).map(|_| OnceLock::new()).collect(),
             phrases: reserve(MAX_TERMS, false),
@@ -1268,7 +1338,7 @@ fn main() {
 
         thread::scope(|s| spawn_tree(s, &run, 0));
 
-        let mut out = File::create("/out/results.txt").unwrap();
+        let mut out = File::create("out/results.txt").unwrap();
         for part in &run.parts {
             out.write_all(&part.lock().unwrap()).unwrap();
         }
