@@ -453,7 +453,7 @@ fn main() {
                 if a.0 + b.0 >= best {
                     break;
                 }
-                let k = (queue[1].0.len() < queue[0].0.len()) as usize;
+                let k = (queue[1].0[0].0 < queue[0].0[0].0) as usize;
                 let (go, ga, gh) = sides[k];
                 let (a, b) = dist.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
