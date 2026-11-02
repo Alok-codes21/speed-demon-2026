@@ -6,7 +6,7 @@ The task, the input files and the exact output format are in the [spec](https://
 
 Rust, standard library only. The design comes from measuring the data first. `PERF.md` has every step, including the failures.
 
-**Threads.** `main` maps both files and starts one worker per CPU as a tree. Each worker zeroes one huge page of the shared tables. The workers then parse `regions.csv` together into a table from region id to country group, wait at a single barrier, and parse `records.csv` in 1 MiB claims. Each worker keeps its own statistics per group, and these are merged at the end. Claims are released with `MADV_DONTNEED` as they finish, so the kernel does not tear down the whole mapping on one thread at exit.
+**Threads.** `main` maps both files and starts one worker per CPU as a tree. The workers share zeroing the two huge pages that hold the shared tables. The workers then parse `regions.csv` together into a table from region id to country group, wait at a single barrier, and parse `records.csv` in 1 MiB claims. Each worker keeps its own statistics per group, and these are merged at the end. Claims are released with `MADV_DONTNEED` as they finish, so the kernel does not tear down the whole mapping on one thread at exit.
 
 **Parallel start.** The file can be split anywhere without reading from its start. The spec guarantees that inside a note an LF is followed only by a lowercase word or a quote. An LF followed by a digit or a BOM therefore always begins a record.
 
@@ -24,11 +24,11 @@ Rust, standard library only. The design comes from measuring the data first. `PE
 2. Read both, update the statistics, and number the name. Then prefetch the bit-matrix line for write.
 3. Set the bit with `fetch_or`.
 
-A name is a 64-bit AES hash. Its top 15 bits select a 64-byte bucket of eight u64 slots. Each slot holds a 47-bit tag above the name's dense 17-bit number, so a single compare-and-swap claims a slot together with its number, and no lock is needed. Workers reserve numbers in blocks of 32, so a first appearance does not touch a shared counter.
+A name is a 64-bit AES hash. Its top 14 bits select a 64-byte bucket of eight u64 slots. Each slot holds a 47-bit tag above the name's dense 17-bit number, so a single compare-and-swap claims a slot together with its number, and no lock is needed. Workers reserve numbers in blocks of 32, so a first appearance does not touch a shared counter.
 
-Comparing hashes instead of names is a deliberate shortcut. Two of the 100,000 names would have to match on all 62 bits, at odds of about 1 in a billion, and the shortcut saves a memory access per record.
+Comparing hashes instead of names is a deliberate shortcut. Two of the 100,000 names would have to match on all 61 bits, at odds of about 1 in 500 million, and the shortcut saves a memory access per record.
 
-**Distinct names.** One shared bit matrix has a row per country group, indexed by the name's number. It is 256 × 2^17 bits, or 4 MiB, on huge pages. Popcounts of the rows give the distinct-name counts.
+**Distinct names.** One shared bit matrix has a row per country group, indexed by the name's number. It has 241 rows of 104,320 bits, or 3 MiB, on huge pages. Popcounts of the rows give the distinct-name counts.
 
 ## Tried and reverted
 
