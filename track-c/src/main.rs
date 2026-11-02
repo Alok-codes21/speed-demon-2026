@@ -87,10 +87,9 @@ unsafe fn equal_mask(chunk: __m256i, byte: u8) -> u64 {
 }
 
 /// The `len` digit bytes before `end`, for lengths 1 to 8, as `decode_digits` wants them.
-/// Shifting them to the top makes the bytes below read as leading zeros.
+/// Shifting them to the top makes the bytes below read as leading zeros. The digits stay ASCII;
 unsafe fn digits_before(end: *const u8, len: usize) -> u64 {
-    (read_unaligned(end.sub(8).cast::<u64>()) ^ 0x3030_3030_3030_3030) >> (64 - 8 * len)
-        << (64 - 8 * len)
+    read_unaligned(end.sub(8).cast::<u64>()) >> (64 - 8 * len) << (64 - 8 * len)
 }
 
 /// Turns the first `count` words of eight digit bytes each into numbers, four at a time, like
