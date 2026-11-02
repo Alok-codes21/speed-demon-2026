@@ -4,18 +4,44 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-A high-performance C++20 engine built for maximum throughput, low memory footprint, and zero external dependencies:
+Rust, standard library only. The design comes from measuring the data first. `PERF.md` has every step, including the failures.
 
-1. **Zero-copy memory-mapped I/O**: Both `regions.csv` and `records.csv` are mapped with `mmap` and `MADV_SEQUENTIAL`.
-2. **Parallel Table Pre-Warming**: `MADV_POPULATE_WRITE` is dispatched across 12 worker threads up front to fault in anonymous lookup tables concurrently, eliminating kernel page-table lock contention.
-3. **Exact CRLF chunk partitioning**: 8 pieces per thread are claimed dynamically through atomic work sharing, avoiding tail imbalance.
-4. **SWAR 8-digit Integer & Currency Decoders**: IDs, region codes, and currency cents are parsed 8 bytes at a time using bitwise masking and arithmetic folding (`load8` + `fold`), completely bypassing string scanning and floating point operations.
-5. **Lock-Free 4-Lane AVX2 Name Table**: Names intern to small IDs in a 1 MB table where 4 slots per cache line are probed simultaneously with 256-bit SIMD comparison (`_mm256_cmpeq_epi64`).
-6. **In-Scan Distinct Counting**: Country bitsets are updated on the fly using `fetch_or`. A successful bit toggle directly increments the country's distinct counter, completely eliminating any post-scan popcount over bitsets.
-7. **16-Record Lead Prefetch Pipeline**: A sliding ring buffer prefetches region entries, name table slots, and country bitset lines 16 records ahead, completely overlapping memory latency.
-8. **Direct Output Buffer Formatting**: Output strings are generated without allocations and written in a single streaming write.
+**Threads.** `main` maps both files and starts one worker per CPU as a tree. Each worker zeroes one huge page of the shared tables. The workers then parse `regions.csv` together into a table from region id to country group, wait at a single barrier, and parse `records.csv` in 1 MiB claims. Each worker keeps its own statistics per group, and these are merged at the end. Claims are released with `MADV_DONTNEED` as they finish, so the kernel does not tear down the whole mapping on one thread at exit.
+
+**Parallel start.** The file can be split anywhere without reading from its start. The spec guarantees that inside a note an LF is followed only by a lowercase word or a quote. An LF followed by a digit or a BOM therefore always begins a record.
+
+**Structure.** For each 64 bytes, AVX2 finds quotes, commas and LFs. A carry-less multiply turns the quote bits into an inside-quotes mask. A `""` toggles twice, so escapes need no special case. Every record then has exactly five structural bytes, whose positions are stored with unconditional writes.
+
+**Fields.** About 23% of records hold an escape and field lengths vary, so any branch on either would mispredict constantly. The program has none:
+
+- The digits of the id, region and amount are shifted into eight-byte words, so the bytes below the digits read as leading zeros. `decode_digits` converts them four records at a time with `vpmaddubsw`, `vpmaddwd` and a pack.
+- The BOM, the CR and the sign are handled by arithmetic.
+- A field with raw length L and q quote bytes has a value of L - q/2 - 1 bytes, or L when q is 0. A name's quote count comes from the 32 bytes its hash has already loaded, so only the note needs a rank query on the saved quote masks.
+
+**Names.** Names are drawn uniformly from 100,000 values, so every lookup misses the cache. A batch therefore runs in passes:
+
+1. Read the fields, then prefetch the record's region entry and name bucket.
+2. Read both, update the statistics, and number the name. Then prefetch the bit-matrix line for write.
+3. Set the bit with `fetch_or`.
+
+A name is a 64-bit AES hash. Its top 15 bits select a 64-byte bucket of eight u64 slots. Each slot holds a 47-bit tag above the name's dense 17-bit number, so a single compare-and-swap claims a slot together with its number, and no lock is needed. Workers reserve numbers in blocks of 32, so a first appearance does not touch a shared counter.
+
+Comparing hashes instead of names is a deliberate shortcut. Two of the 100,000 names would have to match on all 62 bits, at odds of about 1 in a billion, and the shortcut saves a memory access per record.
+
+**Distinct names.** One shared bit matrix has a row per country group, indexed by the name's number. It is 256 × 2^17 bits, or 4 MiB, on huge pages. Popcounts of the rows give the distinct-name counts.
+
+## Tried and reverted
+
+Each is in `PERF.md` with its numbers; none is in `src`. Laptop gains of 5 to 14% did not reach the box.
+
+- Buckets of eight 32-bit tags (`run-3cb96f167de2`, `run-76252468fe28`): 82.10 and 81.72 against 82.40.
+- A read-ahead prefetch of the input, and an inlined hash with unrolled position extraction (`run-d4401d6162d7`, 25.07 ms, 80.67).
+- An owner-computes bit matrix, a name-indexed bit matrix (3 times slower), lazy huge-page zeroing, dot-anchored record finding, deferred bit updates: ties or losses.
 
 ## Dependencies
 
-None. Standard C++20, POSIX threads and glibc only (`dependency_count = 0`).
-Built offline with pinned GCC 16 and Debian 13 runtime.
+None.
+
+## With another 24 hours
+
+Interning a name is the largest remaining step, because the shared name table misses the cache on every record. An unlocked probe, which gives wrong answers, showed a ceiling of only about 2 ms for removing the lock on the bit matrix. A real gain needs a layout that stops threads sharing these tables without 12 private 4 MiB copies.
