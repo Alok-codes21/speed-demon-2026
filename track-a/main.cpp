@@ -189,8 +189,8 @@ struct Parser {
       if (len <= 8) [[likely]] {
         u64 digits;
         memcpy(&digits, e - 8, 8);
-        digits =
-            digits >> (64 - 8 * len) << (64 - 8 * len) & 0x0F0F0F0F0F0F0F0F;
+        static constexpr unsigned char keep[16] = {0,0,0,0,0,0,0,0,15,15,15,15,15,15,15,15};
+        u64 mask; memcpy(&mask, keep + len, 8); digits &= mask;
         __m128i d = _mm_cvtsi64_si128(digits);
         __m128i pairs = _mm_maddubs_epi16(d, _mm_set1_epi16(0x010A));
         __m128i quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x00010064));
