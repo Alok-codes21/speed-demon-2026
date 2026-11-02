@@ -30,6 +30,15 @@ High-performance query-driven index in Rust, zero external dependencies ($D = 1$
 6. **Memory Optimizations**:
    Disables Transparent Huge Pages (`PR_SET_THP_DISABLE`) to avoid 2MB page allocation rounding on Hetzner.
 
+7. **Seed-Proof Exactness**:
+   Short-token hashes are bijective AES pairs and every accepted token is confirmed against the
+   term's bytes (letter case aside), so no corpus seed can turn a hash collision into a wrong answer.
+
+8. **SIMD Left-Pack Scan**:
+   The scan stores one action per token, then packs heavy and list hits eight tokens at a time
+   (`_mm256_permutevar8x32` with a 256-entry table), over 1 MiB scan claims.
+
 ## Dependencies
 
 None ($D = 1$). Standard Rust 2021 toolchain only.
+
