@@ -332,10 +332,6 @@ struct Job {
   Job(const char *b, size_t n, uint32_t l, int f, uint32_t t)
       : base(b), size(n), lag(l), nblocks((n + kBlock - 1) / kBlock),
         threads(t), fd(f), top(nblocks, -1) {}
-  ~Job() {
-    for (Rec *r : runbufs)
-      std::free(r);
-  }
 
   template <class T> T take(std::vector<T> &pool) {
     std::lock_guard<std::mutex> lock(mu);
