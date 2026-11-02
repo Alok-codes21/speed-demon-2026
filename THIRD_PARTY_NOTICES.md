@@ -11,6 +11,8 @@ Software").
 - Source: https://github.com/Mukul07777/speed-demon-2026
 - Track B: engine adopted at commit 580d9f99, since reworked for exactness and
   speed (see track-b/PERF.md).
+- Track C: engine ported from track-c at commit a8a3d87, since tuned
+  (see track-c/PERF.md).
 - Copyright (c) 2026 Hackathon Raptors CIC
 - Copyright (c) 2026 the contributors of that repository
 
