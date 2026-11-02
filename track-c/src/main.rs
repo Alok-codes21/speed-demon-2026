@@ -52,7 +52,7 @@ const MAX_RECORDS: usize = 32 * 64 / 11 + 5;
 // The three numbers of a record that wait for `decode_digits` are kept in a batch's arrays 0 to 2:
 // id, amount and region.
 // Quote masks kept for the rank query, more than one batch.
-const QUOTE_WORDS: usize = 1 << 10;
+const QUOTE_WORDS: usize = 1 << 6;
 const BUCKETS: usize = 1 << 15;
 // A name's dense number has 17 bits; the generator draws from 100,000 names.
 const NUMBER_BITS: i32 = 17;
@@ -437,4 +437,4 @@ fn main() {
         }
     }
     std::fs::write("/out/aggregates.txt", out).unwrap();
-}
+                                                     }
