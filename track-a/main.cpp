@@ -33,7 +33,7 @@ SOFTWARE.
 // https://github.com/manusingh090/speed-demon-2026-entry
 // commit 7027ab49162605eea30311a351ebeeef3647efdc, track-a/main.cpp.
 // Copyright (c) 2026 Hackathon Raptors CIC and repository contributors.
-// Local changes (team Cosmic): tunable constants only; logic unchanged.
+// Local changes (team Cosmic): tunable constants and exact SSE decimal packing.
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -59,9 +59,9 @@ using u64 = uint64_t;
 constexpr int HOURS = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 
 // ---- Tunables to sweep (everything else is unchanged) ----------------------
-constexpr int MAX_THREADS = 12;       // try 4, 6, 8, 12, 16
-constexpr int PIECES_PER_THREAD = 8;  // try 2, 4, 8, 16
-constexpr int PREFETCH_AHEAD = 1024;  // try 512, 1024, 2048
+constexpr int MAX_THREADS = 12;      // try 4, 6, 8, 12, 16
+constexpr int PIECES_PER_THREAD = 8; // try 2, 4, 8, 16
+constexpr int PREFETCH_AHEAD = 1024; // try 512, 1024, 2048
 // -----------------------------------------------------------------------------
 
 constexpr u32 KEY_BITS = 12, ERR = 1u << 11, ID_MASK = ERR - 1,
@@ -221,9 +221,11 @@ struct Parser {
         memcpy(&digits, e - 8, 8);
         digits =
             digits >> (64 - 8 * len) << (64 - 8 * len) & 0x0F0F0F0F0F0F0F0F;
-        digits = (digits * 2561) >> 8 & 0x00FF00FF00FF00FF;
-        digits = (digits * 6553601) >> 16 & 0x0000FFFF0000FFFF;
-        lat = (digits * 42949672960001) >> 32;
+        __m128i d = _mm_cvtsi64_si128(digits);
+        __m128i pairs = _mm_maddubs_epi16(d, _mm_set1_epi16(0x010A));
+        __m128i quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x00010064));
+        lat = u32(_mm_cvtsi128_si32(quads)) * 10000 +
+              u32(_mm_extract_epi32(quads, 1));
       } else
         for (const char *d = e - len; d < e; ++d)
           lat = lat * 10 + *d - '0';
