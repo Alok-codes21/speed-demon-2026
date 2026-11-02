@@ -62,3 +62,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Update (2 Nov 2026, ~8:20 AM IST): PR #24 race fix - NOW THE LIVE SOURCE
+
+HighVelocity commit 4e018992215560b90dcfd6d0c057b867836ef20c ("Fix Track
+D lost concurrent claims") disclosed a real race in the PR #23 source we
+first staged: claim() did a relaxed load followed by an ordinary atomic
+store, so two threads could both claim the same vertex; the duplicate
+appends could overrun construction buffers (their forced-stale-read and
+simultaneous-high-degree repros SIGSEGV on the old source; fixed source
+passes, plus their sanitizer and 300+ fixture suite). A crash or corrupt
+build on the hidden-holdout re-score would zero the track, so the fix is
+mandatory even though every gated board run of the unsafe source passed.
+
+The fix replaces load+store with a relaxed atomic fetch_or and appends
+only when the prior word lacked the bit - claims become globally unique.
+Verified by us before taking it:
+
+- The fetched source matches their published safe-source sha256
+  (d084d2b3574341...) exactly.
+- Byte-exact output on all three local datasets (full sha a23dbdf0a3...,
+  tiny, sample), identical to the unsafe version's output.
+- 12 interleaved local runs vs the unsafe build: median 0.3085 s vs
+  0.3073 s - the fix is free within noise.
+- Diff review: the only behavioral change is claim uniqueness; the
+  comment updates match the code.
+
+Their first safe-source board run: 75.296175 (T=0.092453 s, M=59.8 MB,
+S=647, run-646f14ac127b) vs their unsafe-source runs K=31.54-32.87
+(points 74.0-75.84) - the difference is inside their own run-to-run
+noise on unchanged code.
+
+d_traverse.cpp here is the PR #24 fixed source plus the attribution
+header; everything else unchanged from the PR #23 staging.

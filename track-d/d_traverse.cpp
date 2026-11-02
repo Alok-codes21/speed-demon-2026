@@ -1,8 +1,10 @@
 // Adapted from the MIT-licensed Track D implementation in
-// insightlabs38-pixel/sd-sm (team HighVelocity), their PR #23 champion
-// (scored commit a5b6172a946ed30ffc912ea7e2c09474851e6768, source blob
-// e11b09e30d2ac0fdfada01317b5dce3deae5f6dd; content identical at restore
-// commit 8fc0d908aeadb934648e44e70f1e0dcd1b35173f).
+// insightlabs38-pixel/sd-sm (team HighVelocity), their PR #24 race fix:
+// commit 4e018992215560b90dcfd6d0c057b867836ef20c "Fix Track D lost
+// concurrent claims" (source sha256 d084d2b3574341...). PR #23 champion
+// plus an atomic fetch_or claim fix for a concurrent-claim race that could
+// overflow construction buffers (SIGSEGV in their forced-stale-read and
+// high-degree repros on the unsafe source).
 // Copyright (c) 2026 Hackathon Raptors CIC and the contributors of that
 // repository. Source: https://github.com/insightlabs38-pixel/sd-sm
 // Verbatim apart from this attribution header; MIT license terms apply.
@@ -328,15 +330,15 @@ struct Grower {
   Region &reg;
   std::vector<Walk> walks;
 
-  // Claims race without locked instructions: a vertex claimed twice leaves a
-  // copy that no edge reaches, as every head resolves through one map entry.
+  // The relaxed OR linearizes a claim. The initial load avoids locked
+  // operations for vertices that are already claimed.
   void claim(u32 z) {
     u64 bit = u64(1) << (z & 63), *word = &claimed[z >> 6];
     u64 seen = __atomic_load_n(word, __ATOMIC_RELAXED);
     if (seen & bit)
       return;
-    __atomic_store_n(word, seen | bit, __ATOMIC_RELAXED);
-    reg.order[reg.len++] = z;
+    if (!(__atomic_fetch_or(word, bit, __ATOMIC_RELAXED) & bit))
+      reg.order[reg.len++] = z;
   }
   void put(u32 pos, u32 z, u64 w) {
     if (w >= raw.mask)
@@ -555,8 +557,8 @@ struct Queue {
     u32 *data = nullptr, size = 0, cap = 0;
   } bucket[B];
   u64 occupied[B / 64] = {}, cur = 0, near = 0;
-  // Vertex ids stay far below 2^25 (a vertex is claimed twice only when
-  // a racing store loses its bit), leaving seven bits for the key remainder.
+  // Claims are globally unique, so legal vertex ids fit in 25 bits,
+  // leaving seven bits for the key remainder.
   static constexpr u32 shift = 7, node_bits = 25;
   using Far = std::pair<u64, u32>;
   std::priority_queue<Far, std::vector<Far>, std::greater<Far>> far;
