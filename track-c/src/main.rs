@@ -33,13 +33,8 @@
 use std::sync::{atomic::Ordering::*, atomic::*, Barrier, Mutex, OnceLock};
 use std::{arch::x86_64::*, fs::File, ops::Range, os::fd::AsRawFd, ptr::*, slice, thread};
 
-extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
-    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-    fn prctl(option: i32, ...) -> i32;
-}
+extern "C" { fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8; fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32; fn prctl(option: i32, ...) -> i32; }
 // MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
-const MAP_ANON: i32 = 0x4022;
 
 const HUGE_PAGE: usize = 1 << 21;
 // Structural bytes per record: four commas and an LF.
@@ -53,7 +48,6 @@ const MAX_RECORDS: usize = 32 * 64 / 11 + 5;
 // id, amount and region.
 // Quote masks kept for the rank query, more than one batch.
 const QUOTE_WORDS: usize = 1 << 6;
-const BUCKETS: usize = 1 << 15;
 // A name's dense number has 17 bits; the generator draws from 100,000 names.
 const NUMBER_BITS: i32 = 17;
 const NAME_MASK: u64 = (1 << NUMBER_BITS) - 1;
@@ -87,7 +81,7 @@ static COUNTRIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Numbers keep the bit matrix small.
 /// 1: the name bit matrix, `SEEN_WORDS` words per group.
 #[repr(C)]
-struct Tables([[AtomicU64; 8]; BUCKETS], [AtomicU64; GROUPS * SEEN_WORDS]);
+struct Tables([[AtomicU64; 8]; 1 << 15], [AtomicU64; GROUPS * SEEN_WORDS]);
 
 /// What the workers share: 0 the records file, 1 the regions file, 2 the tables, 3 the barrier
 /// after the regions are loaded.
@@ -391,8 +385,7 @@ impl Run {
 unsafe fn map(name: &str) -> &'static [u8] {
     let file = File::open(format!("/data/{name}.csv")).unwrap();
     let (fd, len) = (file.as_raw_fd(), file.metadata().unwrap().len() as usize);
-    let size = len.next_multiple_of(4096) + 4096;
-    let base = mmap(null_mut(), size, 1, MAP_ANON, -1, 0); // PROT_READ
+    let base = mmap(null_mut(), len.next_multiple_of(4096) + 4096, 1, 0x4022, -1, 0); // PROT_READ
     mmap(base, len, 1, 0x12, fd, 0); // PROT_READ, MAP_PRIVATE | MAP_FIXED
     slice::from_raw_parts(base, len)
 }
@@ -401,7 +394,7 @@ unsafe fn map(name: &str) -> &'static [u8] {
 /// pages are touched later by the workers, because huge pages are disabled for everything else
 /// before the records start.
 unsafe fn zeroed<T>() -> &'static T {
-    let region = mmap(null_mut(), size_of::<T>() + HUGE_PAGE, 3, MAP_ANON, -1, 0); // read, write
+    let region = mmap(null_mut(), size_of::<T>() + HUGE_PAGE, 3, 0x4022, -1, 0); // read, write
     let aligned = region.add(region.align_offset(HUGE_PAGE));
     madvise(aligned, size_of::<T>(), 14); // MADV_HUGEPAGE
     &*aligned.cast()
@@ -420,15 +413,11 @@ fn main() {
     let mut out = String::new();
     for (key, group) in keys {
         let [count, id_sum, amount, lengths, hi, lo, ..] = totals[group];
-        let row = &run.2 .1[group * SEEN_WORDS..][..SEEN_WORDS];
-        let distinct: u32 = row.iter().map(|w| w.load(Relaxed).count_ones()).sum();
+        let distinct: u32 = run.2 .1[group * SEEN_WORDS..][..SEEN_WORDS].iter().map(|w| w.load(Relaxed).count_ones()).sum();
         // Cents as text. A double holds any total of cents to well within half a cent.
-        let [sum, min, max] =
-            [amount, BIAS - lo, hi - BIAS].map(|c| format!("{:.2}", c as f64 / 100.0));
+        let [sum, min, max] = [amount, BIAS - lo, hi - BIAS].map(|c| format!("{:.2}", c as f64 / 100.0));
         let [name, note] = [lengths & 0xFFFF_FFFF, lengths >> 32];
-        if count > 0 {
-            out += &format!("{key} {count} {id_sum} {sum} {min} {max} {distinct} {name} {note}\n");
-        }
+        if count > 0 { out += &format!("{key} {count} {id_sum} {sum} {min} {max} {distinct} {name} {note}\n"); }
     }
     std::fs::write("/out/aggregates.txt", out).unwrap();
 }
