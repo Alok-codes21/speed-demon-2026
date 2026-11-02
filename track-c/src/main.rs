@@ -266,8 +266,12 @@ impl Run {
                     // Unconditional stores, so that a varying count needs no loop exit to
                     // predict. Eight cover almost every step.
                     let found = bits.count_ones() as usize;
-                    let mut extra = 0;
-                    while extra < 8 || bits != 0 {
+                    for extra in 0..8 {
+                        *pos.get_unchecked_mut(filled + extra) = at as u32 + bits.trailing_zeros();
+                        bits &= bits.wrapping_sub(1);
+                    }
+                    let mut extra = 8;
+                    while bits != 0 {
                         *pos.get_unchecked_mut(filled + extra) = at as u32 + bits.trailing_zeros();
                         bits &= bits.wrapping_sub(1);
                         extra += 1;
@@ -415,4 +419,4 @@ fn main() {
         }
     }
     std::fs::write("/out/aggregates.txt", out).unwrap();
-}
+    }
