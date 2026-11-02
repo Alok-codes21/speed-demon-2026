@@ -117,3 +117,6 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 
 
 **Not kept (2026-11-02, Cosmic trial 22): static-pie link (`+crt-static`) to skip the dynamic loader.** Board `run-b4b1e6364b5d`: T 22.94 ms, M 11.1 MB, S 294, 81.91 - about a millisecond slower than the dynamic build; the static initializer (plus a bigger image) costs more than `ld.so` did. Reverted to the dynamic raptorlake flags.
+
+
+**Not kept (2026-11-02, Cosmic trial 23): spawn tree splits three ways (`div_ceil(3)`) for a faster worker ramp.** Board `run-cdf23b682e02`: T 22.37 ms, M 11.4 MB, S 294, 82.08 - inside the code's 22.0-22.6 ms band, no measurable gain; the tree ramp was already off the timed path. Reverted to the best-scored code.
