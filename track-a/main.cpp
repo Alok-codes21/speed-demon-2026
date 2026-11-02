@@ -50,7 +50,7 @@ SOFTWARE.
 // https://github.com/manusingh090/speed-demon-2026-entry
 // commit 7027ab49162605eea30311a351ebeeef3647efdc, track-a/main.cpp.
 // Copyright (c) 2026 Hackathon Raptors CIC and repository contributors.
-// Local changes: canonical formatting and attribution only; original step 58 logic.
+// Local changes: two-pass radix, endpoint locality cache, and 1 KB append blocks.
 // The complete Cache Me MIT license is retained at the top of this file.
 #include <algorithm>
 #include <atomic>
@@ -209,7 +209,7 @@ struct Ranking {
 // closed[h] first and then finding active[h] zero, so a thread that enters
 // a closed hour, or an hour closed while a thread was in it, is always seen
 // (by the thread or by the closer) and the pass is redone.
-constexpr u32 BLOCK = 1024;
+constexpr u32 BLOCK = 256;
 static u32 *records;
 static size_t per_hour;
 static std::atomic<u32> filled[HOURS];
@@ -218,6 +218,7 @@ static std::atomic<bool> closed[HOURS], late;
 
 struct Parser {
   u32 *cur[HOURS] = {}, *stop[HOURS] = {};
+  u32 last_id = ~0u;
 
   // Lines arrive in about clock order, so the hour index is worked out only
   // when the line's "MM-DDTHH" bytes differ from the line before's, and the
@@ -281,8 +282,13 @@ struct Parser {
       } else
         for (const char *d = e - len; d < e; ++d)
           lat = lat * 10 + *d - '0';
-      u32 key = (endpoints.find(name, n, load(name), load(name + 32)) + 1) |
-                (ne[1] == '5' ? ERR : 0);
+      u32 id;
+      if (last_id < endpoints.ids && endpoints.length[last_id] == n &&
+          !memcmp(endpoints.text + last_id * Names::STRIDE, name, n))
+        id = last_id;
+      else
+        id = last_id = endpoints.find(name, n, load(name), load(name + 32));
+      u32 key = (id + 1) | (ne[1] == '5' ? ERR : 0);
       p = e + 1;
       if (lat >= PACKED_MAX) [[unlikely]] {
         if (lim - c < 2) // the pair stays in one block
@@ -307,7 +313,7 @@ struct Parser {
 
 int main() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-  const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
+  const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 6);
   int in = open("/data/requests.log", O_RDONLY);
   int out = open("/out/summary.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (in < 0 || out < 0)
@@ -322,11 +328,11 @@ int main() {
   // An hour holds at most two places for every line (one is at least 40
   // bytes), a part block per thread, and after them its sorted keys, one a
   // line; only the pages written are backed.
-  per_hour = (size / 13 / BLOCK + nt + 2) * BLOCK;
+  per_hour = ((size / 13 + (nt + 2) * BLOCK + 1023) / 1024) * 1024;
   records = (u32 *)mmap(nullptr, HOURS * per_hour * 4, 3,
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   // Pieces start at line starts; first[k] is the hour of piece k's first line.
-  const int pieces = 8 * nt;
+  const int pieces = 4 * nt;
   std::vector<size_t> cut(pieces + 1, size);
   std::vector<int> first(pieces + 1, HOURS);
   cut[0] = 0;
@@ -363,9 +369,8 @@ int main() {
     return *rankings.back();
   };
 
-  // Hour h, closed, is sorted by (endpoint rank, latency), the rank above a
-  // 20-bit latency in one 31-bit key, by a radix sort of three passes (10, 10
-  // and 11 bits) between its records and the unused rest of its region. Every
+  // Hour h, closed, is sorted by (endpoint rank, latency) with two stable
+  // radix passes (15 and 16 bits). Every
   // group then comes out sorted at a known place, and its percentiles are
   // read off by index. Latencies too large for 20 bits sort last in their
   // group with the same key; their values are kept, sorted, in a short list.
@@ -375,30 +380,55 @@ int main() {
     const Ranking &rank = ranking();
     const u32 ne = rank.by_rank.size();
     u32 *keys = records + h * per_hour, *sorted = keys + filled[h], total = 0;
-    u32 low[1024] = {}, mid[1024] = {}, top[ID_MASK + 1] = {},
-        errors[ID_MASK + 1] = {};
+    u32 top[ID_MASK + 1] = {}, errors[ID_MASK + 1] = {};
+    alignas(64) u32 hist[1 << 16] = {};
     big.clear();
+
+    // Compact valid records and count endpoint totals. The first radix digit
+    // is the low 15 latency bits.
     for (u32 *r = keys; r < sorted; ++r) {
       u32 x = *r;
-      if (!(x & ID_MASK)) // a place never written, at the end of a block
+      if (!(x & ID_MASK))
         continue;
       if (x >> KEY_BITS == PACKED_MAX) [[unlikely]]
         big.push_back(u64(rank.rank_of[x & ID_MASK]) << 32 | *++r);
-      u32 e = rank.rank_of[x & ID_MASK], key = e << 20 | x >> KEY_BITS;
+      u32 e = rank.rank_of[x & ID_MASK];
+      u32 key = e << 20 | x >> KEY_BITS;
       errors[e] += (x & ERR) != 0;
-      ++low[key & 1023], ++mid[key >> 10 & 1023], ++top[e];
+      ++top[e];
+      ++hist[key & 32767];
       keys[total++] = key;
     }
-    auto pass = [total](const u32 *from, u32 *to, u32 *at, u32 buckets,
-                        int shift, u32 mask) {
-      for (u32 b = 0, sum = 0; b < buckets; ++b)
-        sum += std::exchange(at[b], sum);
-      for (u32 j = 0; j < total; ++j)
-        to[at[from[j] >> shift & mask]++] = from[j];
-    };
-    pass(keys, sorted, low, 1024, 0, 1023);
-    pass(sorted, keys, mid, 1024, 10, 1023);
-    pass(keys, sorted, top, ne, 20, ID_MASK);
+
+    // Stable LSD pass: low 15 bits.
+    for (u32 b = 0, sum = 0; b < 32768; ++b) {
+      u32 n = hist[b];
+      hist[b] = sum;
+      sum += n;
+    }
+    for (u32 j = 0; j < total; ++j) {
+      u32 x = keys[j];
+      sorted[hist[x & 32767]++] = x;
+    }
+
+    // Stable MSD digit pass: remaining 16 bits (endpoint rank + high latency).
+    memset(hist, 0, sizeof(hist));
+    for (u32 j = 0; j < total; ++j)
+      ++hist[sorted[j] >> 15];
+    for (u32 b = 0, sum = 0; b < 65536; ++b) {
+      u32 n = hist[b];
+      hist[b] = sum;
+      sum += n;
+    }
+    for (u32 j = 0; j < total; ++j) {
+      u32 x = sorted[j];
+      keys[hist[x >> 15]++] = x;
+    }
+
+    // Endpoint bucket ends are needed to recover each sorted group.
+    for (u32 e = 0, sum = 0; e < ne; ++e)
+      top[e] = (sum += top[e]);
+
     std::sort(big.begin(), big.end());
     u64 sz = 0;
     for (u32 e = 0, from = 0, b = 0; e < ne; from = top[e++]) {
@@ -411,7 +441,7 @@ int main() {
       u32 v[3], t = 0;
       for (u32 p : {50, 95, 99}) {
         u32 k = (p * n + 99) / 100 - 1;
-        v[t++] = k < n - large ? sorted[from + k] & PACKED_MAX
+        v[t++] = k < n - large ? keys[from + k] & PACKED_MAX
                                : u32(big[b + k - (n - large)]);
       }
       b += large;
