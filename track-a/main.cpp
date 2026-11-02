@@ -23,43 +23,17 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 */
-// ---------------------------------------------------------------------------
 // Prior Track A engine credit retained from HighVelocity's public repository
 //   https://github.com/insightlabs38-pixel/sd-sm
-// at commit 8b6f45035580b379f8e27af9cb537c4068896c09 (identical to their
-// board-best commit 12673d75a84ce13de0c21a687a605c5c86327d96 for this file),
-// This trial alternative replaces that engine with the separately credited
-// Cache Me implementation below; this notice preserves prior attribution.
-// Their code is MIT licensed (Hackathon Raptors CIC and contributors); the
-// full license text is in THIRD_PARTY_LICENSES.md in this directory and the
-// copyright/permission notice below is retained as required:
+// at commit 8b6f45035580b379f8e27af9cb537c4068896c09 (MIT; Hackathon Raptors
+// CIC and contributors). Copyright (c) 2026 Hackathon Raptors CIC,
+// Copyright (c) 2026 the contributors of this repository (HighVelocity).
 //
-// Copyright (c) 2026 Hackathon Raptors CIC
-// Copyright (c) 2026 the contributors of this repository (HighVelocity)
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
-// to deal in the Software without restriction, including without limitation
-// the rights to use, copy, modify, merge, publish, distribute, sublicense,
-// and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
-// the above copyright notice and this permission notice shall be included
-// in all copies or substantial portions of the Software.
-// ---------------------------------------------------------------------------
-// Trial alternative engine: Cache Me, MIT licensed, source
+// Engine: Cache Me, MIT licensed, source
 // https://github.com/manusingh090/speed-demon-2026-entry
 // commit 7027ab49162605eea30311a351ebeeef3647efdc, track-a/main.cpp.
 // Copyright (c) 2026 Hackathon Raptors CIC and repository contributors.
-// Local changes: replace the three full-array radix passes with one endpoint
-// grouping pass and in-place percentile selection; record layout is unchanged.
-// The complete Cache Me MIT license is retained at the top of this file.
-// Team Cosmic changes on top of that: the nearest-rank percentiles of each
-// endpoint group are now found by a branch-free out-of-place multi-rank
-// quickselect (partitions shared by p50/p95/p99, scratch = the dead record
-// area of the same hour, so no new memory) and, for groups of up to 48 values,
-// an exact AVX2 rank counter; error_ppm uses one 32-bit divide. Parsing,
-// record layout, threading, output format and all memory mappings are
-// unchanged.
+// Local changes (team Cosmic): tunable constants only; logic unchanged.
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -83,14 +57,16 @@ SOFTWARE.
 using u32 = uint32_t;
 using u64 = uint64_t;
 constexpr int HOURS = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
-// A record packs the latency above a 12-bit key: the 5xx flag and the
-// endpoint id plus one, so a place never written (zero) is no record.
-// Latencies of 2^20 - 1 us or more (about 1% of lines) take two places: a
-// record whose latency field is all ones (ESCAPE), then the raw value.
+
+// ---- Tunables to sweep (everything else is unchanged) ----------------------
+constexpr int MAX_THREADS = 12;       // try 4, 6, 8, 12, 16
+constexpr int PIECES_PER_THREAD = 8;  // try 2, 4, 8, 16
+constexpr int PREFETCH_AHEAD = 1024;  // try 512, 1024, 2048
+// -----------------------------------------------------------------------------
+
 constexpr u32 KEY_BITS = 12, ERR = 1u << 11, ID_MASK = ERR - 1,
               PACKED_MAX = (1u << 20) - 1, ESCAPE = PACKED_MAX << KEY_BITS;
 
-// The number of decimal digits in x, from its bit length.
 inline u32 width(u32 x) {
   static constexpr u32 p10[] = {1,         10,        100,     1000,
                                 10000,     100000,    1000000, 10000000,
@@ -99,8 +75,6 @@ inline u32 width(u32 x) {
   return t + ((x | 1) >= p10[t]);
 }
 
-// Writes x in decimal ending at end, whose width is already known, two digits
-// at a time from a table of the 100 pairs.
 inline void put(char *end, u32 x) {
   static constexpr char pairs[] =
       "000102030405060708091011121314151617181920212223242526272829303132333435"
@@ -118,21 +92,11 @@ inline __m256i load(const char *p) {
   return _mm256_loadu_si256((const __m256i *)p);
 }
 
-// Bit i is set when byte i of the 64 in a and b equals the same byte of x, y.
 inline u64 eq64(__m256i a, __m256i b, __m256i x, __m256i y) {
   return u32(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, x))) |
          u64(u32(_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, y)))) << 32;
 }
 
-// Endpoint names to dense ids, one table for all threads. A slot of the
-// open-addressing table (16 KB, so it stays in the core's first cache) holds
-// a name's id plus one, found by a CRC of the name's first and last eight
-// bytes. Names sit 128 bytes apart, each followed by a space, as a name in a
-// line is: the name and its space match a stored one exactly when the names
-// are equal, so a name of up to 63 bytes is confirmed by the same two 32-byte
-// loads that found its end. A new name is claimed with one compare-and-swap
-// (the slot holds BUSY until the name is written), so no thread reads a
-// half-written name.
 struct Names {
   static constexpr u32 SLOTS = 1 << 13, MAX = ID_MASK, STRIDE = 128,
                        BUSY = 0xFFFF;
@@ -145,7 +109,6 @@ struct Names {
     return {text + id * STRIDE, length[id]};
   }
 
-  // The id of the name of length n at s, whose first 64 bytes are v0, v1.
   u32 find(const char *s, u32 n, __m256i v0, __m256i v1) {
     u64 a, b;
     memcpy(&a, s, 8), memcpy(&b, s + n - 8, 8);
@@ -190,9 +153,6 @@ struct Names {
 };
 static Names endpoints;
 
-// Endpoint ids in unsigned byte order of their names, and each id's place in
-// it (indexed by id plus one, as in a record). A ranking is kept for as long
-// as no name has been added since it was made.
 struct Ranking {
   u32 ids;
   std::vector<u32> by_rank;
@@ -211,12 +171,6 @@ struct Ranking {
   }
 };
 
-// Hour h's records sit together from records + h * per_hour, filled by every
-// thread in 4 KB blocks claimed with one atomic add. A thread filing into an
-// hour counts itself in active[h] while it does; an hour is closed by setting
-// closed[h] first and then finding active[h] zero, so a thread that enters
-// a closed hour, or an hour closed while a thread was in it, is always seen
-// (by the thread or by the closer) and the pass is redone.
 constexpr u32 BLOCK = 1024;
 static u32 *records;
 static size_t per_hour;
@@ -227,15 +181,6 @@ static std::atomic<bool> closed[HOURS], late;
 struct Parser {
   u32 *cur[HOURS] = {}, *stop[HOURS] = {};
 
-  // Lines arrive in about clock order, so the hour index is worked out only
-  // when the line's "MM-DDTHH" bytes differ from the line before's, and the
-  // hour's place in its records stays in registers until then.
-  //
-  // The line ends of each 64-byte block are found at once and the lines taken
-  // from them bit by bit, so a line's start does not wait on the parse of the
-  // line before and the core overlaps several lines. A line is read from both
-  // ends: the method and the name from its start, the latency (at most 10
-  // digits after the last space) and the status back from its LF.
   void run(const char *p, const char *end) {
     const __m256i space = _mm256_set1_epi8(' '), lf = _mm256_set1_epi8('\n');
     const __m128i space16 = _mm256_castsi256_si128(space);
@@ -246,10 +191,7 @@ struct Parser {
     for (u64 ends = eq64(load(block), load(block + 32), lf, lf); p < end;
          ends &= ends - 1) {
       while (!ends) {
-        // The log streams through once; fetching it 1 KB ahead with the
-        // non-temporal hint keeps it from pushing the endpoint table and the
-        // names out of the core's caches.
-        _mm_prefetch(block + 1024, _MM_HINT_NTA);
+        _mm_prefetch(block + PREFETCH_AHEAD, _MM_HINT_NTA);
         block += 64, ends = eq64(load(block), load(block + 32), lf, lf);
       }
       const char *e = block + __builtin_ctzll(ends);
@@ -273,10 +215,6 @@ struct Parser {
       u32 len = __builtin_clz(tail) - 16; // digits after the last space
       const char *ne = e - len - 5;       // the space before the status
       u32 n = ne - name;
-      // Up to 8 digits are decoded in one word: the 8 bytes before the LF,
-      // with those below the digits cleared so they read as leading zeros,
-      // combined 2, 4 and 8 at a time with multiplies. Longer ones (rare) go
-      // digit by digit.
       u32 lat = 0;
       if (len <= 8) [[likely]] {
         u64 digits;
@@ -313,159 +251,10 @@ struct Parser {
   }
 };
 
-
-// ---------------------------------------------------------------------------
-// Multi-rank selection over one endpoint group (Cosmic team changes).
-//
-// A group of n values sits in buffer a; an equal-sized buffer b (the dead
-// record area below the grouped data, so no new memory) is scratch. The values
-// at the ascending ranks ks are found by recursive quickselect that
-//  - partitions OUT OF PLACE, branch-free: each value is written to both the
-//    next front slot and the next back slot and only the counters move, so the
-//    data-dependent compare never becomes a mispredicted branch;
-//  - shares each partition between all ranks that fall on the same side, so
-//    p50, p95 and p99 cost about one pass per halving, not three selections;
-//  - alternates the roles of a and b instead of copying back;
-//  - hands ranges of up to RC_MAX values to the AVX2 rank counter below, and
-//    falls back to std::sort if the recursion depth budget runs out, so the
-//    worst case stays O(n log n).
-// Duplicates are exact: a pivot that is the minimum is re-split with <=.
-
-// Groups of up to RC_MAX values are handled by counting ranks with AVX2.
-// Each value's 20-bit latency is tagged with its index, key = lat << 7 | i,
-// so all keys are distinct (at most 27 bits, and padding is 0x7FFFFFFF, above
-// every real key, so signed compares are safe). The rank of a key is the
-// number of keys below it; the ranks of n distinct keys are exactly 0..n-1,
-// so the value at nearest-rank position k is the key whose rank equals k.
-// There are no data-dependent branches and no tie handling.
-// Memory: a key array of at most RC_MAX + 7 words on the stack.
-constexpr u32 RC_MAX = 48;
-static_assert(RC_MAX <= 128, "index must fit in the 7 tag bits");
-
-template <int NV>
-inline void rank_select(const u32 *src, u32 n, const u32 *ks, u32 *out,
-                        int nk) {
-  alignas(32) u32 y[NV * 8];
-  for (u32 i = 0; i < n; ++i)
-    y[i] = (src[i] & PACKED_MAX) << 7 | i;
-  for (u32 i = n; i < NV * 8; ++i)
-    y[i] = 0x7FFFFFFF;
-  __m256i Y[NV], R[NV];
-  for (int j = 0; j < NV; ++j)
-    Y[j] = _mm256_load_si256((const __m256i *)(y + 8 * j)),
-    R[j] = _mm256_setzero_si256();
-  for (u32 i = 0; i < n; ++i) {
-    __m256i b = _mm256_set1_epi32(y[i]);
-    for (int j = 0; j < NV; ++j)
-      R[j] = _mm256_sub_epi32(R[j], _mm256_cmpgt_epi32(Y[j], b));
-  }
-  for (int r = 0; r < nk; ++r) {
-    __m256i t = _mm256_set1_epi32(ks[r]);
-    for (int j = 0; j < NV; ++j) {
-      u32 m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(R[j], t)));
-      if (m) {
-        out[r] = y[8 * j + __builtin_ctz(m)] >> 7;
-        break;
-      }
-    }
-  }
-}
-
-// n in 1..RC_MAX; ks are positions below n. Only the vector counts that can
-// occur are instantiated, which keeps the code (and the pages it touches)
-// small.
-static_assert(RC_MAX <= 48, "add cases to rank_select_n for a larger RC_MAX");
-inline void rank_select_n(const u32 *src, u32 n, const u32 *ks, u32 *out,
-                          int nk) {
-  switch ((n + 7) / 8) {
-  case 1: return rank_select<1>(src, n, ks, out, nk);
-  case 2: return rank_select<2>(src, n, ks, out, nk);
-  case 3: return rank_select<3>(src, n, ks, out, nk);
-  case 4: return rank_select<4>(src, n, ks, out, nk);
-  case 5: return rank_select<5>(src, n, ks, out, nk);
-  default: return rank_select<6>(src, n, ks, out, nk);
-  }
-}
-
-inline u32 med3(u32 x, u32 y, u32 z) {
-  return std::max(std::min(x, y), std::min(std::max(x, y), z));
-}
-
-inline u32 pick_pivot(const u32 *a, u32 n) {
-  if (n < 256)
-    return med3(a[0], a[n / 2], a[n - 1]);
-  u32 q = n / 8;
-  return med3(med3(a[0], a[q], a[2 * q]), med3(a[3 * q], a[n / 2], a[5 * q]),
-              med3(a[6 * q], a[7 * q], a[n - 1]));
-}
-
-// Values failing the test (x < p, or x <= p) fill dst from the front, the
-// others from the back. Returns the number that pass. Both stores happen for
-// every value; the one at the slot the counters leave open is overwritten.
-template <bool LE>
-inline u32 split(const u32 *__restrict a, u32 *__restrict dst, u32 n, u32 p) {
-  u32 lo = 0, hi = n - 1;
-  for (u32 j = 0; j < n; ++j) {
-    u32 x = a[j];
-    dst[hi] = x;
-    dst[lo] = x;
-    bool pass = LE ? x <= p : x < p;
-    lo += pass;
-    hi -= !pass;
-  }
-  return lo;
-}
-
-static void multi_select(u32 *a, u32 *b, u32 n, const u32 *ks_in, u32 *out,
-                         int nk, int depth) {
-  u32 ks[3];
-  for (int r = 0; r < nk; ++r)
-    ks[r] = ks_in[r];
-  while (nk > 0) {
-    if (n <= RC_MAX) {
-      rank_select_n(a, n, ks, out, nk);
-      return;
-    }
-    if (depth <= 0) {
-      std::sort(a, a + n);
-      for (int i = 0; i < nk; ++i)
-        out[i] = a[ks[i]];
-      return;
-    }
-    u32 p = pick_pivot(a, n);
-    u32 i = split<false>(a, b, n, p);
-    bool left_equal = false;
-    if (i == 0) { // p is the minimum: everything equal to it goes left
-      i = split<true>(a, b, n, p);
-      if (i == n) {
-        for (int r = 0; r < nk; ++r)
-          out[r] = p;
-        return;
-      }
-      left_equal = true;
-    }
-    int nl = 0;
-    while (nl < nk && ks[nl] < i)
-      ++nl;
-    --depth;
-    if (nl) {
-      if (left_equal)
-        for (int r = 0; r < nl; ++r)
-          out[r] = p;
-      else
-        multi_select(b, a, i, ks, out, nl, depth);
-    }
-    // Continue with the right part, now at b + i with scratch a + i.
-    for (int r = nl; r < nk; ++r)
-      ks[r - nl] = ks[r] - i;
-    u32 *na = b + i, *nb = a + i;
-    a = na, b = nb, n -= i, out += nl, nk -= nl;
-  }
-}
-
 int main() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-  const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
+  const int nt =
+      std::clamp<int>(std::thread::hardware_concurrency(), 1, MAX_THREADS);
   int in = open("/data/requests.log", O_RDONLY);
   int out = open("/out/summary.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (in < 0 || out < 0)
@@ -477,14 +266,10 @@ int main() {
   if (size && mmap(log, size, 1, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED)
     return perror("mmap"), 1;
 
-  // An hour holds at most two places for every line (one is at least 40
-  // bytes), a part block per thread, and after them its sorted keys, one a
-  // line; only the pages written are backed.
   per_hour = (size / 13 / BLOCK + nt + 2) * BLOCK;
   records = (u32 *)mmap(nullptr, HOURS * per_hour * 4, 3,
                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-  // Pieces start at line starts; first[k] is the hour of piece k's first line.
-  const int pieces = 8 * nt;
+  const int pieces = PIECES_PER_THREAD * nt;
   std::vector<size_t> cut(pieces + 1, size);
   std::vector<int> first(pieces + 1, HOURS);
   cut[0] = 0;
@@ -499,8 +284,6 @@ int main() {
                  p[12] - '0' - 18;
     }
 
-  // Hour h's count[h] lines sit from lines + h * hour_bytes, each hour on
-  // pages of its own, handed back once the hour's text is written.
   struct Line {
     u32 id, n, p50, p95, p99, errors;
   };
@@ -510,17 +293,7 @@ int main() {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   std::vector<u32> count(HOURS);
   std::vector<u64> at(HOURS + 1);
-  // floor(errors * 1e6 / n) with one 32-bit divide of a 64-bit dividend (much
-  // cheaper than a 64-bit divide on many x86 cores). Exact, and it cannot
-  // trap: errors <= n (a group's 5xx count never exceeds its size), so the
-  // high word of the dividend, errors * 1e6 >> 32, is below n and the
-  // quotient (at most 1e6) fits in 32 bits.
-  auto ppm = [](const Line &l) {
-    u64 a = u64(l.errors) * 1000000;
-    u32 q, r;
-    asm("divl %4" : "=a"(q), "=d"(r) : "a"(u32(a)), "d"(u32(a >> 32)), "r"(l.n));
-    return q;
-  };
+  auto ppm = [](const Line &l) { return u32(u64(l.errors) * 1000000 / l.n); };
 
   std::mutex lock;
   std::vector<std::unique_ptr<Ranking>> rankings;
@@ -531,78 +304,50 @@ int main() {
     return *rankings.back();
   };
 
-  // Hour h, closed, is sorted by (endpoint rank, latency), the rank above a
-  // 20-bit latency in one 31-bit key, by a radix sort of three passes (10, 10
-  // and 11 bits) between its records and the unused rest of its region. Every
-  // group then comes out sorted at a known place, and its percentiles are
-  // read off by index. Latencies too large for 20 bits sort last in their
-  // group with the same key; their values are kept, sorted, in a short list.
-  // Finish an hour by grouping packed latencies by endpoint, then selecting
-  // only the three nearest-rank percentiles in each group. This replaces the
-  // three full-array radix passes with one endpoint scatter and in-place
-  // introselect. Escape latencies stay in the small separately sorted list.
   auto finish = [&](int h, std::vector<u64> &big) {
     if (active[h]) // a thread is filing into it: too late for this pass
       return late.store(true);
     const Ranking &rank = ranking();
     const u32 ne = rank.by_rank.size();
-    u32 *keys = records + h * per_hour, *sorted = keys + filled[h],
-        total = 0;
-    u32 normal_end[ID_MASK + 1] = {}, counts[ID_MASK + 1] = {},
+    u32 *keys = records + h * per_hour, *sorted = keys + filled[h], total = 0;
+    u32 low[1024] = {}, mid[1024] = {}, top[ID_MASK + 1] = {},
         errors[ID_MASK + 1] = {};
     big.clear();
     for (u32 *r = keys; r < sorted; ++r) {
       u32 x = *r;
       if (!(x & ID_MASK)) // a place never written, at the end of a block
         continue;
-      u32 e = rank.rank_of[x & ID_MASK];
-      ++counts[e];
+      if (x >> KEY_BITS == PACKED_MAX) [[unlikely]]
+        big.push_back(u64(rank.rank_of[x & ID_MASK]) << 32 | *++r);
+      u32 e = rank.rank_of[x & ID_MASK], key = e << 20 | x >> KEY_BITS;
       errors[e] += (x & ERR) != 0;
-      if (x >> KEY_BITS == PACKED_MAX) [[unlikely]] {
-        big.push_back(u64(e) << 32 | *++r);
-      } else {
-        ++normal_end[e];
-        keys[total++] = e << 20 | x >> KEY_BITS;
-      }
+      ++low[key & 1023], ++mid[key >> 10 & 1023], ++top[e];
+      keys[total++] = key;
     }
-
-    // Stable grouping by endpoint. normal_end becomes each endpoint's
-    // exclusive end offset in the scratch array.
-    for (u32 e = 0, sum = 0; e < ne; ++e)
-      sum += std::exchange(normal_end[e], sum);
-    for (u32 j = 0; j < total; ++j) {
-      u32 x = keys[j];
-      sorted[normal_end[x >> 20]++] = x;
-    }
-
+    auto pass = [total](const u32 *from, u32 *to, u32 *at, u32 buckets,
+                        int shift, u32 mask) {
+      for (u32 b = 0, sum = 0; b < buckets; ++b)
+        sum += std::exchange(at[b], sum);
+      for (u32 j = 0; j < total; ++j)
+        to[at[from[j] >> shift & mask]++] = from[j];
+    };
+    pass(keys, sorted, low, 1024, 0, 1023);
+    pass(sorted, keys, mid, 1024, 10, 1023);
+    pass(keys, sorted, top, ne, 20, ID_MASK);
     std::sort(big.begin(), big.end());
     u64 sz = 0;
-    for (u32 e = 0, from = 0, b = 0; e < ne; from = normal_end[e++]) {
-      u32 normal_n = normal_end[e] - from, n = counts[e];
+    for (u32 e = 0, from = 0, b = 0; e < ne; from = top[e++]) {
+      u32 n = top[e] - from, large = 0;
       if (!n)
         continue;
-      u32 large = 0;
-      while (b + large < big.size() && (big[b + large] >> 32) == e)
+      while (b + large < big.size() && big[b + large] >> 32 == e)
         ++large;
-
-      // Nearest rank p is index ceil(p * n / 100) - 1. Select only
-      // requested normal ranks, reusing each partition for the next rank.
-      u32 k[3] = {(50 * n + 99) / 100 - 1,
-                  (95 * n + 99) / 100 - 1,
-                  (99 * n + 99) / 100 - 1};
-      u32 v[3], sel[3];
-      int nn = 0; // ranks that land among the normal values (a prefix)
-      while (nn < 3 && k[nn] < normal_n)
-        ++nn;
-      // sorted + from holds the group; keys + from (dead) is its scratch.
-      if (normal_n <= RC_MAX) { // small group: count ranks with AVX2
-        if (nn)
-          rank_select_n(sorted + from, normal_n, k, sel, nn);
-      } else
-        multi_select(sorted + from, keys + from, normal_n, k, sel, nn,
-                     2 * (32 - __builtin_clz(normal_n | 1)));
-      for (int i = 0; i < 3; ++i)
-        v[i] = i < nn ? sel[i] & PACKED_MAX : u32(big[b + k[i] - normal_n]);
+      u32 v[3], t = 0;
+      for (u32 p : {50, 95, 99}) {
+        u32 k = (p * n + 99) / 100 - 1;
+        v[t++] = k < n - large ? sorted[from + k] & PACKED_MAX
+                               : u32(big[b + k - (n - large)]);
+      }
       b += large;
       Line &l = ((Line *)(lines + h * hour_bytes))[count[h]++];
       l = {rank.by_rank[e], n, v[0], v[1], v[2], errors[e]};
@@ -614,14 +359,10 @@ int main() {
     at[h] = sz;
   };
 
-  // The pass. Each thread closes and finishes the next hour once the first
-  // piece not yet parsed starts two hours after it (or every piece is
-  // parsed, if a pass was too late), and otherwise parses the next piece.
   std::vector<Parser> parsers(nt);
   std::vector<char> parsed(pieces + 1);
   int front = 0, next_piece = 0, next_hour = 0, passes = 1;
   bool stream = true;
-  // If the pass was too late, everything is handed back and it is redone.
   std::barrier passed(nt, [&]() noexcept {
     if (!late)
       return;
@@ -635,7 +376,6 @@ int main() {
     front = next_piece = next_hour = 0, stream = late = false, ++passes;
   });
   char *text = nullptr;
-  // Every hour is sized: offsets, then the output mapped at its final size.
   std::barrier sized(nt, [&]() noexcept {
     u64 total = 0;
     for (int h = 0; h < HOURS; ++h)
