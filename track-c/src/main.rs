@@ -295,8 +295,7 @@ impl Run {
                     before.wrapping_add(below.count_ones())
                 };
                 let field = |at: usize| {
-                    let five = pos.as_ptr().add(at * FIELDS).cast::<[u32; FIELDS]>();
-                    (*five).map(|p| p as usize)
+                    (*pos.as_ptr().add(at * FIELDS).cast::<[u32; FIELDS]>()).map(|p| p as usize)
                 };
                 // Pass A: how many records start inside this claim, and their numbers.
                 let mut count = 0;
