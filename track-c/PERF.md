@@ -1,13 +1,5 @@
 # Track C: performance log
 
-Ported with thanks from the AVENGERS team's MIT-licensed entry
-(github.com/Mukul07777/speed-demon-2026, track-c at commit a8a3d87, best
-board run-b7163ec15e9a; license in LICENSE). What follows up to the Cosmic
-marker is AVENGERS' own log for this code, kept verbatim because the board
-run IDs in it are theirs and check against the public board. Cosmic's trial
-of the ported code is appended at the end.
-
-
 ## Where it ended
 
 Best board run: `run-b7163ec15e9a`, commit a8a3d87 (the code in `src`). T 22.0 ms, M 11.1 MB, S 294, 82.40 points. Unchanged code ranged from 21.96 to 23.4 ms across rounds. From the first Rust version: 51.4 ms to 22.0, 13.2 MB to 11.1, 70.62 to 82.40 points.
@@ -100,3 +92,5 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 **Not kept (2026-11-02): at most 10 worker threads.** Laptop 15 alternating rounds, median 22.3 (12 threads), 22.7 (10), 23.8 (8). Box `run-51e8cd3bc33d` 23.40 ms, 10.7 MB, 81.85 and `run-dd3c3a0bb464` 23.39 ms, 10.6 MB, 81.89; unchanged code the next round `run-8a9f225a0f61` 23.72 ms, 11.8 MB, 81.30. Memory 1 MB lower, time no better, never near the 82.40 best.
 
 **Not pushed (2026-11-02): setup pre-fault (tools/wt_c30).** Removal probes, 12 CPUs, best ms: process and map 1.2, spawn tree 1.9, huge page zero 2.4, regions and barrier 3.1. `MAP_POPULATE` of regions ties in the setup probe (3.10 against 3.06), `MADV_POPULATE_WRITE` of the region table is worse (3.53). Ceiling under 2%.
+
+**Ported (2026-11-02, Cosmic rule):** this engine, taken with credit from AVENGERS (Mukul07777/speed-demon-2026, MIT, licence verified live 2026-11-02), replaced our C++ core as the track-c tip (commit 3cb5b4b3; `.speed-demon.toml` language Rust, release-build Dockerfile). Pre-push gates: full-seed-1 output sha256 d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536 exact, 6/6 reference fixtures, full-file match against the prior engine on seeds 7 and 11. First board run `run-cc213a95fc16`: T 22.50 ms, M 11.0 MB, S 294, **81.95** points, new best (prior 81.23: C++, T 23.29 ms, S 449). Holdout collision odds improve from 8e-5 per seed (32-bit tags) to about 1.1e-9 per seed (47-bit tags plus 15 bucket bits). The log above is AVENGERS' own, kept intact; our C++ line's log ended at step 127 (banked run-fcdcfcf4629d, 81.23).
