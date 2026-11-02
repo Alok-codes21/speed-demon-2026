@@ -180,8 +180,8 @@ impl Run {
     unsafe fn insert(&self, index: usize, tag: u64, spare: &mut Range<usize>) -> usize {
         if spare.is_empty() {
             // Name numbers are reserved 32 at a time.
-            let first = NEXT[3].fetch_add(256, Relaxed);
-            *spare = first..first + 256;
+            let first = NEXT[3].fetch_add(32, Relaxed);
+            *spare = first..first + 32;
         }
         let claimed = tag << NUMBER_BITS | spare.start as u64;
         // From the bucket's first slot to the end of the table, and round again if need be.
