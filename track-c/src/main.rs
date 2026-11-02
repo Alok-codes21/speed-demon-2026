@@ -143,23 +143,16 @@ impl Run {
         let tag = hash & (1 << 47) - 1 | 1;
         let bucket = &self.2 .0[index];
         let wanted = _mm256_set1_epi64x(tag as i64);
-        // Slots fill in order from zero, so while any of the first four is empty the second
-        // half can hold nothing: it is only loaded when the first is full (~11% of lookups).
-        let first = _mm256_srli_epi64::<17>(_mm256_load_si256(bucket.as_ptr().cast())); // 17 = name bits
-        let found = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(first, wanted)));
-        if found != 0 {
-            return (bucket[found.trailing_zeros() as usize].load(Relaxed) & 0x1_FFFF) as usize; // 17-bit mask
-        }
-        let empty = _mm256_cmpeq_epi64(first, _mm256_setzero_si256());
-        if _mm256_movemask_pd(_mm256_castsi256_pd(empty)) != 0 {
+        let [low, high] = [0, 1].map(|half| {
+            let slots = _mm256_load_si256(bucket.as_ptr().cast::<__m256i>().add(half));
+            let slots = _mm256_srli_epi64::<17>(slots); // 17 = name-number bits
+            _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(slots, wanted)))
+        });
+        let found = low | high << 4;
+        if found == 0 {
             return self.insert(index, tag, spare);
         }
-        let high = _mm256_srli_epi64::<17>(_mm256_load_si256(bucket.as_ptr().add(4).cast())); // 32 bytes on
-        let found = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(high, wanted)));
-        if found != 0 {
-            return (bucket[4 + found.trailing_zeros() as usize].load(Relaxed) & 0x1_FFFF) as usize;
-        }
-        self.insert(index, tag, spare)
+        (bucket[found.trailing_zeros() as usize].load(Relaxed) & 0x1_FFFF) as usize // 17-bit mask
     }
 
     /// Adds a name whose bucket does not hold it: the 100,000 first appearances, and the few
