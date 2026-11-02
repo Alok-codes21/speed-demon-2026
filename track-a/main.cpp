@@ -1,39 +1,3 @@
-/*
-MIT License
-
-Copyright (c) 2026 Hackathon Raptors CIC
-Copyright (c) 2026 the contributors of this repository
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-*/
-// Prior Track A engine credit retained from HighVelocity's public repository
-//   https://github.com/insightlabs38-pixel/sd-sm
-// at commit 8b6f45035580b379f8e27af9cb537c4068896c09 (MIT; Hackathon Raptors
-// CIC and contributors). Copyright (c) 2026 Hackathon Raptors CIC,
-// Copyright (c) 2026 the contributors of this repository (HighVelocity).
-//
-// Engine: Cache Me, MIT licensed, source
-// https://github.com/manusingh090/speed-demon-2026-entry
-// commit 7027ab49162605eea30311a351ebeeef3647efdc, track-a/main.cpp.
-// Copyright (c) 2026 Hackathon Raptors CIC and repository contributors.
-// Local changes (team Cosmic): tunable constants and exact SSE decimal packing.
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -59,28 +23,23 @@ using u64 = uint64_t;
 constexpr int HOURS = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 
 // ---- Tunables to sweep (everything else is unchanged) ----------------------
-constexpr int MAX_THREADS = 6;
-constexpr int PIECES_PER_THREAD = 4;
-constexpr int PREFETCH_AHEAD = 1024;
-
-constexpr u64 EARLY_BUDGET = 1000000;
-constexpr int CLOSE_MARGIN = 75;
+constexpr int MAX_THREADS = 12;      // try 4, 6, 8, 12, 16
+constexpr int PIECES_PER_THREAD = 8; // try 2, 4, 8, 16
+constexpr int PREFETCH_AHEAD = 1024; // try 512, 1024, 2048
 // -----------------------------------------------------------------------------
 
 constexpr u32 KEY_BITS = 12, ERR = 1u << 11, ID_MASK = ERR - 1,
               PACKED_MAX = (1u << 20) - 1, ESCAPE = PACKED_MAX << KEY_BITS;
 
-inline u32 width(u32 x)
-{
-  static constexpr u32 p10[] = {1, 10, 100, 1000,
-                                10000, 100000, 1000000, 10000000,
+inline u32 width(u32 x) {
+  static constexpr u32 p10[] = {1,         10,        100,     1000,
+                                10000,     100000,    1000000, 10000000,
                                 100000000, 1000000000};
   u32 t = (32 - __builtin_clz(x | 1)) * 1233 >> 12;
   return t + ((x | 1) >= p10[t]);
 }
 
-inline void put(char *end, u32 x)
-{
+inline void put(char *end, u32 x) {
   static constexpr char pairs[] =
       "000102030405060708091011121314151617181920212223242526272829303132333435"
       "363738394041424344454647484950515253545556575859606162636465666768697071"
@@ -93,19 +52,16 @@ inline void put(char *end, u32 x)
     end[-1] = '0' + x;
 }
 
-inline __m256i load(const char *p)
-{
+inline __m256i load(const char *p) {
   return _mm256_loadu_si256((const __m256i *)p);
 }
 
-inline u64 eq64(__m256i a, __m256i b, __m256i x, __m256i y)
-{
+inline u64 eq64(__m256i a, __m256i b, __m256i x, __m256i y) {
   return u32(_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, x))) |
          u64(u32(_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, y)))) << 32;
 }
 
-struct Names
-{
+struct Names {
   static constexpr u32 SLOTS = 1 << 13, MAX = ID_MASK, STRIDE = 128,
                        BUSY = 0xFFFF;
   std::atomic<uint16_t> slot[SLOTS];
@@ -113,19 +69,16 @@ struct Names
   uint8_t length[MAX];
   alignas(64) char text[(MAX + 1) * STRIDE];
 
-  std::string_view name(u32 id) const
-  {
+  std::string_view name(u32 id) const {
     return {text + id * STRIDE, length[id]};
   }
 
-  u32 find(const char *s, u32 n, __m256i v0, __m256i v1)
-  {
+  u32 find(const char *s, u32 n, __m256i v0, __m256i v1) {
     u64 a, b;
     memcpy(&a, s, 8), memcpy(&b, s + n - 8, 8);
     if (n < 8)
       a = _bzhi_u64(a, 8 * n), b = 0;
-    for (u32 h = _mm_crc32_u64(_mm_crc32_u64(n, a), b);; ++h)
-    {
+    for (u32 h = _mm_crc32_u64(_mm_crc32_u64(n, a), b);; ++h) {
       u32 v = slot[h % SLOTS].load(std::memory_order_acquire);
       if (v - 1 >= MAX) [[unlikely]]
         return insert(h, s, n);
@@ -139,16 +92,13 @@ struct Names
     }
   }
 
-  [[gnu::noinline]] u32 insert(u32 h, const char *s, u32 n)
-  {
-    for (;;)
-    {
+  [[gnu::noinline]] u32 insert(u32 h, const char *s, u32 n) {
+    for (;;) {
       std::atomic<uint16_t> &at = slot[h % SLOTS];
       uint16_t v = at.load(std::memory_order_acquire);
       if (v == BUSY)
         continue;
-      if (v == 0)
-      {
+      if (v == 0) {
         if (!at.compare_exchange_strong(v, BUSY))
           continue;
         u32 id = ids++;
@@ -165,8 +115,7 @@ struct Names
     }
   }
 };
-inline int hour_of(const char *p)
-{
+inline int hour_of(const char *p) {
   int day = (p[8] - '0') * 10 + p[9] - '0';
   return (p[6] == '0' ? day - 30 : day + 1) * 24 + (p[11] - '0') * 10 + p[12] -
          '0' - 18;
@@ -174,14 +123,12 @@ inline int hour_of(const char *p)
 
 static Names endpoints;
 
-struct Ranking
-{
+struct Ranking {
   u32 ids;
   std::vector<u32> by_rank;
   std::vector<uint16_t> rank_of = std::vector<uint16_t>(ID_MASK + 1);
 
-  Ranking() : ids(endpoints.ids)
-  {
+  Ranking() : ids(endpoints.ids) {
     std::vector<std::pair<std::string_view, u32>> by_name;
     for (u32 i = 0; i < Names::SLOTS; ++i)
       if (u32 v = endpoints.slot[i]; v && v != Names::BUSY)
@@ -201,12 +148,10 @@ static std::atomic<u32> filled[HOURS];
 static std::atomic<int> active[HOURS];
 static std::atomic<bool> closed[HOURS], late;
 
-struct Parser
-{
+struct Parser {
   u32 *cur[HOURS] = {}, *stop[HOURS] = {};
 
-  void run(const char *p, const char *end)
-  {
+  void run(const char *p, const char *end) {
     const __m256i space = _mm256_set1_epi8(' '), lf = _mm256_set1_epi8('\n');
     const __m128i space16 = _mm256_castsi256_si128(space);
     u32 *c = nullptr, *lim = nullptr;
@@ -214,17 +159,14 @@ struct Parser
     u64 stamp = 0, at;
     const char *block = p;
     for (u64 ends = eq64(load(block), load(block + 32), lf, lf); p < end;
-         ends &= ends - 1)
-    {
-      while (!ends)
-      {
+         ends &= ends - 1) {
+      while (!ends) {
         _mm_prefetch(block + PREFETCH_AHEAD, _MM_HINT_NTA);
         block += 64, ends = eq64(load(block), load(block + 32), lf, lf);
       }
       const char *e = block + __builtin_ctzll(ends);
       memcpy(&at, p + 5, 8);
-      if (at != stamp) [[unlikely]]
-      {
+      if (at != stamp) [[unlikely]] {
         if (h >= 0)
           cur[h] = c, stop[h] = lim, --active[h];
         int day = (p[8] - '0') * 10 + p[9] - '0',
@@ -244,8 +186,7 @@ struct Parser
       const char *ne = e - len - 5;       // the space before the status
       u32 n = ne - name;
       u32 lat = 0;
-      if (len <= 8) [[likely]]
-      {
+      if (len <= 8) [[likely]] {
         u64 digits;
         memcpy(&digits, e - 8, 8);
         digits =
@@ -255,15 +196,13 @@ struct Parser
         __m128i quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x00010064));
         lat = u32(_mm_cvtsi128_si32(quads)) * 10000 +
               u32(_mm_extract_epi32(quads, 1));
-      }
-      else
+      } else
         for (const char *d = e - len; d < e; ++d)
           lat = lat * 10 + *d - '0';
       u32 key = (endpoints.find(name, n, load(name), load(name + 32)) + 1) |
                 (ne[1] == '5' ? ERR : 0);
       p = e + 1;
-      if (lat >= PACKED_MAX) [[unlikely]]
-      {
+      if (lat >= PACKED_MAX) [[unlikely]] {
         if (lim - c < 2) // the pair stays in one block
           c = lim;
         if (c == lim)
@@ -279,14 +218,12 @@ struct Parser
       cur[h] = c, stop[h] = lim, --active[h];
   }
 
-  static u32 *claim(int h)
-  {
+  static u32 *claim(int h) {
     return records + h * per_hour + filled[h].fetch_add(BLOCK);
   }
 };
 
-int main()
-{
+int main() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
   const int nt =
       std::clamp<int>(std::thread::hardware_concurrency(), 1, MAX_THREADS);
@@ -317,8 +254,7 @@ int main()
       first[k] = hour_of(log + cut[k]) * 60 + (log[cut[k] + 14] - '0') * 10 +
                  log[cut[k] + 15] - '0';
 
-  struct Line
-  {
+  struct Line {
     u32 id, n, p50, p95, p99, errors;
   };
   const size_t hour_bytes = (ID_MASK * sizeof(Line) + 4095) & ~size_t(4095);
@@ -334,21 +270,18 @@ int main()
   std::vector<char> finished(HOURS);
   int sized = 0, next_text = 0;
   u64 early = 0;
-  auto ppm = [](const Line &l)
-  { return u32(u64(l.errors) * 1000000 / l.n); };
+  auto ppm = [](const Line &l) { return u32(u64(l.errors) * 1000000 / l.n); };
 
   std::mutex lock;
   std::vector<std::unique_ptr<Ranking>> rankings;
-  auto ranking = [&]() -> const Ranking &
-  {
+  auto ranking = [&]() -> const Ranking & {
     std::lock_guard hold(lock);
     if (rankings.empty() || rankings.back()->ids != endpoints.ids)
       rankings.emplace_back(new Ranking);
     return *rankings.back();
   };
 
-  auto finish = [&](int h, std::vector<u64> &big)
-  {
+  auto finish = [&](int h, std::vector<u64> &big) {
     if (active[h]) // a thread is filing into it: too late for this pass
       return late.store(true);
     const Ranking &rank = ranking();
@@ -357,8 +290,7 @@ int main()
     u32 low[1024] = {}, mid[1024] = {}, top[ID_MASK + 1] = {},
         errors[ID_MASK + 1] = {};
     big.clear();
-    for (u32 *r = keys; r < sorted; ++r)
-    {
+    for (u32 *r = keys; r < sorted; ++r) {
       u32 x = *r;
       if (!(x & ID_MASK)) // a place never written, at the end of a block
         continue;
@@ -370,8 +302,7 @@ int main()
       keys[total++] = key;
     }
     auto pass = [total](const u32 *from, u32 *to, u32 *at, u32 buckets,
-                        int shift, u32 mask)
-    {
+                        int shift, u32 mask) {
       for (u32 b = 0, sum = 0; b < buckets; ++b)
         sum += std::exchange(at[b], sum);
       for (u32 j = 0; j < total; ++j)
@@ -382,16 +313,14 @@ int main()
     pass(keys, sorted, top, ne, 20, ID_MASK);
     std::sort(big.begin(), big.end());
     u64 sz = 0;
-    for (u32 e = 0, from = 0, b = 0; e < ne; from = top[e++])
-    {
+    for (u32 e = 0, from = 0, b = 0; e < ne; from = top[e++]) {
       u32 n = top[e] - from, large = 0;
       if (!n)
         continue;
       while (b + large < big.size() && big[b + large] >> 32 == e)
         ++large;
       u32 v[3], t = 0;
-      for (u32 p : {50, 95, 99})
-      {
+      for (u32 p : {50, 95, 99}) {
         u32 k = (p * n + 99) / 100 - 1;
         v[t++] = k < n - large ? sorted[from + k] & PACKED_MAX
                                : u32(big[b + k - (n - large)]);
@@ -410,15 +339,13 @@ int main()
       at[sized + 1] = at[sized] + bytes[sized];
   };
 
-  auto write = [&](int h)
-  {
+  auto write = [&](int h) {
     char label[32];
     int day = (h + 18) / 24;
     snprintf(label, 32, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11,
              day < 2 ? 30 + day : day - 1, (h + 18) % 24);
     char *o = text + at[h];
-    for (u32 i = 0; i < count[h]; ++i)
-    {
+    for (u32 i = 0; i < count[h]; ++i) {
       const Line &l = ((Line *)(lines + h * hour_bytes))[i];
       std::string_view name = endpoints.name(l.id);
       o = std::copy_n(label, 21, o);
@@ -431,14 +358,10 @@ int main()
   };
 
   std::vector<Parser> parsers(nt);
-  auto parsed = std::make_unique<std::atomic<char>[]>(pieces + 1);
-
-  for (int i = 0; i <= pieces; ++i)
-    parsed[i].store(0, std::memory_order_relaxed);
+  std::vector<char> parsed(pieces + 1);
   int front = 0, next_piece = 0, next_hour = 0, passes = 1;
   bool stream = true;
-  std::barrier passed(nt, [&]() noexcept
-                      {
+  std::barrier passed(nt, [&]() noexcept {
     if (!late)
       return;
     madvise(records, HOURS * per_hour * 4, MADV_DONTNEED);
@@ -448,29 +371,27 @@ int main()
     sized = next_text = early = 0;
     for (auto &p : parsers)
       p = Parser();
-    for (int i = 0; i <= pieces; ++i)
-    parsed[i].store(0, std::memory_order_relaxed);
-    front = next_piece = next_hour = 0, stream = late = false, ++passes; });
+    std::fill(parsed.begin(), parsed.end(), 0);
+    front = next_piece = next_hour = 0, stream = late = false, ++passes;
+  });
   std::vector<std::thread> pool;
   for (int t = 0; t < nt; ++t)
-    pool.emplace_back([&, t]
-                      {
+    pool.emplace_back([&, t] {
       std::vector<u64> big;
       for (int pass = 0; pass < passes; ++pass) {
         while (!late) {
           int h = -1, k = -1, g = -1;
           {
             std::lock_guard hold(lock);
-            while (front < pieces &&
-                parsed[front].load(std::memory_order_acquire))
+            while (front < pieces && parsed[front])
               ++front;
             if (next_hour < HOURS &&
                 (front == pieces ||
-                 (stream && first[front] >= next_hour * 60 + CLOSE_MARGIN)))
+                 (stream && first[front] >= (next_hour + 1) * 60 + 30)))
               h = next_hour++, closed[h] = true;
             else if (next_piece < pieces)
               k = next_piece++;
-            else if (next_text < sized && early + bytes[next_text] <= EARLY_BUDGET)
+            else if (next_text < sized && early + bytes[next_text] <= 3000000)
               g = next_text++, early += bytes[g];
             else if (next_hour == HOURS)
               break;
@@ -486,10 +407,9 @@ int main()
             if (b > a)
               madvise((void *)a, b - a, MADV_DONTNEED);
             std::lock_guard hold(lock);
-            parsed[k].store(1, std::memory_order_release);
+            parsed[k] = true;
           } else
-              _mm_pause();
-           
+            std::this_thread::yield();
         }
         passed.arrive_and_wait();
       }
@@ -501,7 +421,8 @@ int main()
             break;
         }
         write(g);
-      } });
+      }
+    });
   for (auto &th : pool)
     th.join();
   if (ftruncate(out, at[HOURS]))
