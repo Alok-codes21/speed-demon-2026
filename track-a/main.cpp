@@ -63,8 +63,8 @@ constexpr int MAX_THREADS = 4;
 constexpr int PIECES_PER_THREAD = 4;
 constexpr int PREFETCH_AHEAD = 1024;
 
-constexpr u64 EARLY_BUDGET = 1000000;
-constexpr int CLOSE_MARGIN = 120;
+constexpr u64 EARLY_BUDGET = 2000000;
+constexpr int CLOSE_MARGIN = 75;
 // -----------------------------------------------------------------------------
 
 constexpr u32 KEY_BITS = 12, ERR = 1u << 11, ID_MASK = ERR - 1,
