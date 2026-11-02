@@ -13,6 +13,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <emmintrin.h>
 #include <fcntl.h>
 #include <numeric>
@@ -720,7 +722,31 @@ int main() {
   const char *env_data = getenv("SD_DATA"), *env_out = getenv("SD_OUT");
   std::string data = env_data ? env_data : "/data";
   std::string out = env_out ? env_out : "/out";
-  unsigned threads = std::min(12u, std::thread::hardware_concurrency());
+  // hardware_concurrency() may report host CPUs, not the container quota.
+  // Respect cgroup limits to avoid oversubscribing the benchmark.
+  unsigned threads = std::max(1u, std::min(12u, std::thread::hardware_concurrency()));
+  if (FILE *f = fopen("/sys/fs/cgroup/cpu.max", "r")) {
+    char quota[32] = {}, period[32] = {};
+    if (fscanf(f, "%31s %31s", quota, period) == 2 &&
+        strcmp(quota, "max") != 0) {
+      unsigned long long q = strtoull(quota, nullptr, 10);
+      unsigned long long p = strtoull(period, nullptr, 10);
+      if (p)
+        threads = std::min<unsigned long long>(
+            threads, std::max(1ull, (q + p - 1) / p));
+    }
+    fclose(f);
+  } else if (FILE *f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r")) {
+    long long q = 0, p = 0;
+    FILE *pfile = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+    if (fscanf(f, "%lld", &q) == 1 && pfile &&
+        fscanf(pfile, "%lld", &p) == 1 && q > 0 && p > 0)
+      threads = std::min<unsigned long long>(
+          threads, std::max(1ll, (q + p - 1) / p));
+    if (pfile)
+      fclose(pfile);
+    fclose(f);
+  }
   if (getenv("SD_THREADS"))
     threads = atoi(getenv("SD_THREADS"));
   threads = std::clamp(threads, 1u, 12u);
