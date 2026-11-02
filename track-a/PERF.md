@@ -88,3 +88,12 @@ The Rust adaptation retained full endpoint-name comparison, including forced has
 The two-pass variant SHA256 `10a7b0648add2cb2b831ae041c8848a9dca1e13d7c8ec4369d1da6d5e83bc6f6` also changed output scheduling and closing horizon, so it was not a single-variable radix comparison. It passed 25 local exactness checks but its captured official score was lower than A1.
 
 Further A1 screens: reducing block size 1024 to 512 passed 25 exactness checks, with local 21-pair time ratios 0.9986 (one worker) and 0.9704 (12 workers). Local max-RSS did not fall, so no 1 MB saving is claimed and it was not promoted. Block size 256 was slower at 12 workers (ratio 1.0255) and was rejected. Removing two unused includes produced identical executable .text locally; any official S reduction remains unmeasured until a scored receipt confirms it.
+
+
+## Final retained parser change: constant digit-mask lookup
+
+Only the latency digit mask changed: an 8-byte mask loaded from a 16-byte constant table replaces two variable shifts. All other A1 logic is unchanged. The candidate passed 25 fixture/order/thread comparisons and 135 independent integer-oracle comparisons. Two 21-pair local timing screens improved about 1.3 to 1.7 percent; these are local estimates, not official speed guarantees.
+
+Official run `run-1d6625e5a374`, scored commit `27cbac25e4913e899abf8559af4e60b9d6eb8f89`: T19.095 ms, M14,798,848 bytes, S414, D1, 85.982446 points; all five gates passed. Scored and live source SHA256: `2cdc1ab95a7dff01ffd9e786abaef40e1b557db7a8a5d5ac8338d8f3ad1dd0dc`.
+
+The recent A1 control, run `run-6193afa83b43` at `90406d3357846e132cc5d8781f1f34d3cbc01063`, measured T19.566 ms, M14,700,544 bytes, S411 and 85.770521 points, all gates passing. Its source SHA256 was `953affe5578b90f5aae33aa889ce24e8d8b7c08f6b35f5e99a010315afdcb549`. The trial gained 0.211925 points in these two draws despite S increasing by three lines. This is one official candidate draw, not a controlled median comparison. No memory saving is claimed. The candidate is retained, with the previous A1 source available for restoration.
