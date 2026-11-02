@@ -58,14 +58,14 @@ extern "C" {
 // Counters that hand out work: region claims, record claims, huge pages to zero, name numbers.
 static NEXT: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
 // Region id to group, and country code (as base-26 digits) to group. Both start zeroed.
-static REGION_GROUP: [AtomicU8; 1_000_000 + 1] = [const { AtomicU8::new(0) }; 1_000_000 + 1];
+static REGION_GROUP: [AtomicU8; 1_000_000 + 1] = [const { AtomicU8::new(0) }; 1_000_000 + 1]; // ids + the extra slot
 static LETTERS: [OnceLock<u8>; 26 * 26 * 26] = [const { OnceLock::new() }; 26 * 26 * 26];
 // The sums of all workers, in groups. A group's slots, for a worker and for these totals alike:
 // 0 count, 1 id sum, 2 amount sum, 3 name bytes in the low half and note bytes in the high half
 // (the spec keeps each below 2^31, so the halves never carry into each other and one add
 // updates both), 4 the largest `(1 << 40) + amount`, 5 the largest `(1 << 40) - amount`. The last two
 // slots only pad a group to one cache line.
-static TOTALS: Mutex<[[i64; 8]; 256]> = Mutex::new([[0; 8]; 256]);
+static TOTALS: Mutex<[[i64; 8]; 256]> = Mutex::new([[0; 8]; 256]); // 240 countries + slack
 // Group to country code, with the unmatched group first.
 static COUNTRIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -75,7 +75,7 @@ static COUNTRIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Numbers keep the bit matrix small.
 /// 1: the name bit matrix, `2048` words per group.
 #[repr(C)]
-struct Tables([[AtomicU64; 8]; 1 << 15], [AtomicU64; 256 * 2048]);
+struct Tables([[AtomicU64; 8]; 1 << 15], [AtomicU64; 256 * 2048]); // buckets, then 256 rows of 2048 words
 
 /// What the workers share: 0 the records file, 1 the regions file, 2 the tables, 3 the barrier
 /// after the regions are loaded.
@@ -145,14 +145,14 @@ impl Run {
         let wanted = _mm256_set1_epi64x(tag as i64);
         let [low, high] = [0, 1].map(|half| {
             let slots = _mm256_load_si256(bucket.as_ptr().cast::<__m256i>().add(half));
-            let slots = _mm256_srli_epi64::<17>(slots);
+            let slots = _mm256_srli_epi64::<17>(slots); // 17 = name-number bits
             _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(slots, wanted)))
         });
         let found = low | high << 4;
         if found == 0 {
             return self.insert(index, tag, spare);
         }
-        (bucket[found.trailing_zeros() as usize].load(Relaxed) & 0x1_FFFF) as usize
+        (bucket[found.trailing_zeros() as usize].load(Relaxed) & 0x1_FFFF) as usize // 17-bit mask
     }
 
     /// Adds a name whose bucket does not hold it: the 100,000 first appearances, and the few
@@ -165,7 +165,7 @@ impl Run {
             let first = NEXT[3].fetch_add(32, Relaxed);
             *spare = first..first + 32;
         }
-        let claimed = tag << 17 | spare.start as u64;
+        let claimed = tag << 17 | spare.start as u64; // tag above the number
         // From the bucket's first slot to the end of the table, and round again if need be.
         let slots = self.2 .0.as_flattened();
         for slot in slots[index * 8..].iter().chain(slots) {
@@ -230,16 +230,16 @@ impl Run {
         prctl(41, 1usize, 0usize, 0usize, 0usize);
         let (input, len) = (self.0.as_ptr() as *mut u8, self.0.len());
         let mut stats = [[0i64; 8]; 256];
-        let mut pos = [0u32; 191 * 5];
+        let mut pos = [0u32; 191 * 5]; // records per batch * fields per record
         // Each 64-byte step's quote mask, and the number of quote bytes before the step.
-        let mut quotes = [(0u64, 0u32); 64];
+        let mut quotes = [(0u64, 0u32); 64]; // one 2 KiB batch
         // Per record between the passes: the name's hash (later the address of its bit), the name
         // and note lengths (`lengths` in the totals), and -1 for a negative amount, else 0.
-        let [mut hashes, mut lengths] = [[0u64; 191]; 2];
-        let mut signs = [0i64; 191];
+        let [mut hashes, mut lengths] = [[0u64; 191]; 2]; // 191 = batch capacity
+        let mut signs = [0i64; 191]; // -1 for a negative amount, else 0
         let mut spare = 0..0; // name numbers this worker reserved
-        let mut digits = [[0u64; 191]; 3];
-        let mut numbers = [[0u32; 191]; 3];
+        let mut digits = [[0u64; 191]; 3]; // ids, amounts, regions
+        let mut numbers = [[0u32; 191]; 3]; // their decoded values
         while let Some(claim) = take_block(&NEXT[1], 1 << 20, len) {
             // Claims are 1 MiB.
             let end = (claim + (1 << 20)).min(len);
@@ -345,7 +345,7 @@ impl Run {
                     s[4] = s[4].max((1 << 40) + amount);
                     s[5] = s[5].max((1 << 40) - amount);
                     let name = self.intern(hashes[at], &mut spare);
-                    let word = group * 2048 + name / 64;
+                    let word = group * 2048 + name / 64; // 2048 words per row
                     _mm_prefetch::<_MM_HINT_ET0>(self.2 .1.as_ptr().add(word).cast());
                     // The hash is done with, so its slot carries the bit's address to the next pass.
                     hashes[at] = (word << 6 | name % 64) as u64;
