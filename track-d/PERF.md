@@ -93,5 +93,9 @@ S=647, run-646f14ac127b) vs their unsafe-source runs K=31.54-32.87
 (points 74.0-75.84) - the difference is inside their own run-to-run
 noise on unchanged code.
 
-d_traverse.cpp here is the PR #24 fixed source plus the attribution
-header; everything else unchanged from the PR #23 staging.
+d_traverse.cpp here is the PR #24 fixed source (attribution is kept in
+THIRD_PARTY_NOTICES.md at the repo root, not in the file); everything else unchanged from the PR #23 staging.
+
+## Worker-cap experiment, reverted (Nov 2)
+
+A change to this folder capped query workers at 6 and read the cgroup CPU quota (source sha256 165431bebfbc, S=673). Board draws for it: 74.27 and 72.34 points (T=0.100 s and 0.121 s) against 73.5 to 75.6 for the PR #24 source on the same board, and HighVelocity's own public measurement found 12 workers at least as good as 8. With S up by 26 lines and no gain in the draws, the PR #24 source is restored. It is now exactly HighVelocity's published file (sha256 d084d2b3574341...), without a leading comment header; the compiled binary is byte-identical to the earlier credited copy (sha256 d2fdc5baac31). Output was byte-exact either way; this was a speed decision only.

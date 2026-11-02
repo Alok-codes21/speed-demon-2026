@@ -1,20 +1,7 @@
-// Adapted from the MIT-licensed Track D implementation in
-// insightlabs38-pixel/sd-sm (team HighVelocity), their PR #24 race fix:
-// commit 4e018992215560b90dcfd6d0c057b867836ef20c "Fix Track D lost
-// concurrent claims" (source sha256 d084d2b3574341...). PR #23 champion
-// plus an atomic fetch_or claim fix for a concurrent-claim race that could
-// overflow construction buffers (SIGSEGV in their forced-stale-read and
-// high-degree repros on the unsafe source).
-// Copyright (c) 2026 Hackathon Raptors CIC and the contributors of that
-// repository. Source: https://github.com/insightlabs38-pixel/sd-sm
-// Verbatim apart from this attribution header; MIT license terms apply.
-//
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
-#include <cstdlib>
 #include <emmintrin.h>
 #include <fcntl.h>
 #include <numeric>
@@ -722,31 +709,7 @@ int main() {
   const char *env_data = getenv("SD_DATA"), *env_out = getenv("SD_OUT");
   std::string data = env_data ? env_data : "/data";
   std::string out = env_out ? env_out : "/out";
-  // hardware_concurrency() may report host CPUs, not the container quota.
-  // Respect cgroup limits to avoid oversubscribing the benchmark.
-  unsigned threads = std::max(1u, std::min(12u, std::thread::hardware_concurrency()));
-  if (FILE *f = fopen("/sys/fs/cgroup/cpu.max", "r")) {
-    char quota[32] = {}, period[32] = {};
-    if (fscanf(f, "%31s %31s", quota, period) == 2 &&
-        strcmp(quota, "max") != 0) {
-      unsigned long long q = strtoull(quota, nullptr, 10);
-      unsigned long long p = strtoull(period, nullptr, 10);
-      if (p)
-        threads = std::min<unsigned long long>(
-            threads, std::max(1ull, (q + p - 1) / p));
-    }
-    fclose(f);
-  } else if (FILE *f2 = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r")) {
-    long long q = 0, p = 0;
-    FILE *pfile = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
-    if (fscanf(f2, "%lld", &q) == 1 && pfile &&
-        fscanf(pfile, "%lld", &p) == 1 && q > 0 && p > 0)
-      threads = std::min<unsigned long long>(
-          threads, std::max(1ll, (q + p - 1) / p));
-    if (pfile)
-      fclose(pfile);
-    fclose(f2);
-  }
+  unsigned threads = std::min(12u, std::thread::hardware_concurrency());
   if (getenv("SD_THREADS"))
     threads = atoi(getenv("SD_THREADS"));
   threads = std::clamp(threads, 1u, 12u);
@@ -768,11 +731,7 @@ int main() {
   std::sort(by_source.begin(), by_source.end(),
             [&](u32 a, u32 b) { return ends[2 * a] < ends[2 * b]; });
   std::atomic<size_t> next{0};
-  // Query workers each own forward/reverse label stores and queues. The
-  // scoring CPU exposes six physical P-cores as twelve logical CPUs; using
-  // one worker per P-core avoids duplicating that state across SMT siblings.
-  unsigned query_threads = std::min(threads, 6u);
-  parallel(std::min<size_t>(query_threads, queries + 1), [&](unsigned) {
+  parallel(std::min<size_t>(threads, queries + 1), [&](unsigned) {
     // Paths below 65535 are exact with 16-bit labels. Saturated or
     // unreachable results are rerun with exact 64-bit labels.
     Worker<uint16_t> narrow{Side<uint16_t>(*fwd), Side<uint16_t>(*rev)};
