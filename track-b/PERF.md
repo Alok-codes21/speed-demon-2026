@@ -1087,3 +1087,8 @@ the fault theory is dead and B is at its plateau.
 - Two failed web-upload attempts left stray copies 1-main.rs and 2-main.rs (v11 content) in track-b/src/; three sibling commits were empty. Strays deleted 4:35 PM; main.rs = v11 throughout (hash-verified).
 - Runs pinned to bd73ff6 / the v11-restore / PERF-83 commits count all three .rs files: S ~3615, pts ~72.9-73.5. That is a line-count artifact, not an engine regression: identical v11 machine text, one extra file copy each. Delete-commit runs and later measure the clean tree (S ~1206) and are the ones that count for the freeze median.
 - Lesson recorded: uploads only via the execute-js DataTransfer push script (verified COMMIT-CLICKED + on-repo readback); the upload-file tool produced the strays/empty commits.
+
+## Step 85: freeze-median A/B - fresh v9 runs vs v11 (measurement only, both exact on any seed)
+
+- Why: v11's clean today-runs drifted wide - 0.105443 / 0.106129 / 0.108313 / 0.110175 / 0.119115 (5-run median 0.108313) - while v9's 4-run median stands at 0.1073 (spread 0.1047-0.1080, S 1189 vs v11's 1206, so v9 also saves 0.21% on S). Local ABBA and the serial-tail argument favor v11's itoa (~-1.5% min); today the box disagrees within noise. Alok's freeze rule is best board median among freeze-safe engines, so both get fresh same-box data.
+- This push: v9 back on tip (identical content to the step-79 engine, hash-verified). PERF touch after it queues v9's second fresh run. Decision ~5:45 PM: tip = engine with the better fresh-run median on POINTS (T and S priced in); restore follows in one push before the 6:30 PM trial cutoff.
