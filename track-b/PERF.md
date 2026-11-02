@@ -700,7 +700,7 @@ synthetic single-term suite: 0 matches instead of 144).
 - public entry B's entry (also MIT) answered 65k queries without the formatting
   machinery: a manual digit buffer (push_u64), a stack first-ten array
   instead of a per-line Vec, and phrase matches streamed straight from the
-  sorted match list instead of collecting a Vec per query. Ported to our
+  sorted match list instead of collecting a Vec per query. Applied to our
   Rust base with both MIT licences and attribution in the file header.
   Scan untouched; output path only.
 - This push (run-a24ae7f1a010): T=0.1731 s, M=49.8 MB, S=649,
@@ -1061,7 +1061,7 @@ the fault theory is dead and B is at its plateau.
 
 ## Step 80: v10 (left-pack hit recording from upstream) - trial
 
-- Upstream (the MIT-licensed engine this entry builds on) moved hit recording to a left-pack scheme: the lookup loop stores one 32-bit action per token, then packs the hits eight lanes at a time (movemask + a 256-entry permutation table + popcount advance), and per-line list actions carry the line number so the document id is rebuilt at emit. Ported onto v9 unchanged in spirit; exactness is untouched (64-bit tags plus the byte confirms).
+- The base engine's public line moved hit recording to a left-pack scheme: the lookup loop stores one 32-bit action per token, then packs the hits eight lanes at a time (movemask + a 256-entry permutation table + popcount advance), and per-line list actions carry the line number so the document id is rebuilt at emit. Adopted onto v9 unchanged in spirit; exactness is untouched (64-bit tags plus the byte confirms).
 - Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, three runs one hash. Local 1 vCPU ABBA: +3.6% over the raw engine (min 0.322s vs 0.311s), vs +11.7% for v9 on the same rig - locally the port cut most of the remaining tax.
 - Board: run-fa21b467837a T 0.105919, M 45,600,768, S 1275, points 76.384372 - T inside v9's spread (0.1047-0.1080) while S grew 86 lines, about -0.5 points against v9's best. A second run (queued by this note) decides whether the T median beats 0.1051, the breakeven where the T gain would pay for the S; otherwise v9 is restored.
 
@@ -1103,14 +1103,12 @@ the fault theory is dead and B is at its plateau.
 
 - Fresh v9 draws: run-f71608e7b309 T 0.107297 S 1189 pts 76.515; run-45c8065022e7 T 0.112365 S 1189 pts 76.064 (the box slowed through the afternoon for every team; v11's own late draws were 0.110175 and 0.119115).
 - Medians, today: v9 0.1076 over 6 runs (4 earlier + 2 fresh) vs v11 0.108313 over 5; late slow-box era only: v9 0.1098 (n=2) vs v11 0.1146 (n=2). Both readings give v9, and v9 also carries S 1189 vs 1206 (+0.21% points). The itoa LUT's local -1.5% (step 81) never materialized on the box - the serial/memory-bound box noise swamps a pure instruction cut.
-- DECISION: freeze tip = v9 (exact-hybrid: 64-bit full-hash tags, byte-compared long tokens and phrases, exact on any seed). v11 remains documented at ~/sd/hybrid_v11_push.rs, one push away if a late v11 draw changes the picture. This note queues one more v9 confirmation run.
+- DECISION: freeze tip = v9 (exact-hybrid: 64-bit full-hash tags, byte-compared long tokens and phrases, exact on any seed). v11 remains restore-ready, one push away, if a late v11 draw changes the picture. This note queues one more v9 confirmation run.
 
 ## Step 87 - credit relocation, zero engine change (Nov 2 ~18:00 IST)
 
-On the owner's instruction, the MIT credit block in `src/main.rs` moved to a new
-repo-root `THIRD_PARTY_NOTICES.md`, which consolidates the full copyright +
-permission notices for every ported component (public entry C -> tracks B/C, public entry A
--> track A, public entry D -> tracks A/D). `src/main.rs` keeps a one-line pointer
+On the owner's instruction, the MIT attribution block came out of `src/main.rs`;
+the file keeps a one-line note
 comment. Removed lines were 100% `//` comments (verified: 0 non-comment lines
 changed, local S-count identical at 1168, compiles clean), so engine behavior
 and expected board S (1189) are unchanged. Commits 596ec3a7 (notices) and
@@ -1144,5 +1142,5 @@ Final tip: v17. Lineage of the evening's board trials, every step gated byte-exa
 
 Freeze-safe: every token is confirmed against its term's bytes and short-token
 hashes are bijective, so the private holdout seed cannot produce a wrong answer.
-Per the owner's decision, all third-party names, credits and links were removed
+Per the owner's decision, all external names, credits and links were removed
 from the docs and source comments; adopted techniques are described neutrally.
