@@ -1065,7 +1065,7 @@ impl Run {
         self.barrier();
         // Threads that wake late find fewer claims left, instead of delaying everyone.
         // 12 claims are read to choose the terms that get bitmaps.
-        self.each_job(&self.setup[0], 3, |claim| { // 3 x 1 MiB = the same 3 MiB sample
+        self.each_job(&self.setup[0], 12, |claim| { // 12 x 1 MiB: every thread samples
             self.setup[4].fetch_add(self.index_claim::<true>(claim, &mut buffers), Relaxed);
         });
         let terms = self.term_count.load(Relaxed);
