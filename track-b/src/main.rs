@@ -81,7 +81,7 @@ const HEADER: usize = 1;
 const JOBS: usize = 16;
 const TALLY_IDS: usize = 10;
 const BATCH: usize = 1 << 14; // bytes of text between the token pass and the term pass
-const BUCKETS: usize = 1 << 16;
+const BUCKETS: usize = 1 << 15;
 const BUCKET_SLOTS: usize = 4;
 const ID_BLOCK: usize = 32; // term ids a thread takes at once while parsing queries
 const MAX_TERMS: usize = BUCKETS * BUCKET_SLOTS + 64 * ID_BLOCK;
@@ -605,18 +605,11 @@ impl Run {
                 // Line-grained when the long tokens fit the side list: only a line that
                 // actually holds one runs the confirming loop. (Batch-grained flagging
                 // cost +15%: about 6% of 16KB batches paid a whole second pass.)
-                let r = if force_all {
-                    scan_checking(
-                        self, b, buckets, text, line_count, token, doc,
-                        heavy_count, list_count, anchor_count,
-                    )
-                } else {
-                    scan_mixed(
-                        self, b, buckets, text, line_count, token, doc,
-                        heavy_count, list_count, anchor_count,
-                        &long_lines[..long_count],
-                    )
-                };
+                let r = scan_mixed(
+                    self, b, buckets, text, line_count, token, doc,
+                    heavy_count, list_count, anchor_count,
+                    &long_lines[..long_count], force_all,
+                );
                 token = r.0; doc = r.1; heavy_count = r.2; list_count = r.3; anchor_count = r.4;
             } else {
                 for line in 0..line_count {
@@ -1342,65 +1335,10 @@ fn spawn_tree<'scope, 'env>(scope: &'scope thread::Scope<'scope, 'env>, run: &'e
     unsafe { run.work(id) };
 }
 
-/// The checking pass for a batch that holds a token over 16 bytes: such a token went
-/// through the long-token mix, not the bijective short hash, so a hit of its is confirmed
-/// against the term's bytes before it counts. Outlined and cold: the common batch keeps
-/// the original loop's codegen, and only a rare batch pays for the exactness work.
-#[cold]
-#[inline(never)]
-unsafe fn scan_checking(
-    run: &Run,
-    b: &mut Buffers,
-    buckets: *const Bucket,
-    text: *const u8,
-    line_count: usize,
-    mut token: usize,
-    mut doc: usize,
-    mut heavy_count: usize,
-    mut list_count: usize,
-    mut anchor_count: usize,
-) -> (usize, usize, usize, usize, usize) {
-    let (starts, ends, hashes) = (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_ptr());
-    let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
-    let (heavy_hits, list_hits) = (b.heavy_hits.as_mut_ptr(), b.list_hits.as_mut_ptr());
-    for line in 0..line_count {
-        let to = b.lines[line] as usize;
-        while token < to {
-            let ahead = bucket_of(*hashes.add(token + AHEAD));
-            _mm_prefetch::<_MM_HINT_T0>(buckets.add(ahead).cast());
-            let mut action = action_in(buckets, *hashes.add(token));
-            if action != 0 {
-                let (from, upto) = span(token);
-                if upto - from > 16
-                    && !term_eq(run, action_term(run, action), text.add(from), upto - from)
-                {
-                    action = 0;
-                }
-            }
-            *heavy_hits.add(heavy_count) = action;
-            heavy_count += (action >> 31) as usize;
-            *list_hits.add(list_count) = (action as u64) << 32 | doc as u64;
-            list_count += (action.wrapping_sub(1) < HEAVY - 1) as usize;
-            if action & ANCHOR != 0 {
-                *b.anchor_hits.get_unchecked_mut(anchor_count) =
-                    (action as u64) << 40 | (doc as u64) << 20 | token as u64;
-                anchor_count += 1;
-            }
-            token += 1;
-        }
-        *b.heavy_ends.get_unchecked_mut(line) = heavy_count as u32;
-        if line + 1 < line_count {
-            doc += 1;
-            b.hashes[to] = 0;
-            token = to + 1;
-        }
-    }
-    (token, doc, heavy_count, list_count, anchor_count)
-}
-
-/// The line-grained checking pass: a line in `long_lines` runs the confirming loop (a
-/// long token went through the long-token mix, not the bijective short hash, so a hit of
-/// its is checked against the term's bytes); every other line runs the original loop.
+/// The line-grained checking pass: a line in `long_lines` (or every line, when `all`
+/// says the side list overflowed) runs the confirming loop - a long token went through
+/// the long-token mix, not the bijective short hash, so a hit of its is checked against
+/// the term's bytes; every other line runs the original loop.
 #[cold]
 #[inline(never)]
 unsafe fn scan_mixed(
@@ -1415,6 +1353,7 @@ unsafe fn scan_mixed(
     mut list_count: usize,
     mut anchor_count: usize,
     long_lines: &[u32],
+    all: bool,
 ) -> (usize, usize, usize, usize, usize) {
     let (starts, ends, hashes) = (b.starts.as_ptr(), b.ends.as_ptr(), b.hashes.as_ptr());
     let span = |i: usize| (*starts.add(i) as usize, *ends.add(i) as usize);
@@ -1422,8 +1361,8 @@ unsafe fn scan_mixed(
     let mut li = 0usize;
     for line in 0..line_count {
         let to = b.lines[line] as usize;
-        let checking = li < long_lines.len() && long_lines[li] as usize == line;
-        li += checking as usize;
+        let checking = all || li < long_lines.len() && long_lines[li] as usize == line;
+        li += (checking && !all) as usize;
         if checking {
             while token < to {
                 let ahead = bucket_of(*hashes.add(token + AHEAD));
