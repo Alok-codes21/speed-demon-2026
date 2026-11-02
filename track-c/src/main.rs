@@ -154,6 +154,21 @@ fn take_block(counter: &AtomicUsize, size: usize, len: usize) -> Option<usize> {
     Some(counter.fetch_add(size, Relaxed)).filter(|&at| at < len)
 }
 
+// Records are claimed in 1 MiB blocks, shrinking to 256 KiB over the last sixteenth so the
+// finish is not spread over one full claim. Page-aligned for the MADV_DONTNEED. Which claim
+// parses a record never changes the sums; a claim smaller than one record finds no start.
+fn take_guided(counter: &AtomicUsize, len: usize) -> Option<(usize, usize)> {
+    let mut at = counter.load(Relaxed);
+    while at < len {
+        let size = ((len - at) / 16).clamp(1 << 18, 1 << 20) & !4095;
+        match counter.compare_exchange_weak(at, at + size, Relaxed, Relaxed) {
+            Ok(_) => return Some((at, size)),
+            Err(now) => at = now,
+        }
+    }
+    None
+}
+
 impl Run {
     /// The number of a name, new if this is its first appearance.
     unsafe fn intern(&self, hash: u64, spare: &mut Range<usize>) -> usize {
@@ -258,9 +273,9 @@ impl Run {
         let mut spare = 0..0; // name numbers this worker reserved
         let mut digits = [[0u64; MAX_RECORDS]; 3];
         let mut numbers = [[0u32; MAX_RECORDS]; 3];
-        while let Some(claim) = take_block(&NEXT[1], 1 << 20, len) {
-            // Claims are 1 MiB.
-            let end = (claim + (1 << 20)).min(len);
+        while let Some((claim, size)) = take_guided(&NEXT[1], len) {
+            // Claims start at 1 MiB and shrink near the file's end.
+            let end = (claim + size).min(len);
             // The first record at or after `claim`.
             let from = claim.saturating_sub(1);
             let begins = |pair: &[u8]| pair[0] == b'\n' && matches!(pair[1], b'0'..=b'9' | 0xEF);
