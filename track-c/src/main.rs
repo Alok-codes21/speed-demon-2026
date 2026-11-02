@@ -371,11 +371,7 @@ impl Run {
                 }
                 for &bit in &hashes[..count] {
                     let word = self.2 .1.get_unchecked((bit >> 6) as usize);
-                    let mask = 1 << (bit & 63);
-                    // Most records repeat a seen name: a plain load skips the locked op.
-                    if word.load(Relaxed) & mask == 0 {
-                        word.fetch_or(mask, Relaxed);
-                    }
+                    word.fetch_or(1 << (bit & 63), Relaxed);
                 }
 
                 pos.copy_within(count * FIELDS..filled, 0);
