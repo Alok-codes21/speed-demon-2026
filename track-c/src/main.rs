@@ -69,6 +69,9 @@ const BIAS: i64 = 1 << 40;
 
 // Counters that hand out work: region claims, record claims, huge pages to zero, name numbers.
 static NEXT: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
+// Setup items finished: pre-faulted huge pages plus region claims. Workers wait for the
+// work, not for every thread to arrive: the tree's last spawn lags by milliseconds.
+static SETUP: AtomicUsize = AtomicUsize::new(0);
 // Region id to group, and country code (as base-26 digits) to group. Both start zeroed.
 static REGION_GROUP: [AtomicU8; REGION_IDS + 1] = [const { AtomicU8::new(0) }; REGION_IDS + 1];
 static LETTERS: [OnceLock<u8>; 26 * 26 * 26] = [const { OnceLock::new() }; 26 * 26 * 26];
@@ -154,21 +157,6 @@ fn take_block(counter: &AtomicUsize, size: usize, len: usize) -> Option<usize> {
     Some(counter.fetch_add(size, Relaxed)).filter(|&at| at < len)
 }
 
-// Records are claimed in 1 MiB blocks, shrinking to 256 KiB over the last sixteenth so the
-// finish is not spread over one full claim. Page-aligned for the MADV_DONTNEED. Which claim
-// parses a record never changes the sums; a claim smaller than one record finds no start.
-fn take_guided(counter: &AtomicUsize, len: usize) -> Option<(usize, usize)> {
-    let mut at = counter.load(Relaxed);
-    while at < len {
-        let size = ((len - at) / 16).clamp(1 << 18, 1 << 20) & !4095;
-        match counter.compare_exchange_weak(at, at + size, Relaxed, Relaxed) {
-            Ok(_) => return Some((at, size)),
-            Err(now) => at = now,
-        }
-    }
-    None
-}
-
 impl Run {
     /// The number of a name, new if this is its first appearance.
     unsafe fn intern(&self, hash: u64, spare: &mut Range<usize>) -> usize {
@@ -229,9 +217,11 @@ impl Run {
         }
         // Zeroing a huge page takes a few hundred microseconds, so the workers share it and do
         // it while the regions load. It must end before huge pages are disabled.
-        let page = NEXT[2].fetch_add(1, Relaxed) * HUGE_PAGE;
-        if page < size_of::<Tables>() {
+        let mut page = NEXT[2].fetch_add(1, Relaxed) * HUGE_PAGE;
+        while page < size_of::<Tables>() {
             (*(self.2 as *const Tables as *const AtomicU8).add(page)).store(0, Relaxed);
+            SETUP.fetch_add(1, Release);
+            page = NEXT[2].fetch_add(1, Relaxed) * HUGE_PAGE;
         }
         // Region claims are 64 KiB. Each starts after the first LF at or past its start, so the
         // header goes to nobody and a line belongs to the claim holding the LF before it.
@@ -256,8 +246,18 @@ impl Run {
                 // Past the id, its comma, the three-letter code and the LF.
                 line += at + 5;
             }
+            SETUP.fetch_add(1, Release);
         }
-        self.3.wait();
+        // Wait for the setup work (pre-faults and region claims), not for all workers to arrive.
+        let items = size_of::<Tables>().div_ceil(HUGE_PAGE) + self.1.len().div_ceil(1 << 16);
+        let mut spins = 0u32;
+        while SETUP.load(Acquire) < items {
+            std::hint::spin_loop();
+            spins += 1;
+            if spins > 1 << 12 {
+                std::thread::yield_now();
+            }
+        }
         // Records follow. PR_SET_THP_DISABLE is
         // idempotent, and set before the worker allocates anything for them.
         prctl(41, 1usize, 0usize, 0usize, 0usize);
@@ -273,9 +273,9 @@ impl Run {
         let mut spare = 0..0; // name numbers this worker reserved
         let mut digits = [[0u64; MAX_RECORDS]; 3];
         let mut numbers = [[0u32; MAX_RECORDS]; 3];
-        while let Some((claim, size)) = take_guided(&NEXT[1], len) {
-            // Claims start at 1 MiB and shrink near the file's end.
-            let end = (claim + size).min(len);
+        while let Some(claim) = take_block(&NEXT[1], 1 << 20, len) {
+            // Claims are 1 MiB.
+            let end = (claim + (1 << 20)).min(len);
             // The first record at or after `claim`.
             let from = claim.saturating_sub(1);
             let begins = |pair: &[u8]| pair[0] == b'\n' && matches!(pair[1], b'0'..=b'9' | 0xEF);
