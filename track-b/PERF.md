@@ -1092,3 +1092,7 @@ the fault theory is dead and B is at its plateau.
 
 - Why: v11's clean today-runs drifted wide - 0.105443 / 0.106129 / 0.108313 / 0.110175 / 0.119115 (5-run median 0.108313) - while v9's 4-run median stands at 0.1073 (spread 0.1047-0.1080, S 1189 vs v11's 1206, so v9 also saves 0.21% on S). Local ABBA and the serial-tail argument favor v11's itoa (~-1.5% min); today the box disagrees within noise. Alok's freeze rule is best board median among freeze-safe engines, so both get fresh same-box data.
 - This push: v9 back on tip (identical content to the step-79 engine, hash-verified). PERF touch after it queues v9's second fresh run. Decision ~5:45 PM: tip = engine with the better fresh-run median on POINTS (T and S priced in); restore follows in one push before the 6:30 PM trial cutoff.
+
+### Step 85b: v9 A/B - first fresh draw, queueing one more
+
+- Fresh v9 run (pinned to an A-side commit, B tip = v9): run-f71608e7b309 T 0.107297, M 44.7MB, S 1189, points 76.515 - on v9's old 4-run median (0.1073) and ahead of v11's today-median points (76.400). This note queues v9's second fresh run; the winner is decided on points-median (breakeven T_v9 = 0.1088 vs v11's 0.108313 once S is priced in).
