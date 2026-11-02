@@ -133,12 +133,6 @@ unsafe fn decode_digits(words: &[u64], numbers: &mut [u32], count: usize) {
 unsafe fn name_hash(name: *const u8, len: usize) -> (u64, usize) {
     // 32 bytes of ones then 32 of zeros: loading at 32 - len keeps the first `len` bytes.
     static MASKS: [[u8; 32]; 2] = [[0xFF; 32], [0; 32]];
-    if len >= 32 {
-        // Cold: hash the first 31 bytes and the rest apart, and combine them.
-        let (a, b) = (name_hash(name, 31), name_hash(name.add(31), len - 31));
-        let hash = (a.0.rotate_left(23) ^ b.0).wrapping_mul(0xE703_7ED1_A0B4_28DB);
-        return (hash | 1, a.1 + b.1);
-    }
     let bytes = _mm256_and_si256(load(name), load(MASKS.as_ptr().cast::<u8>().add(32 - len)));
     let quotes = equal_mask(bytes, b'"').count_ones() as usize;
     let key = _mm_set_epi64x(0x1D8E_4E27_C47D_124F, len as i64 ^ 0x5899_65CC_7537_4CC3);
