@@ -1113,3 +1113,18 @@ comment. Removed lines were 100% `//` comments (verified: 0 non-comment lines
 changed, local S-count identical at 1168, compiles clean), so engine behavior
 and expected board S (1189) are unchanged. Commits 24dd7594 (notices) and
 d27eb9ad (main.rs header).
+
+## Step 88 - v14 1 MiB claims + v15 SIMD left-pack (Nov 2 ~19:40 IST)
+
+Two AVENGERS-derived trials, each gated byte-exact (tiny/sample/full vs the prior
+engine, six fuzz seeds vs reference, deterministic reruns):
+
+- v14: claim granularity 256 KiB -> 1 MiB (PHASE_CLAIMS 200 -> 50, sample 12 -> 3;
+  same 50 MiB coverage and 3 MiB sample). Board draws T 0.111855 / 0.109273 /
+  0.109712 (median 0.109712) vs v9's 0.107297 / 0.112365 / 0.111101
+  (median 0.111101). Kept: median -1.2%.
+- v15: left-pack the scan hits eight tokens at a time (permutevar8x32 with a
+  256-entry pack table, from AVENGERS tools/wt_b51) instead of three scalar
+  stores per token; heavy and list outputs are byte-identical by construction.
+  Board draw 1: run-96ea56f9e043 T 0.106881, S 1250, pts 76.502. Second draw
+  pending on this commit.
