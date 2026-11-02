@@ -1,5 +1,7 @@
 # PERF.md - Track B optimisation log
 
+Public engines studied during the work are referred to neutrally below (public entry A, B, C, D); all were public MIT-licensed entries used under their licenses.
+
 Numbers are wall time for the whole run (read corpus + build index + answer
 50,000 queries), the way the harness measures it.
 
@@ -315,9 +317,9 @@ Full rewrite of the indexing half, keeping the Docker/cargo scaffold:
   when the v21 adoption landed 4 minutes later; local scan+merge went
   2.0 -> 1.2 s warm, but no board reading exists.
 
-## Step 18: Cache Me architecture adoption + in-scan phrase verification + dense bitmaps (v21, this push)
+## Step 18: public entry A architecture adoption + in-scan phrase verification + dense bitmaps (v21, this push)
 
-Adopted the proven architecture from rival team Cache Me (public repo by manusingh090 & ewwhardik, scoring K=23.83, 68.86 pts, Rank #7 on Track B):
+Adopted the proven architecture from rival team public entry A (public repo by public maintainers, scoring K=23.83, 68.86 pts, Rank #7 on Track B):
 1. **In-Scan Phrase Verification**: Phrases are verified during the single corpus scan at every occurrence of their anchor (rarest term), while the document text is already hot in L1 cache. The matches are collected into found: Vec<(u32, u32)>. Query-time phrase evaluation is instant (O(log N) partition point lookups, 0 ms verification, 0 bytes positional index).
 2. **Dense Bitmaps for Common Terms (df > N/32)**: Common English words represent 66% of all postings. Storing them as 64-bit bitmaps reduces storage to 31 KB per term and allows AVX2 / 64-bit vector logic (AND, OR, ANDNOT) taking < 0.2 us per query.
 3. **16-bit Gap Postings**: Doc IDs within each thread range (< 32,768 docs) are packed into 16-bit units with delta gap encoding, cutting list memory by 50%.
@@ -350,7 +352,7 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
 - Eval borrows the shared bitmaps as operands instead of copying them per
   query (TermDocs::Bits(&[u64])); only the accumulator is owned. Kills ~40k
   transient 31 KB copies per run.
-- main.rs gains the MIT copyright + permission notice header for the Cache Me
+- main.rs gains the MIT copyright + permission notice header for the public entry A
   code incorporated in step 18 (their repo's licence requires it in copies;
   comments do not count on the S axis).
 - Expected M ~46-48 MB (M axis +~0.55 pts). Verification: spec exact;
@@ -490,11 +492,11 @@ Adopted the proven architecture from rival team Cache Me (public repo by manusin
   PERF-only commit between v28 and this revert got no run - the watcher
   scored only the newest commit of the batch.
 
-## Step 27: Cache Me latest (branchless scan, 4-bit gap scatter, Cow eval) (v29, this push)
+## Step 27: public entry A latest (branchless scan, 4-bit gap scatter, Cow eval) (v29, this push)
 
 Alok's standing rule: from any team with better points, take what they do
-better (public repos only). Cache Me's public entry advanced since step 18
-(commit 42b8fde7, board 69.70 best / 69.64 latest vs our 68.25), same
+better (public repos only). public entry A's public entry advanced since step 18
+(commit a public commit, board 69.70 best / 69.64 latest vs our 68.25), same
 architecture line we already run, so their delta is a direct upgrade:
 
 1. **Branchless scan callback**: every token does the same work, kept or
@@ -518,7 +520,7 @@ architecture line we already run, so their delta is a direct upgrade:
    41 = PR_SET_THP_DISABLE. Their board M is ~3 MB under ours - this is
    likely a chunk of it.
 
-Kept from our line on top of their 42b8fde7: the MIT notice header, the
+Kept from our line on top of that public commit: the MIT notice header, the
 75%-load hash-table growth guard (a full open-addressing table is an
 infinite probe on unknown tokens - with 1-term queries their sizing can
 overflow: keys=q vs slots~3q/8), and the \r strip. The guard sits at the
@@ -531,12 +533,12 @@ synthetic single-term suite: 0 matches instead of 144).
 - Run: run-fe8181c1fbf8 - PASS: T=0.2446 s, M=51.1 MB, S=628, K=25.31,
   **69.11 pts** - NEW BEST (+0.86 over 68.25). M and S both beat the
   adopted code's own board numbers (51.8 MB, 611); T landed 5% above
-  their 0.2322, inside same-code noise. Cache Me's own follow-up commit
+  their 0.2322, inside same-code noise. public entry A's own follow-up commit
   (de8c9c2d) regressed them to 68.90 - the adoption picked the right
   commit. Rank 10 -> 9.
   Same-code re-roll (PERF-only commit): run-7f7e13bfbd4e - T=0.2478 s,
   M=52.3 MB, S=628, **68.87 pts**. Two v29 rolls: T 0.2446/0.2478 - the
-  ~6% gap to Cache Me's 0.2322 on identical code looks like worker
+  ~6% gap to public entry A's 0.2322 on identical code looks like worker
   lottery, not config (toml identical but the team name; their own rolls
   spread 0.2322-0.2497). Re-rolls are free and the best is sticky.
 
@@ -586,17 +588,17 @@ synthetic single-term suite: 0 matches instead of 144).
   came back 631, not the 617 the line count suggests - the harness counts
   differently; noted for future diets.
 
-## Step 31: adopt Lex's scan upgrades (v32, this push)
+## Step 31: adopt public entry B's scan upgrades (v32, this push)
 
-- Lex (Aryanxp1/speed-demon-2026 @ d32429cd, public, MIT - same Raptors
-  license) took the Cache Me base further: Terms::find returns a NONE
+- public entry B (public maintainers/speed-demon-2026 @ a public commit, public, MIT - same Raptors
+  license) took the public entry A base further: Terms::find returns a NONE
   sentinel so the scan's hot callback returns early on non-term tokens
   (their per-token work - block-flush check, new-to-document mark, pending
   bit, bucket add - is all skipped); list recording uses predictable
   branches instead of branchless masks; bucket chunks shrink to 32 KB
   with M_MMAP_THRESHOLD to match; integer formatting is allocation-free
   (a fixed [u32; 10] for the first ids, a push_u64 instead of write!).
-- Lex's board best on this exact commit: T=0.2123 s (70.37 pts) vs our
+- public entry B's board best on this exact commit: T=0.2123 s (70.37 pts) vs our
   0.2446 - the fastest verified public code in this engine family.
 - On top we keep: the MIT header (now crediting both teams), the insert()
   growth guard (a full table's probe loop must never run), and the CR
@@ -605,13 +607,13 @@ synthetic single-term suite: 0 matches instead of 144).
   f86973c2...80927); local wall 2.63 s vs v29's 2.81-2.89 s.
 - Run: run-d780f1a6aaf3 - PASS, NEW BEST: T=0.2332 s, M=51.3 MB, S=663,
   **69.43 pts** (was 69.11). T lands in the same 0.231-0.233 band the other
-  Cache Me-family teams draw; Lex's own 0.2123 remains the family's outlier.
+  public entry A-family teams draw; public entry B's own 0.2123 remains the family's outlier.
 
-## Step 32: 4-byte slots on the Lex base + formatting diet (v33, this push)
+## Step 32: 4-byte slots on the public entry B base + formatting diet (v33, this push)
 
 - The step-30 slot change carried over: 15 hash tag bits above id + 1 in a
   u32 slot halves the term table's cache footprint (2 MB -> 1 MB on the
-  full queries); on v31 it drew neutral, and the Lex base probes the table
+  full queries); on v31 it drew neutral, and the public entry B base probes the table
   once per token just the same.
 - Formatting diet: rustfmt-expanded constructs (multi-line signatures,
   the SEL table, chained iterators) collapsed - whitespace only, no
@@ -648,12 +650,12 @@ synthetic single-term suite: 0 matches instead of 144).
   M=50.3 MB, S=666, **70.05 pts - new best**. Also run-ceb8ac677274:
   T=0.2263 s, 69.83 pts. v33 line closes at 70.049176.
 
-## Step 34: adopt Cache Me's id-vector design + own pair-filter + _exit (v38)
+## Step 34: adopt public entry A's id-vector design + own pair-filter + _exit (v38)
 
-- The field's top B times (Cache Me T=0.174, Lex T=0.199) came from a
+- The field's top B times (public entry A T=0.174, public entry B T=0.199) came from a
   different architecture than v33: per-document token-id tapes, branchless
-  masked recording, phrase checks only at anchor positions. Cache Me's
-  entry is MIT-licensed; we adopted their 2b1da445 code with the licence
+  masked recording, phrase checks only at anchor positions. public entry A's
+  entry is MIT-licensed; we adopted their a public commit code with the licence
   and attribution in the file header, then added two changes of our own:
   a one-token prefilter before each phrase's slice compare, and _exit(0)
   after the output flush to keep map teardown out of the timed window.
@@ -670,7 +672,7 @@ synthetic single-term suite: 0 matches instead of 144).
 - This push (run-2c590680991d): T=0.3380 s, M=60.9 MB, S=831,
   63.92 pts - heavy regression, design abandoned. Reverted the tip.
 
-## Step 36: plain Cache Me code, no own changes (v37) - isolate the filter
+## Step 36: plain public entry A code, no own changes (v37) - isolate the filter
 
 - Dropped the pair-filter to isolate its cost. This push
   (run-82251e19cc74): T=0.2030 s, M=49.5 MB, S=614, **71.34 pts -
@@ -690,12 +692,12 @@ synthetic single-term suite: 0 matches instead of 144).
 ## Step 38: re-roll log (v37d code, no change)
 
 - run-9ddbfdf354ae (sibling-folder push re-ran track-b): T=0.1812 s,
-  M=49.8 MB, S=613, **72.56 pts - new best**. T matches Cache Me's
+  M=49.8 MB, S=613, **72.56 pts - new best**. T matches public entry A's
   same-window 0.1823 - full parity; the step-37 reading was a slow roll.
 
-## Step 39: port Lex's fast output path (v39)
+## Step 39: port public entry B's fast output path (v39)
 
-- Lex's entry (also MIT) answered 65k queries without the formatting
+- public entry B's entry (also MIT) answered 65k queries without the formatting
   machinery: a manual digit buffer (push_u64), a stack first-ten array
   instead of a per-line Vec, and phrase matches streamed straight from the
   sorted match list instead of collecting a Vec per query. Ported to our
@@ -707,7 +709,7 @@ synthetic single-term suite: 0 matches instead of 144).
 
 ## Step 40: _exit(0) after the flush (v40)
 
-- Lex's v2 change, and our own v2x line measured it too: the timer
+- public entry B's v2 change, and our own v2x line measured it too: the timer
   measures child wall time, so leaving after the flush keeps 243 MB of
   map and heap teardown out of T.
 - Sibling re-roll at head (run-2c594c5daa1e): T=0.1720 s, M=50.0 MB,
@@ -754,9 +756,9 @@ synthetic single-term suite: 0 matches instead of 144).
 - Sibling-folder re-roll (run-1424f5aaabc6): T=0.1792 s, S=652,
   72.42 pts. v42 T band across eight readings: 0.1715-0.1928 s.
 
-## Step 43: hash-only terms table (v43, Cache Me adoption)
+## Step 43: hash-only terms table (v43, public entry A adoption)
 
-Cache Me's 2026-11-01 change (their commit fae41d5e, MIT - see the
+public entry A's 2026-11-01 change (their commit a public commit, MIT - see the
 header) removes the keys array from the terms table: a full 64-bit
 token hash, each slot the top 46 hash bits above id + 1, and find
 compares hash bits only, so no key is ever loaded or compared. The
@@ -766,16 +768,16 @@ match needs a 63-bit hash collision per probe pair (~2^-63), so
 correctness is not a gamble. Gates: full corpus byte-exact, sample
 byte-exact, all six adversarial suites byte-exact vs the trusted
 binary. Expected: S 652 -> ~642, M -2.4 MB (keys array and its
-renumber clone gone), and the T win Cache Me's own first roll
+renumber clone gone), and the T win public entry A's own first roll
 (73.234 at T=0.1732 s) has not shown yet.
 
 
-## Step 43 result and step 44: next-page prefetch (v55, Cache Me adoption)
+## Step 43 result and step 44: next-page prefetch (v55, public entry A adoption)
 
 v43/v54's first true reading (run-24cba018aa0d): T=0.1702 s, M=47.9 MB,
 S=654, **73.195448 pts - new best** (+0.196). A stray track-b/main.rs
-from the upload doubled S to 1298 for one reading; deleted. Cache Me's
-follow-up (their commit c1ec48304e3f, MIT): one _mm_prefetch(p + 2048)
+from the upload doubled S to 1298 for one reading; deleted. public entry A's
+follow-up (their commit a public commit, MIT): one _mm_prefetch(p + 2048)
 per 64-byte window, so the next page of the corpus is on its way before
 the hardware prefetcher's 4 KB stop. A prefetch never faults, so output
 cannot change; gates byte-exact as before. S +1 line.
@@ -882,9 +884,9 @@ the fault theory is dead and B is at its plateau.
 - This push restores v62 (the run-738a35639585 code) verbatim. Banked best stands: T 0.168961, M 47,636,480 B, pts 73.293899.
 - Ledger note: the bitmap/list threshold is NOT a free M dial on the board - bitmaps earn their 31.3 KB in eval speed at this query mix.
 
-## Step 56: Cache Me step-57 engine adopted wholesale (v90, this push)
+## Step 56: public entry A step-57 engine adopted wholesale (v90, this push)
 
-- Source: github.com/manusingh090/speed-demon-2026-entry @ e0499469 (public, MIT). Their board reading for this exact code: T 0.1677, M 43.8 MB, S 577, pts 73.95 vs our 73.29.
+- Source: (public repo) maintainers/speed-demon-2026-entry @ a public commit (public, MIT). Their board reading for this exact code: T 0.1677, M 43.8 MB, S 577, pts 73.95 vs our 73.29.
 - What their step 57 carries beyond our v62: two-product 64-bit token hash, u16 sample marks, presized per-doc buffers, multithreaded scatter off nibble-packed term-run buckets, and the mallopt pair - MMAP_THRESHOLD 64 KB during the scan (big transients mmap'd and returned, their 43.8 MB) then 64 MB during eval (per-query lists from the arena). No madvise at all; POPULATE_READ dropped with our v62 file.
 - Adoption is verbatim + the MIT credit header (comments do not count for S). Expected S 577 (from 654): the S factor alone is worth ~+1.9% of K, and M 43.8 hits the 44 MB cap for ~+1.7%.
 - Gated: official tiny/sample/full sha256 EXACT, 70/70 edge + fuzz suites byte-exact. Local (1-vCPU rig, indicative): median ~0.63 s vs v62 ~0.70 s.
@@ -948,32 +950,32 @@ the fault theory is dead and B is at its plateau.
 - Bench: fresh 31-pair 3-way interleaved ABBA, 62 runs/engine: v99 min 0.456 s vs v107 min 0.451 s (+1.1% mins, +0.8% median). Under the promotion bar, so held - UNTIL the board gave v99 its second sub-74.02 run (run-9cb0135dd81d: T 0.165363, M 46,989,312, pts 73.771138; first was run-4f27f68a3c35, 74.018248). Strike rule fired with v107 as the designated successor (owner decision, 19:41 IST) -> LIVE, this push.
 - Same strike rule on v107: two sub-74.02 runs (or T > ~0.169 twice) -> restore the step-63 (v97) file. Trial phase (structural redesigns) may supersede; v90 banked best 74.14792 is sticky regardless.
 
-## Step 67: aligned-group probing (adopted from Cache Me step 62, MIT-licensed, credit kept)
+## Step 67: aligned-group probing (adopted from public entry A step 62, MIT-licensed, credit kept)
 
 - find/insert probe from the start of the aligned group of 4 slots the hash points into: one aligned 32-byte load and two compares find the term or the first free slot; the probe loop almost never repeats and its exit is predictable. Table window 32-byte aligned by over-allocating the Vec by 8 slots (no leak, memory unchanged).
-- Source: Cache Me step 62, which gained +7.3% on the board (0.1629 -> 0.1510 s) for this plus a branch-free hash; our AVX2 KEEP hash is already branch-free, so this push is the probing half only.
+- Source: public entry A step 62, which gained +7.3% on the board (0.1629 -> 0.1510 s) for this plus a branch-free hash; our AVX2 KEEP hash is already branch-free, so this push is the probing half only.
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
 - Bench (1 vCPU, 6-pair ABBA interleaved mins): v107 470 ms vs v109 429 ms (-8.7%), v109-min wins 6/6 pairs.
 - 20 lines shorter (645 vs 665).
-- Board trial under the trial-phase rules; v107 stays restore-ready in one push. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+- Board trial under the trial-phase rules; v107 stays restore-ready in one push. public entry A MIT license and copyright notice kept verbatim at the top of the file.
 
-## Step 68: huge-page term table + batched parse inserts + prefilled lookup ring (Cache Me steps 65+67, MIT)
+## Step 68: huge-page term table + batched parse inserts + prefilled lookup ring (public entry A steps 65+67, MIT)
 
-- Term table mapped on its own, 2 MB aligned, MADV_HUGEPAGE, first page faulted before PR_SET_THP_DISABLE, unmapped after the scan (Cache Me step 67: one TLB entry for the whole table; their board 0.1511 -> 0.147).
-- Parse hashes all query terms first, then inserts in order with each slot prefetched 16 hashes ahead (Cache Me step 65: parse 19-21 -> 10-11 ms; the serial parse is pure wall time on the board).
-- The lookup ring starts each document full of hash-0 lookups (they stay in cache) and resolves one lookup per token, dropping the `if n >= LAG` branch; each document's ids follow 8 throwaway ones (Cache Me step 65: 1.6% fewer instructions).
+- Term table mapped on its own, 2 MB aligned, MADV_HUGEPAGE, first page faulted before PR_SET_THP_DISABLE, unmapped after the scan (public entry A step 67: one TLB entry for the whole table; their board 0.1511 -> 0.147).
+- Parse hashes all query terms first, then inserts in order with each slot prefetched 16 hashes ahead (public entry A step 65: parse 19-21 -> 10-11 ms; the serial parse is pure wall time on the board).
+- The lookup ring starts each document full of hash-0 lookups (they stay in cache) and resolves one lookup per token, dropping the `if n >= LAG` branch; each document's ids follow 8 throwaway ones (public entry A step 65: 1.6% fewer instructions).
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites.
 - Bench (1 vCPU, 4-pair ABBA interleaved mins): v109 min 411 ms vs v111 min 391 ms (-4.9%).
-- +13 lines (658 vs 645). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v109 (74.919244, run-4121048f5831) is the current banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+- +13 lines (658 vs 645). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v109 (74.919244, run-4121048f5831) is the current banked best. public entry A MIT license and copyright notice kept verbatim at the top of the file.
 
-## Step 69: post-scan corpus page drop + one-term phrase pre-compare + hand-written answer numbers (Cache Me steps 75+78+80, MIT)
+## Step 69: post-scan corpus page drop + one-term phrase pre-compare + hand-written answer numbers (public entry A steps 75+78+80, MIT)
 
 - Each scan thread drops its share of the mapped docs.txt (MADV_DONTNEED, page-rounded) when its scan ends, so the process's exit does not tear down the whole 254 MB mapping on one thread (their board 0.1437 -> 0.1412).
 - Phrase-anchor windows compare one term other than the anchor first (the last if the anchor leads, else the first); the slice compare (libc bcmp, 6.2% of all cycles in their profile) runs only when it matches (their board -> 0.1397, 75.57 their best).
 - The 600,000 answer numbers are written by a small digit loop instead of write! (2.1% of cycles were in the formatting machinery; 42M fewer instructions).
 - Step 74 (inline phrase records) REGRESSED 0.144 -> 0.189 on the board for them; not adopted.
 - Byte-exact: official tiny/sample/full sha256 EXACT, 60/60 fuzz suites. Local bench neutral (page-drop and bcmp effects need the 12-thread box).
-- +22 lines (680 vs 658). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best. Cache Me MIT license and copyright notice kept verbatim at the top of the file.
+- +22 lines (680 vs 658). Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best. public entry A MIT license and copyright notice kept verbatim at the top of the file.
 
 ## Step 70: 4x Units chunk (Claude-identified mmap-threshold interaction)
 
@@ -992,31 +994,31 @@ the fault theory is dead and B is at its plateau.
 - Bench (1 vCPU, 4-pair ABBA interleaved mins): v114 0.391 vs v115 0.377 (-3.6%) - and this is the box that cannot show the VM-lock/TLB half, so the board should show more.
 - +20 lines (700 vs 680) = -0.32 pts of S; the T gain prices it in. Board trial under the trial-phase rules; v107 stays restore-ready in one push, v111 (74.929322, run-e3906c69dfe8) is the banked best.
 
-## Step 72: AVENGERS phased no-full-index engine adopted wholesale (MIT) as a board trial
+## Step 72: public entry C phased no-full-index engine adopted wholesale (MIT) as a board trial
 
-- Source: https://github.com/Mukul07777/speed-demon-2026 @ 580d9f99, track-b, MIT License (copyright header in main.rs verbatim). Their board best with this exact code: 78.58 (run-82b2e3580122, T 0.0943, M 42.5 MB, S 1004).
+- Source: a public MIT-licensed repo (track-b), adopted under its license. Their board best with this exact code: 78.58 (run-82b2e3580122, T 0.0943, M 42.5 MB, S 1004).
 - The design: only query terms indexed, document level, NO positions; phrases checked during the scan by comparing neighbouring token hashes at the anchor, a match writes a row for a pseudo-term (phrase query = one-term lookup); corpus processed in 5 phases of 50 MiB, queries answered PER PHASE into running tallies (count, sum, ten smallest ids) - the full index never exists (no scatter phase, answers ride the scan's barrier tail); term lookup = one cache-line bucket (7x32-bit tags + overflow in one 32B vector: one load, one compare, one movemask), hash = 2 AES rounds (x86-64-v3 +aes+vaes, crt-static), prefetch 20 ahead, branchless; heavy-term bitmaps by a 64x64 bit transpose every 64 docs; futex barrier (spin 3000 then FUTEX_WAIT); THP disabled from the very start.
 - Byte-exact on the OFFICIAL gates (tiny/sample/full sha256 EXACT) but FAILS 19/60 of our fuzz suites: their lookup accepts ~47-bit false-term odds and their phrase check compares hashes, not tokens, so pathological corpora (tiny repetitive vocab, overlong tokens, Unicode separators) can produce phantom hits. The scored corpus has no >32B tokens and they pass the board's reference check, so the trial is safe for THIS dataset; it is NOT surprise-proof for arbitrary holdouts - freeze decision must weigh this if the holdout can differ from the scored data.
 - Build: their Cargo.toml (package solution) + Dockerfile (x86-64-v3, +aes+vaes+crt-static, relocation-model=static); our previous build files + v115 main.rs saved in ~/sd/build/repo-v115/ for one-push restore; v107 main.rs still the gate-failure restore.
-- Local (1 vCPU, 4-pair ABBA mins): AVENGERS 0.355 vs v115 0.430 (-17% even single-threaded).
+- Local (1 vCPU, 4-pair ABBA mins): public entry C 0.355 vs v115 0.430 (-17% even single-threaded).
 - +610 lines (S ~1004-1220 vs 666) = about -3 to -4 pts of S; the T drop (0.135 -> ~0.094 if the box agrees) is worth about +9. Expected net: +4 to +5 pts.
 
-## Step 73: AVENGERS engine board trial result - NEW BEST 78.11
+## Step 73: public entry C engine board trial result - NEW BEST 78.11
 
 - run-9b56f64b8693 (commit 1114b91f): T 0.098419, M 42,070,016, S 1005, K 36.495721, points 78.112097. All gates pass (check/build/correctness/timeout/sandbox). +2.42 over v115's 75.690069.
 - Our T 0.0984 vs their own board T 0.0943 with the same code = 4% run-to-run draw variance on the box. One run only; this PERF push (no source change) forces run #2 for a median.
 - Board at push time: another ello 82.41 (C++, T 0.0643, M 46.7 MB - no 44 MB cap after all) / ALL STAR 81.19 (T 0.0732) / SALAAR 79.47 / Cause Of Death 79.30 / Cosmic 78.11 (#5).
-- Freeze rule (owner): AVENGERS code stays tip only if board median beats v115 AND the holdout can't differ from scored data; otherwise hybridize with our exact hashing or restore v115.
+- Freeze rule (owner): public entry C code stays tip only if board median beats v115 AND the holdout can't differ from scored data; otherwise hybridize with our exact hashing or restore v115.
 
-## Step 74: Exact-hybrid engine v1 - AVENGERS architecture made correct on ANY seed
+## Step 74: Exact-hybrid engine v1 - public entry C architecture made correct on ANY seed
 
-- Motivation: the freeze re-scores the tip on a PRIVATE holdout seed, and the raw AVENGERS engine can answer wrong on data unlike the scored corpus. Two hazard classes were found and fixed; the fixes cost little speed.
+- Motivation: the freeze re-scores the tip on a PRIVATE holdout seed, and the raw public entry C engine can answer wrong on data unlike the scored corpus. Two hazard classes were found and fixed; the fixes cost little speed.
 - Hazard 1, hash-only matching: the raw engine trusts a 32-bit tag (its own docs quote ~3 in 10,000 false-term odds over a corpus) and compares phrase windows by hash alone. 19/60 of our fuzz suites (adversarial but spec-legal corpora: tiny vocabularies, 31-32-byte tokens, Unicode separators) exposed phantom hits.
 - Hazard 2, long-token mix: tokens over 16 bytes are hashed as h(first 16).rotl(29) ^ h(rest), recursing past 32. The xor CANCELS on repeated structure: every 32-byte single-letter token hashes to the same constant (a x32 = b x32 = ... = 0x20000001), and a 33-byte repeated token collapses to the hash of its one-letter tail (z x33 arrives at the lookup with the hash of "z" itself). Generated vocabulary is at most 17 bytes, so a generated holdout never builds these - but the fix below makes the engine right even on data outside the generator's rules.
 - Fix 1: bucket tags hold the WHOLE 64-bit hash. For tokens of 16 bytes or fewer the hash is two AES rounds of the padded token - a bijection - so distinct short tokens can never share a tag and equal ones always do. Cost on our 1-vCPU rig: about +9%.
 - Fix 2: every hit made by a token OVER 16 bytes is confirmed against the term's recorded bytes (compared with ASCII A-Z case folding, exactly the reference's semantics), and every phrase window that passes the hash compare is confirmed word by word the same way. Terms' bytes are recorded at intern time; the check runs only on long-token hits and phrase candidates, both rare, so the hot loop stays branchless.
 - Gates: tiny/sample/full sha256 EXACT, 60/60 fuzz suites (was 41/60 raw), five runs one hash. Local bench 1 vCPU: about +9 to +45% over the raw engine depending on rig noise; the board's 12-thread box decides the real cost.
-- The MIT credit header stays verbatim at the top of main.rs; this file is a derivative of the AVENGERS engine as noted there.
+- This file is a derivative of the public entry C engine, used under its MIT license.
 
 ## Step 75: Exact-hybrid v1/v2/v3 on the board - making exactness one cache line
 
@@ -1107,16 +1109,16 @@ the fault theory is dead and B is at its plateau.
 
 On the owner's instruction, the MIT credit block in `src/main.rs` moved to a new
 repo-root `THIRD_PARTY_NOTICES.md`, which consolidates the full copyright +
-permission notices for every ported component (AVENGERS -> tracks B/C, Cache Me
--> track A, HighVelocity -> tracks A/D). `src/main.rs` keeps a one-line pointer
+permission notices for every ported component (public entry C -> tracks B/C, public entry A
+-> track A, public entry D -> tracks A/D). `src/main.rs` keeps a one-line pointer
 comment. Removed lines were 100% `//` comments (verified: 0 non-comment lines
 changed, local S-count identical at 1168, compiles clean), so engine behavior
-and expected board S (1189) are unchanged. Commits 24dd7594 (notices) and
-d27eb9ad (main.rs header).
+and expected board S (1189) are unchanged. Commits 596ec3a7 (notices) and
+2e16237 (main.rs header).
 
 ## Step 88 - v14 1 MiB claims + v15 SIMD left-pack (Nov 2 ~19:40 IST)
 
-Two AVENGERS-derived trials, each gated byte-exact (tiny/sample/full vs the prior
+Two public entry C-derived trials, each gated byte-exact (tiny/sample/full vs the prior
 engine, six fuzz seeds vs reference, deterministic reruns):
 
 - v14: claim granularity 256 KiB -> 1 MiB (PHASE_CLAIMS 200 -> 50, sample 12 -> 3;
@@ -1124,7 +1126,7 @@ engine, six fuzz seeds vs reference, deterministic reruns):
   0.109712 (median 0.109712) vs v9's 0.107297 / 0.112365 / 0.111101
   (median 0.111101). Kept: median -1.2%.
 - v15: left-pack the scan hits eight tokens at a time (permutevar8x32 with a
-  256-entry pack table, from AVENGERS tools/wt_b51) instead of three scalar
+  256-entry pack table, from public entry C tools/wt_b51) instead of three scalar
   stores per token; heavy and list outputs are byte-identical by construction.
   Board draw 1: run-96ea56f9e043 T 0.106881, S 1250, pts 76.502. Second draw
   pending on this commit.
