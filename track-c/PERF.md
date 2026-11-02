@@ -105,3 +105,9 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 
 
 **Not kept (2026-11-02, Cosmic trial 18): name-bucket prefetch T0 to T1.** Board `run-446f12c4fdde`: T 22.66 ms, M 10.9 MB, S 294, 81.92 - half a point under the T0 code's 82.33/82.45 samples; the lookup wants the line in L1 after all (GPT rank 4, its own loss case). Reverted.
+
+
+**Not kept (2026-11-02, Cosmic trial 19): guided end claims - record blocks start at 1 MiB and shrink to 256 KiB over the file's last sixteenth (Claude review rank 2, expected +0.11).** Board `run-f8223811f722`: T 22.03 ms, 82.296 - inside the ring-64 code's 22.03-22.34 ms band, so no real T gain, and the added function's source lines cost more than the finish balancing saved. Reverted.
+
+
+**Not kept (2026-11-02, Cosmic trial 20): completion counter replaces the setup barrier (Claude review rank 1, expected +0.25).** Workers counted finished setup items (huge-page pre-faults plus region claims) into an atomic and spun with `yield_now` until all were done, instead of sleeping on the barrier. Board `run-f82cee3748e6`: T 23.28 ms, M 10.7 MB, S 306, 81.58 - a full millisecond slower, far outside the band; the spin/yield wait loses to the barrier's futex sleep on the 12-core runner, and the counter lines also cost S. Local testing on a 2-core box caught and fixed one real hang class (single page pre-fault claim could leave pages uncounted when workers < pages; fixed by claiming pre-fault pages in a loop), and 200/200 oversubscribed stress runs passed after the fix - but the board says the wait itself is the cost. Reverted to the ring-64 code byte-exact (sha256 ef3c60c6b71792143acabf82ce0e4e93bb439cd40516f2c80246ab70af5bd927).
