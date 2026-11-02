@@ -1,10 +1,64 @@
-# Track D: performance log
+# Track D candidate: HighVelocity C++ engine, PR #23 champion (staged, not pushed)
 
-Every step from the reference to your final version, each with the live-board run ID that measured it. Judges check that the run IDs exist and that each change moved the way you say it did.
+Provenance: verbatim copy of track-d from the MIT-licensed public repo
+insightlabs38-pixel/sd-sm, their PR #23 champion: scored commit
+a5b6172a946ed30ffc912ea7e2c09474851e6768 (source blob
+e11b09e30d2ac0fdfada01317b5dce3deae5f6dd), content identical at restore
+commit 8fc0d908aeadb934648e44e70f1e0dcd1b35173f. Copyright (c) 2026
+Hackathon Raptors CIC and contributors. Only an attribution header was
+added to d_traverse.cpp and team set to Cosmic in .speed-demon.toml. MIT
+license terms apply; their LICENSE is reproduced at the bottom of this file.
+(Dockerfile unchanged from the PR #15 staging; .speed-demon.toml set to
+team Cosmic / language C++.)
 
-| Step | Change | Run ID | T (s) | M (MB) | Points |
-|---|---|---|---|---|---|
-| 0 | The reference, unchanged | | 72.69 | 893 | 0 |
-| 1 | Restored Rust implementation (teammate's step-15 design, adapted from MIT-licensed manusingh090/speed-demon-2026-entry) | run-98555c37390f | 0.176 | 66.6 | 68.64 |
-| 2 | Crash fix: BFS-ahead helper prefetch read link[first[u]] with first[u]==m for zero-outdegree nodes; now computes the address with wrapping_add. Output unchanged (byte-identical tiny/sample/full seed-1 gates). | run-aaf0ca261822 | 0.173 | 67.2 | 68.80 |
-| 3 | High-performance C++ bidirectional Dijkstra engine with fused degree-2 contraction and 64-bit radix heap (adapted under MIT license from Lex team's entry) | pending | ~0.111 | ~67.6 | ~72.1 |
+Why it is staged: official run-7cbf51892a7c passed all five gates:
+T=0.088389 s, M=60,166,144 B, S=647, D=1, K=32.750840, points=75.761122.
+Our banked D best is 71.704016 (T 0.1134 s, M ~71.2 MB, S 783), so this is
+about +4.06 D points. It also leads every known D on the board (Lex's
+latest 75.02 as of 22:47Z). D enters our overall geomean only if it beats
+B's freeze tip (~76-78); 75.76 is close but still short, so expect D
+ranking + JUDGE value, not overall points, unless B slips.
+
+Verification done locally (1-core box, seed-1 datasets):
+- Byte-exact output on the full dataset: sha256 a23dbdf0a3e49cc8...
+  (same as our current engine), and on tiny (40 queries) and sample
+  (200 queries) against both our current engine and an independent Python
+  Dijkstra reference.
+- 8 interleaved runs vs our engine and their earlier PR #15 engine:
+  median 0.322 s vs 0.374 s (PR15) vs 0.398 s (ours); min 0.307 s.
+  ~19% faster than our engine and ~14% faster than PR15 locally,
+  consistent with their board T of 0.0884 s vs 0.1083 s (PR15).
+  Peak VmHWM 143.6 MB vs 147.7 MB (ours).
+- Their PERF.md records the full gate history and names this commit the
+  champion with PR #19 kept as rollback.
+
+Caveats: a swap replaces Anushka's track-d lineage and needs Alok's
+explicit go. Board T swings roughly 5-10% run to run across teams. This
+candidate's S (647) and M (60.2 MB) are both worse-than-best-in-class by
+a hair (Lex: 60.8 MB / S 634), so hybrid polish on top is possible but
+worth well under half a point.
+
+License (from their repo):
+
+MIT License
+
+Copyright (c) 2026 Hackathon Raptors CIC
+Copyright (c) 2026 the contributors of this repository
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
