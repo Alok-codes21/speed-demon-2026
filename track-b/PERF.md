@@ -1081,3 +1081,9 @@ the fault theory is dead and B is at its plateau.
 - **Gates**: tiny/sample/full sha exact (dcdad7cedfc07eb6 / eeeec1e9319da98a / f86973c210228141), 60/60 fz, 3x determinism, 0 DBG.
 - **Board**: run-457723624b65 T 0.108161 M 44.3MB S 1219 pts 76.433 (all gates pass). v11 median T 0.106129 pts 76.619 over 3 runs.
 - **Verdict**: retired. Teardown already overlapped enough on the box; T flat-to-worse within noise and S +13 not repaid. v11 restored in one push; freeze tip unchanged (v11).
+
+## Step 84: upload accident cleanup (NO ENGINE CHANGE - v11)
+
+- Two failed web-upload attempts left stray copies 1-main.rs and 2-main.rs (v11 content) in track-b/src/; three sibling commits were empty. Strays deleted 4:35 PM; main.rs = v11 throughout (hash-verified).
+- Runs pinned to bd73ff6 / the v11-restore / PERF-83 commits count all three .rs files: S ~3615, pts ~72.9-73.5. That is a line-count artifact, not an engine regression: identical v11 machine text, one extra file copy each. Delete-commit runs and later measure the clean tree (S ~1206) and are the ones that count for the freeze median.
+- Lesson recorded: uploads only via the execute-js DataTransfer push script (verified COMMIT-CLICKED + on-repo readback); the upload-file tool produced the strays/empty commits.
