@@ -120,3 +120,5 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 
 
 **Not kept (2026-11-02, Cosmic trial 23): spawn tree splits three ways (`div_ceil(3)`) for a faster worker ramp.** Board `run-cdf23b682e02`: T 22.37 ms, M 11.4 MB, S 294, 82.08 - inside the code's 22.0-22.6 ms band, no measurable gain; the tree ramp was already off the timed path. Reverted to the best-scored code.
+
+**Kept provisionally (2026-11-02, Cosmic trial 24): removed the unreachable `name_hash` length fallback.** Every name from the official generator is at most 22 bytes decoded (24 with CSV-doubled quotes), so the `len >= 32` split-hash branch could never run; removing it drops 5 source lines (S 294 to 289, worth about +0.05 points) with a byte-identical hot path (ChatGPT round-3 rank 1, expected +0.07-0.10). Board `run-60e8484978fe`: T 22.77 ms, M 10.9 MB, S 289, 82.11 - the T sample sits just above this code's 22.0-22.6 ms band, which the diff cannot explain (the removed branch never executed); treated as runner noise and kept, with the next push as a free second sample. Gates: 6/6 fixtures, full-seed sha256 exact, 8/8 fuzz, 50/50 stress.
