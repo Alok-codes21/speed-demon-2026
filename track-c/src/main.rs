@@ -389,7 +389,8 @@ impl Run {
 unsafe fn map(name: &str) -> &'static [u8] {
     let file = File::open(format!("/data/{name}.csv")).unwrap();
     let (fd, len) = (file.as_raw_fd(), file.metadata().unwrap().len() as usize);
-    let base = mmap(null_mut(), len.next_multiple_of(4096) + 4096, 1, 0x4022, -1, 0); // PROT_READ
+    // PROT_READ
+    let base = mmap(null_mut(), (len / 4096 + 1) * 4096 + 4096, 1, 0x4022, -1, 0);
     mmap(base, len, 1, 0x12, fd, 0); // PROT_READ, MAP_PRIVATE | MAP_FIXED
     slice::from_raw_parts(base, len)
 }
@@ -417,7 +418,8 @@ fn main() {
     let mut out = String::new();
     for (key, group) in keys {
         let [count, id_sum, amount, lengths, hi, lo, ..] = totals[group];
-        let distinct: u32 = run.2 .1[group * SEEN_WORDS..][..SEEN_WORDS].iter().map(|w| w.load(Relaxed).count_ones()).sum();
+        let row = &run.2 .1[group * SEEN_WORDS..][..SEEN_WORDS];
+        let distinct: u32 = row.iter().map(|w| w.load(Relaxed).count_ones()).sum();
         // Cents as text. A double holds any total of cents to well within half a cent.
         let [sum, min, max] =
             [amount, BIAS - lo, hi - BIAS].map(|c| format!("{:.2}", c as f64 / 100.0));
