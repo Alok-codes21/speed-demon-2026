@@ -1102,3 +1102,14 @@ the fault theory is dead and B is at its plateau.
 - Fresh v9 draws: run-f71608e7b309 T 0.107297 S 1189 pts 76.515; run-45c8065022e7 T 0.112365 S 1189 pts 76.064 (the box slowed through the afternoon for every team; v11's own late draws were 0.110175 and 0.119115).
 - Medians, today: v9 0.1076 over 6 runs (4 earlier + 2 fresh) vs v11 0.108313 over 5; late slow-box era only: v9 0.1098 (n=2) vs v11 0.1146 (n=2). Both readings give v9, and v9 also carries S 1189 vs 1206 (+0.21% points). The itoa LUT's local -1.5% (step 81) never materialized on the box - the serial/memory-bound box noise swamps a pure instruction cut.
 - DECISION: freeze tip = v9 (exact-hybrid: 64-bit full-hash tags, byte-compared long tokens and phrases, exact on any seed). v11 remains documented at ~/sd/hybrid_v11_push.rs, one push away if a late v11 draw changes the picture. This note queues one more v9 confirmation run.
+
+## Step 87 - credit relocation, zero engine change (Nov 2 ~18:00 IST)
+
+On the owner's instruction, the MIT credit block in `src/main.rs` moved to a new
+repo-root `THIRD_PARTY_NOTICES.md`, which consolidates the full copyright +
+permission notices for every ported component (AVENGERS -> tracks B/C, Cache Me
+-> track A, HighVelocity -> tracks A/D). `src/main.rs` keeps a one-line pointer
+comment. Removed lines were 100% `//` comments (verified: 0 non-comment lines
+changed, local S-count identical at 1168, compiles clean), so engine behavior
+and expected board S (1189) are unchanged. Commits 24dd7594 (notices) and
+d27eb9ad (main.rs header).
