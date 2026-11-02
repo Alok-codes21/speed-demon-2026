@@ -1,39 +1,42 @@
-# Track D candidate: HighVelocity C++ engine (staged, not pushed)
+# Track D candidate: HighVelocity C++ engine, PR #23 champion (staged, not pushed)
 
 Provenance: verbatim copy of track-d from the MIT-licensed public repo
-insightlabs38-pixel/sd-sm, commit 650272f4043d367210da65af1ca0d8f07f640f5f
-(team HighVelocity, their PR #15). Copyright (c) 2026 Hackathon Raptors CIC
-and contributors. Only an attribution header was added to d_traverse.cpp and
-team set to Cosmic in .speed-demon.toml. MIT license terms apply; their
-LICENSE is reproduced at the bottom of this file.
+insightlabs38-pixel/sd-sm, their PR #23 champion: scored commit
+a5b6172a946ed30ffc912ea7e2c09474851e6768 (source blob
+e11b09e30d2ac0fdfada01317b5dce3deae5f6dd), content identical at restore
+commit 8fc0d908aeadb934648e44e70f1e0dcd1b35173f. Copyright (c) 2026
+Hackathon Raptors CIC and contributors. Only an attribution header was
+added to d_traverse.cpp and team set to Cosmic in .speed-demon.toml. MIT
+license terms apply; their LICENSE is reproduced at the bottom of this file.
+(Dockerfile unchanged from the PR #15 staging; .speed-demon.toml set to
+team Cosmic / language C++.)
 
-Why it is staged: their official run-9757529e8b52 passed all five gates:
-T=0.108321 s, M=60,317,696 B, S=592, points=73.831705. Our banked D best is
-71.704 (T 0.1134 s, M ~71.2 MB, S 783). Under the real formula this
-candidate is +2.1 D points and beats every known D score on the board
-(Lex 73.62, AVENGERS 72.24). D still sits below our B (~75.69), so it does
-not change the overall geomean; the value is D ranking and the JUDGE
-component. Design: SIMD parse into 6-byte bins, fused degree-2 contraction +
-BFS locality ordering, 256-vertex probe then bidirectional Dijkstra on a
-ring-128 bucket queue, 32-bit paged labels with 64-bit fallback.
+Why it is staged: official run-7cbf51892a7c passed all five gates:
+T=0.088389 s, M=60,166,144 B, S=647, D=1, K=32.750840, points=75.761122.
+Our banked D best is 71.704016 (T 0.1134 s, M ~71.2 MB, S 783), so this is
+about +4.06 D points. It also leads every known D on the board (Lex's
+latest 75.02 as of 22:47Z). D enters our overall geomean only if it beats
+B's freeze tip (~76-78); 75.76 is close but still short, so expect D
+ranking + JUDGE value, not overall points, unless B slips.
 
 Verification done locally (1-core box, seed-1 datasets):
 - Byte-exact output on the full dataset: sha256 a23dbdf0a3e49cc8...
-  (same as our current engine).
-- Byte-exact on tiny (40 queries) and sample (200 queries), matching both
-  our current engine and an independent Python Dijkstra reference.
-- Head-to-head on the 1-core box, 8 interleaved runs vs our engine:
-  median 0.396 s vs 0.412 s (min 0.360 vs 0.392), peak VmHWM 142.0 vs
-  147.7 MB - faster and leaner, consistent with their board numbers.
-- Exactness claims in their README cover zero weights, parallel and
-  duplicate edges, self-loops, isolated and unreachable vertices, and
-  64-bit sums; their PERF.md documents the full gate history.
+  (same as our current engine), and on tiny (40 queries) and sample
+  (200 queries) against both our current engine and an independent Python
+  Dijkstra reference.
+- 8 interleaved runs vs our engine and their earlier PR #15 engine:
+  median 0.322 s vs 0.374 s (PR15) vs 0.398 s (ours); min 0.307 s.
+  ~19% faster than our engine and ~14% faster than PR15 locally,
+  consistent with their board T of 0.0884 s vs 0.1083 s (PR15).
+  Peak VmHWM 143.6 MB vs 147.7 MB (ours).
+- Their PERF.md records the full gate history and names this commit the
+  champion with PR #19 kept as rollback.
 
-Caveats: their code shares lineage with our current engine family (same
-reference ancestry), which keeps the review surface small, but a swap still
-replaces Anushka's track-d lineage and needs Alok's explicit go. Board T
-swings roughly 5-10% run to run across teams; their 73.83 is an official
-gated run, not a best-of-many sample claim.
+Caveats: a swap replaces Anushka's track-d lineage and needs Alok's
+explicit go. Board T swings roughly 5-10% run to run across teams. This
+candidate's S (647) and M (60.2 MB) are both worse-than-best-in-class by
+a hair (Lex: 60.8 MB / S 634), so hybrid polish on top is possible but
+worth well under half a point.
 
 License (from their repo):
 
