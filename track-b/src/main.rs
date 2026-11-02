@@ -1249,12 +1249,31 @@ unsafe fn apply(op: Op, current: Set, term: Set, scratch: &mut Scratch) -> Set {
 
 /// Appends a number and a space: the digits are written backwards, then reversed in place.
 fn put_number(out: &mut Vec<u8>, mut value: u64) {
-    let from = out.len();
-    while out.len() == from || value > 0 {
-        out.push(b'0' + (value % 10) as u8);
-        value /= 10;
+    // Two digits at a time from a table, most significant pair last; the pair's leading zero
+    // goes away with the odd digit count. Same bytes as the naive digit loop, no reversal.
+    static PAIRS: [[u8; 2]; 100] = {
+        let mut pairs = [[0u8; 2]; 100];
+        let mut i = 0;
+        while i < 100 {
+            pairs[i] = [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+            i += 1;
+        }
+        pairs
+    };
+    let mut buf = [0u8; 24];
+    let mut at = 24;
+    loop {
+        let pair = PAIRS[(value % 100) as usize];
+        at -= 2;
+        buf[at] = pair[0];
+        buf[at + 1] = pair[1];
+        value /= 100;
+        if value == 0 {
+            break;
+        }
     }
-    out[from..].reverse();
+    at += (buf[at] == b'0') as usize;
+    out.extend_from_slice(&buf[at..]);
     out.push(b' ');
 }
 
