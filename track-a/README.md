@@ -17,5 +17,3 @@ The retained engine passed byte-for-byte comparisons against the reference on ti
 The clean A1 restore passed all five official board gates. One source-verified receipt, run `run-39e2080d9c66`, measured 19.856 ms, 15,142,912 bytes, S411 and 85.482018 points. Public-board timings vary; final scoring uses the frozen commit and a hidden seed.
 
 An exact-name Rust adaptation was also tested and rejected. Its captured official receipt was 31.018 ms, 16,277,504 bytes and 78.310063 points. That receipt counted an externally re-added, inactive C++ source as well as Rust (S763), so it is not a clean source-size comparison. The slower runtime was enough to prefer the C++ restore. The Rust source and build switch were removed.
-
-Required license notices are retained in the repository-level `THIRD_PARTY_NOTICES.md`.
