@@ -99,3 +99,25 @@ THIRD_PARTY_NOTICES.md at the repo root, not in the file); everything else uncha
 ## Worker-cap experiment, reverted (Nov 2)
 
 A change to this folder capped query workers at 6 and read the cgroup CPU quota (source sha256 165431bebfbc, S=673). Board draws for it: 74.27 and 72.34 points (T=0.100 s and 0.121 s) against 73.5 to 75.6 for the PR #24 source on the same board, and HighVelocity's own public measurement found 12 workers at least as good as 8. With S up by 26 lines and no gain in the draws, the PR #24 source is restored. It is now exactly HighVelocity's published file (sha256 d084d2b3574341...), without a leading comment header; the compiled binary is byte-identical to the earlier credited copy (sha256 d2fdc5baac31). Output was byte-exact either way; this was a speed decision only.
+
+
+## Qualified upstream solver adopted — 2 Nov 2026
+
+The Track D source now uses the exact MIT-licensed HighVelocity solver blob
+`02e0764ef534a8a6694006b12911776e0a9f2860` from
+https://github.com/insightlabs38-pixel/sd-sm. Its upstream performance log
+records an official run `run-3cf937618e77` with K=33.672416,
+T=0.083599 s, M=57,802,752 B, S=683, D=1; all gates passed. This is an
+upstream result, not yet a score for this repository's submission.
+
+The adopted candidate combines the frontier/SSE2 parsing and traversal
+improvements with compact degree/edge storage and 256-entry label pages.
+The existing Track D Dockerfile is intentionally unchanged; the source uses
+function-level SSSE3 targeting, so the baseline compiler target is retained.
+The relaxed atomic `fetch_or` claim fix and exact wide-distance fallback are
+present in the adopted source. Third-party MIT attribution is recorded in
+`/THIRD_PARTY_NOTICES.md`.
+
+Do not treat the upstream K as a local result until the official board scores
+this repository's new commit. Rollback source remains available at the
+preceding commit if this candidate fails any local repository gate.
