@@ -102,3 +102,6 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 
 
 **Not kept (2026-11-02, Cosmic trial 16): name-number reservations in blocks of 256.** Board `run-ed515251009d`: T 22.33 ms, M 10.5 MB, S 294, 82.25 - no gain against the ring-64 code's 82.33/82.34 samples (block 32 had already removed the counter contention; GPT rank 3, expected +0.02 to +0.15). Reverted to 32; the larger reservation also spends 17-bit number-space headroom the holdout seed may need.
+
+
+**Not kept (2026-11-02, Cosmic trial 18): name-bucket prefetch T0 to T1.** Board `run-446f12c4fdde`: T 22.66 ms, M 10.9 MB, S 294, 81.92 - half a point under the T0 code's 82.33/82.45 samples; the lookup wants the line in L1 after all (GPT rank 4, its own loss case). Reverted.
