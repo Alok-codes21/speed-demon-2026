@@ -1130,3 +1130,19 @@ engine, six fuzz seeds vs reference, deterministic reruns):
   stores per token; heavy and list outputs are byte-identical by construction.
   Board draw 1: run-96ea56f9e043 T 0.106881, S 1250, pts 76.502. Second draw
   pending on this commit.
+
+## Step 89 - freeze state (Nov 2, 8:30 PM IST)
+
+Final tip: v17. Lineage of the evening's board trials, every step gated byte-exact
+(tiny/sample/full + fuzz seeds + determinism):
+
+- v14: 1 MiB claims. Draws 0.111855 / 0.109273 / 0.109712 (median 0.109712).
+- v15: SIMD left-pack scan hits. Draws 0.106881 / 0.107074, pts 76.502 / 76.486.
+- v16: comments-only attribution scrub (owner decision); identical behavior, S 1250.
+- v17: all 12 threads sample (12 x 1 MiB claims). Draws 0.108348 / 0.105731;
+  the 0.105731 (run-543c29caf4f0, pts 76.603) is our fastest exact reading of the day.
+
+Freeze-safe: every token is confirmed against its term's bytes and short-token
+hashes are bijective, so the private holdout seed cannot produce a wrong answer.
+Per the owner's decision, all third-party names, credits and links were removed
+from the docs and source comments; adopted techniques are described neutrally.
