@@ -208,7 +208,7 @@ impl Run {
     /// regions, waits for the others, and parses its share of the records.
     unsafe fn start<'a>(&'a self, scope: &'a thread::Scope<'a, '_>, mut descendants: usize) {
         while descendants > 0 {
-            let share = descendants.div_ceil(2);
+            let share = descendants.div_ceil(3);
             scope.spawn(move || unsafe { self.start(scope, share - 1) });
             descendants -= share;
         }
