@@ -59,12 +59,12 @@ using u64 = uint64_t;
 constexpr int HOURS = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 
 // ---- Tunables to sweep (everything else is unchanged) ----------------------
-constexpr int MAX_THREADS = 4;
-constexpr int PIECES_PER_THREAD = 16;
+constexpr int MAX_THREADS = 6;
+constexpr int PIECES_PER_THREAD = 4;
 constexpr int PREFETCH_AHEAD = 1024;
 
-constexpr u64 EARLY_BUDGET = 2000000;
-constexpr int CLOSE_MARGIN = 120;
+constexpr u64 EARLY_BUDGET = 1000000;
+constexpr int CLOSE_MARGIN = 75;
 // -----------------------------------------------------------------------------
 
 constexpr u32 KEY_BITS = 12, ERR = 1u << 11, ID_MASK = ERR - 1,
