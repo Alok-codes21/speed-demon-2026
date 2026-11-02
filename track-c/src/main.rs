@@ -1,6 +1,3 @@
-//! Ported from the AVENGERS team's MIT-licensed entry (github.com/Mukul07777/speed-demon-2026,
-//! track-c, commit a8a3d87, best board run-b7163ec15e9a). MIT License (c) 2026 Hackathon Raptors CIC
-//! and the contributors of that repository; see LICENSE. Thanks, AVENGERS.
 //! Speed Demon 2026, Track C (Join).
 //!
 //! Threads and phases. `main` maps both files and starts one worker per CPU as a tree
