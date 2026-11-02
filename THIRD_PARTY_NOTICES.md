@@ -6,13 +6,14 @@ required by the license ("The above copyright notice and this permission
 notice shall be included in all copies or substantial portions of the
 Software").
 
-## AVENGERS - Speed Demon 2026 (tracks B, C; techniques in A)
+## AVENGERS - Speed Demon 2026 (tracks B, C, A)
 
 - Source: https://github.com/Mukul07777/speed-demon-2026
 - Track B: engine adopted at commit 580d9f99, since reworked for exactness and
   speed (see track-b/PERF.md).
-- Track C: engine ported from track-c at commit a8a3d87, since tuned
-  (see track-c/PERF.md).
+- Track A: engine adapted from AVENGERS track-a (033aa25); Rust port, live commit
+  0d00f73b.
+- Track C: ported track-c engine code.
 - Copyright (c) 2026 Hackathon Raptors CIC
 - Copyright (c) 2026 the contributors of that repository
 
