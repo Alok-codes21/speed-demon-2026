@@ -1096,3 +1096,9 @@ the fault theory is dead and B is at its plateau.
 ### Step 85b: v9 A/B - first fresh draw, queueing one more
 
 - Fresh v9 run (pinned to an A-side commit, B tip = v9): run-f71608e7b309 T 0.107297, M 44.7MB, S 1189, points 76.515 - on v9's old 4-run median (0.1073) and ahead of v11's today-median points (76.400). This note queues v9's second fresh run; the winner is decided on points-median (breakeven T_v9 = 0.1088 vs v11's 0.108313 once S is priced in).
+
+## Step 86: freeze tip = v9 (A/B decided on board medians)
+
+- Fresh v9 draws: run-f71608e7b309 T 0.107297 S 1189 pts 76.515; run-45c8065022e7 T 0.112365 S 1189 pts 76.064 (the box slowed through the afternoon for every team; v11's own late draws were 0.110175 and 0.119115).
+- Medians, today: v9 0.1076 over 6 runs (4 earlier + 2 fresh) vs v11 0.108313 over 5; late slow-box era only: v9 0.1098 (n=2) vs v11 0.1146 (n=2). Both readings give v9, and v9 also carries S 1189 vs 1206 (+0.21% points). The itoa LUT's local -1.5% (step 81) never materialized on the box - the serial/memory-bound box noise swamps a pure instruction cut.
+- DECISION: freeze tip = v9 (exact-hybrid: 64-bit full-hash tags, byte-compared long tokens and phrases, exact on any seed). v11 remains documented at ~/sd/hybrid_v11_push.rs, one push away if a late v11 draw changes the picture. This note queues one more v9 confirmation run.
