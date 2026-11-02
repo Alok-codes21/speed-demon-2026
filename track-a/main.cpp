@@ -50,7 +50,8 @@ SOFTWARE.
 // https://github.com/manusingh090/speed-demon-2026-entry
 // commit 7027ab49162605eea30311a351ebeeef3647efdc, track-a/main.cpp.
 // Copyright (c) 2026 Hackathon Raptors CIC and repository contributors.
-// Local changes: canonical formatting and attribution only; original step 58 logic.
+// Local changes: replace the three full-array radix passes with one endpoint
+// grouping pass and in-place percentile selection; record layout is unchanged.
 // The complete Cache Me MIT license is retained at the top of this file.
 #include <algorithm>
 #include <atomic>
@@ -369,50 +370,74 @@ int main() {
   // group then comes out sorted at a known place, and its percentiles are
   // read off by index. Latencies too large for 20 bits sort last in their
   // group with the same key; their values are kept, sorted, in a short list.
+  // Finish an hour by grouping packed latencies by endpoint, then selecting
+  // only the three nearest-rank percentiles in each group. This replaces the
+  // three full-array radix passes with one endpoint scatter and in-place
+  // introselect. Escape latencies stay in the small separately sorted list.
   auto finish = [&](int h, std::vector<u64> &big) {
     if (active[h]) // a thread is filing into it: too late for this pass
       return late.store(true);
     const Ranking &rank = ranking();
     const u32 ne = rank.by_rank.size();
-    u32 *keys = records + h * per_hour, *sorted = keys + filled[h], total = 0;
-    u32 low[1024] = {}, mid[1024] = {}, top[ID_MASK + 1] = {},
+    u32 *keys = records + h * per_hour, *sorted = keys + filled[h],
+        total = 0;
+    u32 normal_end[ID_MASK + 1] = {}, counts[ID_MASK + 1] = {},
         errors[ID_MASK + 1] = {};
     big.clear();
     for (u32 *r = keys; r < sorted; ++r) {
       u32 x = *r;
       if (!(x & ID_MASK)) // a place never written, at the end of a block
         continue;
-      if (x >> KEY_BITS == PACKED_MAX) [[unlikely]]
-        big.push_back(u64(rank.rank_of[x & ID_MASK]) << 32 | *++r);
-      u32 e = rank.rank_of[x & ID_MASK], key = e << 20 | x >> KEY_BITS;
+      u32 e = rank.rank_of[x & ID_MASK];
+      ++counts[e];
       errors[e] += (x & ERR) != 0;
-      ++low[key & 1023], ++mid[key >> 10 & 1023], ++top[e];
-      keys[total++] = key;
+      if (x >> KEY_BITS == PACKED_MAX) [[unlikely]] {
+        big.push_back(u64(e) << 32 | *++r);
+      } else {
+        ++normal_end[e];
+        keys[total++] = e << 20 | x >> KEY_BITS;
+      }
     }
-    auto pass = [total](const u32 *from, u32 *to, u32 *at, u32 buckets,
-                        int shift, u32 mask) {
-      for (u32 b = 0, sum = 0; b < buckets; ++b)
-        sum += std::exchange(at[b], sum);
-      for (u32 j = 0; j < total; ++j)
-        to[at[from[j] >> shift & mask]++] = from[j];
-    };
-    pass(keys, sorted, low, 1024, 0, 1023);
-    pass(sorted, keys, mid, 1024, 10, 1023);
-    pass(keys, sorted, top, ne, 20, ID_MASK);
+
+    // Stable grouping by endpoint. normal_end becomes each endpoint's
+    // exclusive end offset in the scratch array.
+    for (u32 e = 0, sum = 0; e < ne; ++e)
+      sum += std::exchange(normal_end[e], sum);
+    for (u32 j = 0; j < total; ++j) {
+      u32 x = keys[j];
+      sorted[normal_end[x >> 20]++] = x;
+    }
+
     std::sort(big.begin(), big.end());
     u64 sz = 0;
-    for (u32 e = 0, from = 0, b = 0; e < ne; from = top[e++]) {
-      u32 n = top[e] - from, large = 0;
+    for (u32 e = 0, from = 0, b = 0; e < ne; from = normal_end[e++]) {
+      u32 normal_n = normal_end[e] - from, n = counts[e];
       if (!n)
         continue;
-      while (b + large < big.size() && big[b + large] >> 32 == e)
+      u32 large = 0;
+      while (b + large < big.size() && (big[b + large] >> 32) == e)
         ++large;
-      // Nearest rank p is index ceil(p * n / 100) - 1.
-      u32 v[3], t = 0;
-      for (u32 p : {50, 95, 99}) {
-        u32 k = (p * n + 99) / 100 - 1;
-        v[t++] = k < n - large ? sorted[from + k] & PACKED_MAX
-                               : u32(big[b + k - (n - large)]);
+
+      // Nearest rank p is index ceil(p * n / 100) - 1. Select only
+      // requested normal ranks, reusing each partition for the next rank.
+      u32 k[3] = {(50 * n + 99) / 100 - 1,
+                  (95 * n + 99) / 100 - 1,
+                  (99 * n + 99) / 100 - 1};
+      u32 v[3];
+      int last = -1;
+      for (int i = 0; i < 3; ++i) {
+        if (k[i] < normal_n) {
+          if (int(k[i]) > last) {
+            auto first = sorted + from + last + 1;
+            auto nth = sorted + from + k[i];
+            auto end = sorted + from + normal_n;
+            std::nth_element(first, nth, end);
+            last = k[i];
+          }
+          v[i] = sorted[from + k[i]] & PACKED_MAX;
+        } else {
+          v[i] = u32(big[b + k[i] - normal_n]);
+        }
       }
       b += large;
       Line &l = ((Line *)(lines + h * hour_bytes))[count[h]++];
