@@ -340,7 +340,7 @@ impl Run {
                     let note_q = rank.wrapping_sub(before) as usize - name_quotes;
                     let note_len = comma3 - comma2 - 1 - note_q / 2 - (note_q != 0) as usize;
                     // The top 15 bits of the hash pick the bucket.
-                    _mm_prefetch::<_MM_HINT_T1>(self.2 .0[(hash >> 49) as usize].as_ptr().cast());
+                    _mm_prefetch::<_MM_HINT_T0>(self.2 .0[(hash >> 49) as usize].as_ptr().cast());
                     // Ids past the table share its last entry, which stays 0: unmatched.
                     let region = (numbers[2][at] as usize).min(REGION_IDS);
                     _mm_prefetch::<_MM_HINT_T0>(REGION_GROUP.as_ptr().add(region).cast());
