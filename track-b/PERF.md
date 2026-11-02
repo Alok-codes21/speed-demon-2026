@@ -1,7 +1,7 @@
 
 
-## Step 81: v11 (two-digit-LUT output formatting) - trial
+## Step 82: v12 (prefetch distance 40) - retired, v11 restored
 
-- The 1.46 MB of output was formatted one digit at a time (divide and modulo per digit, then an in-place reversal), inside the timed query phase. put_number now writes two digits at a time from a 100-entry pair table into a stack buffer, most significant pair last; the bytes written are identical.
-- Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, 0 DBG markers. Local 1 vCPU ABBA (8 pairs): min 0.339s vs v9's 0.344s, about -1.5%.
-- Board: run-c10c9cf7c855 T 0.105443, M 44,261,376, S 1206, points 76.743969 - T ahead of v9's 0.1073 four-run median. A second run (queued by this note) sets the median; v11 becomes the freeze tip if it holds.
+- One-knob trial: the scan's bucket prefetch distance went from 20 tokens to 40. Local box was too loaded to resolve it (an earlier quiet-box probe showed about -1%); the board run settled it.
+- Board: run-ab9e15493d63 T 0.106735, M 45,367,296, S 1206, points 76.504562 - behind v11's 0.105786 two-run median, so the distance stays 20 and v11 is restored (this commit).
+- v11 two-run median T 0.105786 (run-c10c9cf7c855 0.105443, run-5e575cc5d4d4 0.106129), S 1206, M about 44.3 MB - freeze tip going into the final day.
