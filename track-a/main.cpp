@@ -53,6 +53,13 @@ SOFTWARE.
 // Local changes: replace the three full-array radix passes with one endpoint
 // grouping pass and in-place percentile selection; record layout is unchanged.
 // The complete Cache Me MIT license is retained at the top of this file.
+// Team Cosmic changes on top of that: the nearest-rank percentiles of each
+// endpoint group are now found by a branch-free out-of-place multi-rank
+// quickselect (partitions shared by p50/p95/p99, scratch = the dead record
+// area of the same hour, so no new memory) and, for groups of up to 48 values,
+// an exact AVX2 rank counter; error_ppm uses one 32-bit divide. Parsing,
+// record layout, threading, output format and all memory mappings are
+// unchanged.
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -306,6 +313,156 @@ struct Parser {
   }
 };
 
+
+// ---------------------------------------------------------------------------
+// Multi-rank selection over one endpoint group (Cosmic team changes).
+//
+// A group of n values sits in buffer a; an equal-sized buffer b (the dead
+// record area below the grouped data, so no new memory) is scratch. The values
+// at the ascending ranks ks are found by recursive quickselect that
+//  - partitions OUT OF PLACE, branch-free: each value is written to both the
+//    next front slot and the next back slot and only the counters move, so the
+//    data-dependent compare never becomes a mispredicted branch;
+//  - shares each partition between all ranks that fall on the same side, so
+//    p50, p95 and p99 cost about one pass per halving, not three selections;
+//  - alternates the roles of a and b instead of copying back;
+//  - hands ranges of up to RC_MAX values to the AVX2 rank counter below, and
+//    falls back to std::sort if the recursion depth budget runs out, so the
+//    worst case stays O(n log n).
+// Duplicates are exact: a pivot that is the minimum is re-split with <=.
+
+// Groups of up to RC_MAX values are handled by counting ranks with AVX2.
+// Each value's 20-bit latency is tagged with its index, key = lat << 7 | i,
+// so all keys are distinct (at most 27 bits, and padding is 0x7FFFFFFF, above
+// every real key, so signed compares are safe). The rank of a key is the
+// number of keys below it; the ranks of n distinct keys are exactly 0..n-1,
+// so the value at nearest-rank position k is the key whose rank equals k.
+// There are no data-dependent branches and no tie handling.
+// Memory: a key array of at most RC_MAX + 7 words on the stack.
+constexpr u32 RC_MAX = 48;
+static_assert(RC_MAX <= 128, "index must fit in the 7 tag bits");
+
+template <int NV>
+inline void rank_select(const u32 *src, u32 n, const u32 *ks, u32 *out,
+                        int nk) {
+  alignas(32) u32 y[NV * 8];
+  for (u32 i = 0; i < n; ++i)
+    y[i] = (src[i] & PACKED_MAX) << 7 | i;
+  for (u32 i = n; i < NV * 8; ++i)
+    y[i] = 0x7FFFFFFF;
+  __m256i Y[NV], R[NV];
+  for (int j = 0; j < NV; ++j)
+    Y[j] = _mm256_load_si256((const __m256i *)(y + 8 * j)),
+    R[j] = _mm256_setzero_si256();
+  for (u32 i = 0; i < n; ++i) {
+    __m256i b = _mm256_set1_epi32(y[i]);
+    for (int j = 0; j < NV; ++j)
+      R[j] = _mm256_sub_epi32(R[j], _mm256_cmpgt_epi32(Y[j], b));
+  }
+  for (int r = 0; r < nk; ++r) {
+    __m256i t = _mm256_set1_epi32(ks[r]);
+    for (int j = 0; j < NV; ++j) {
+      u32 m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(R[j], t)));
+      if (m) {
+        out[r] = y[8 * j + __builtin_ctz(m)] >> 7;
+        break;
+      }
+    }
+  }
+}
+
+// n in 1..RC_MAX; ks are positions below n. Only the vector counts that can
+// occur are instantiated, which keeps the code (and the pages it touches)
+// small.
+static_assert(RC_MAX <= 48, "add cases to rank_select_n for a larger RC_MAX");
+inline void rank_select_n(const u32 *src, u32 n, const u32 *ks, u32 *out,
+                          int nk) {
+  switch ((n + 7) / 8) {
+  case 1: return rank_select<1>(src, n, ks, out, nk);
+  case 2: return rank_select<2>(src, n, ks, out, nk);
+  case 3: return rank_select<3>(src, n, ks, out, nk);
+  case 4: return rank_select<4>(src, n, ks, out, nk);
+  case 5: return rank_select<5>(src, n, ks, out, nk);
+  default: return rank_select<6>(src, n, ks, out, nk);
+  }
+}
+
+inline u32 med3(u32 x, u32 y, u32 z) {
+  return std::max(std::min(x, y), std::min(std::max(x, y), z));
+}
+
+inline u32 pick_pivot(const u32 *a, u32 n) {
+  if (n < 256)
+    return med3(a[0], a[n / 2], a[n - 1]);
+  u32 q = n / 8;
+  return med3(med3(a[0], a[q], a[2 * q]), med3(a[3 * q], a[n / 2], a[5 * q]),
+              med3(a[6 * q], a[7 * q], a[n - 1]));
+}
+
+// Values failing the test (x < p, or x <= p) fill dst from the front, the
+// others from the back. Returns the number that pass. Both stores happen for
+// every value; the one at the slot the counters leave open is overwritten.
+template <bool LE>
+inline u32 split(const u32 *__restrict a, u32 *__restrict dst, u32 n, u32 p) {
+  u32 lo = 0, hi = n - 1;
+  for (u32 j = 0; j < n; ++j) {
+    u32 x = a[j];
+    dst[hi] = x;
+    dst[lo] = x;
+    bool pass = LE ? x <= p : x < p;
+    lo += pass;
+    hi -= !pass;
+  }
+  return lo;
+}
+
+static void multi_select(u32 *a, u32 *b, u32 n, const u32 *ks_in, u32 *out,
+                         int nk, int depth) {
+  u32 ks[3];
+  for (int r = 0; r < nk; ++r)
+    ks[r] = ks_in[r];
+  while (nk > 0) {
+    if (n <= RC_MAX) {
+      rank_select_n(a, n, ks, out, nk);
+      return;
+    }
+    if (depth <= 0) {
+      std::sort(a, a + n);
+      for (int i = 0; i < nk; ++i)
+        out[i] = a[ks[i]];
+      return;
+    }
+    u32 p = pick_pivot(a, n);
+    u32 i = split<false>(a, b, n, p);
+    bool left_equal = false;
+    if (i == 0) { // p is the minimum: everything equal to it goes left
+      i = split<true>(a, b, n, p);
+      if (i == n) {
+        for (int r = 0; r < nk; ++r)
+          out[r] = p;
+        return;
+      }
+      left_equal = true;
+    }
+    int nl = 0;
+    while (nl < nk && ks[nl] < i)
+      ++nl;
+    --depth;
+    if (nl) {
+      if (left_equal)
+        for (int r = 0; r < nl; ++r)
+          out[r] = p;
+      else
+        multi_select(b, a, i, ks, out, nl, depth);
+    }
+    // Continue with the right part, now at b + i with scratch a + i.
+    for (int r = nl; r < nk; ++r)
+      ks[r - nl] = ks[r] - i;
+    u32 *na = b + i, *nb = a + i;
+    a = na, b = nb, n -= i, out += nl, nk -= nl;
+  }
+}
+
 int main() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
   const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
@@ -353,7 +510,17 @@ int main() {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   std::vector<u32> count(HOURS);
   std::vector<u64> at(HOURS + 1);
-  auto ppm = [](const Line &l) { return u32(u64(l.errors) * 1000000 / l.n); };
+  // floor(errors * 1e6 / n) with one 32-bit divide of a 64-bit dividend (much
+  // cheaper than a 64-bit divide on many x86 cores). Exact, and it cannot
+  // trap: errors <= n (a group's 5xx count never exceeds its size), so the
+  // high word of the dividend, errors * 1e6 >> 32, is below n and the
+  // quotient (at most 1e6) fits in 32 bits.
+  auto ppm = [](const Line &l) {
+    u64 a = u64(l.errors) * 1000000;
+    u32 q, r;
+    asm("divl %4" : "=a"(q), "=d"(r) : "a"(u32(a)), "d"(u32(a >> 32)), "r"(l.n));
+    return q;
+  };
 
   std::mutex lock;
   std::vector<std::unique_ptr<Ranking>> rankings;
@@ -423,22 +590,19 @@ int main() {
       u32 k[3] = {(50 * n + 99) / 100 - 1,
                   (95 * n + 99) / 100 - 1,
                   (99 * n + 99) / 100 - 1};
-      u32 v[3];
-      int last = -1;
-      for (int i = 0; i < 3; ++i) {
-        if (k[i] < normal_n) {
-          if (int(k[i]) > last) {
-            auto first = sorted + from + last + 1;
-            auto nth = sorted + from + k[i];
-            auto end = sorted + from + normal_n;
-            std::nth_element(first, nth, end);
-            last = k[i];
-          }
-          v[i] = sorted[from + k[i]] & PACKED_MAX;
-        } else {
-          v[i] = u32(big[b + k[i] - normal_n]);
-        }
-      }
+      u32 v[3], sel[3];
+      int nn = 0; // ranks that land among the normal values (a prefix)
+      while (nn < 3 && k[nn] < normal_n)
+        ++nn;
+      // sorted + from holds the group; keys + from (dead) is its scratch.
+      if (normal_n <= RC_MAX) { // small group: count ranks with AVX2
+        if (nn)
+          rank_select_n(sorted + from, normal_n, k, sel, nn);
+      } else
+        multi_select(sorted + from, keys + from, normal_n, k, sel, nn,
+                     2 * (32 - __builtin_clz(normal_n | 1)));
+      for (int i = 0; i < 3; ++i)
+        v[i] = i < nn ? sel[i] & PACKED_MAX : u32(big[b + k[i] - normal_n]);
       b += large;
       Line &l = ((Line *)(lines + h * hour_bytes))[count[h]++];
       l = {rank.by_rank[e], n, v[0], v[1], v[2], errors[e]};
