@@ -736,16 +736,16 @@ int main() {
             threads, std::max(1ull, (q + p - 1) / p));
     }
     fclose(f);
-  } else if (FILE *f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r")) {
+  } else if (FILE *f2 = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r")) {
     long long q = 0, p = 0;
     FILE *pfile = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
-    if (fscanf(f, "%lld", &q) == 1 && pfile &&
+    if (fscanf(f2, "%lld", &q) == 1 && pfile &&
         fscanf(pfile, "%lld", &p) == 1 && q > 0 && p > 0)
       threads = std::min<unsigned long long>(
           threads, std::max(1ll, (q + p - 1) / p));
     if (pfile)
       fclose(pfile);
-    fclose(f);
+    fclose(f2);
   }
   if (getenv("SD_THREADS"))
     threads = atoi(getenv("SD_THREADS"));
