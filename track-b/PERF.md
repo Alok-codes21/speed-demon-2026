@@ -1049,3 +1049,10 @@ the fault theory is dead and B is at its plateau.
 - Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, five runs one hash. Local 1 vCPU ABBA: +7.7% over the raw engine (min 0.361s vs 0.335s), vs +11.1% for v7 and +12% for v3 on the same rig - about a third of the tax recovered locally.
 - Board: run-babb38a91daf T 0.108477, M 46,551,040, S 1253, points 76.092399 - statistically identical to v7's 0.108432 and inside v3's spread (0.1065-0.1111). The line-grained pass recovered a third of the tax on the 1-vCPU rig (+7.7% vs +11.1%) but nothing measurable on the board: the second-pass cost model did not survive contact with the 12-thread box either. Residual tax now attributed to the 64-bit compare/action path itself (the one remaining structural difference a clean batch still executes).
 - A second v8 board run is queued via this PERF.md update; v8 stays tip while its 2-run median is measured against v3's 0.1094.
+
+## Step 79: v9 (2 MB table + merged checker) - spending the M and S levers
+
+- The score's K factor rewards more than time: memory enters as (M_ref/M)^0.2 and source size as (S_ref/S)^0.15. v8's exactness work had grown the source from the raw engine's S 1005 to S 1253, a -3.3% K penalty that silently cancelled its speed win, and the 4 MB table cost memory points too.
+- v9 = v8 with the table back to 1<<15 buckets (2 MB; the v3s trial showed this size is time-neutral on the board) and the whole-batch checking fallback merged into the line-grained checker (one cold function instead of two, -57 code lines). Exactness unchanged.
+- Gates: 60/60 fuzz, tiny/sample/full sha256 EXACT, five runs one hash.
+- Board: run-3f4a42b0ad13 T 0.107228, M 45,027,328 (was 46.6 MB), S 1189 (was 1253), points 76.533436 - time identical to v8's 0.107 median with both side levers banked.
