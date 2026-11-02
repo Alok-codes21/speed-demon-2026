@@ -33,7 +33,11 @@
 use std::sync::{atomic::Ordering::*, atomic::*, Barrier, Mutex, OnceLock};
 use std::{arch::x86_64::*, fs::File, ops::Range, os::fd::AsRawFd, ptr::*, slice, thread};
 
-extern "C" { fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8; fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32; fn prctl(option: i32, ...) -> i32; }
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    fn prctl(option: i32, ...) -> i32;
+}
 // MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
 
 const HUGE_PAGE: usize = 1 << 21;
@@ -415,9 +419,12 @@ fn main() {
         let [count, id_sum, amount, lengths, hi, lo, ..] = totals[group];
         let distinct: u32 = run.2 .1[group * SEEN_WORDS..][..SEEN_WORDS].iter().map(|w| w.load(Relaxed).count_ones()).sum();
         // Cents as text. A double holds any total of cents to well within half a cent.
-        let [sum, min, max] = [amount, BIAS - lo, hi - BIAS].map(|c| format!("{:.2}", c as f64 / 100.0));
+        let [sum, min, max] =
+            [amount, BIAS - lo, hi - BIAS].map(|c| format!("{:.2}", c as f64 / 100.0));
         let [name, note] = [lengths & 0xFFFF_FFFF, lengths >> 32];
-        if count > 0 { out += &format!("{key} {count} {id_sum} {sum} {min} {max} {distinct} {name} {note}\n"); }
+        if count > 0 {
+            out += &format!("{key} {count} {id_sum} {sum} {min} {max} {distinct} {name} {note}\n");
+        }
     }
     std::fs::write("/out/aggregates.txt", out).unwrap();
 }
