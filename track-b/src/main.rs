@@ -1095,18 +1095,6 @@ impl Run {
             });
             self.barrier();
         }
-        // Every answer is computed: hand the big regions back in one slice per thread, so the
-        // process exit has nothing left to tear down on one thread.
-        let n = self.shares.len();
-        let mut drop_region = |at: *const u8, bytes: usize| {
-            let page = |k: usize| bytes * k / n & !4095;
-            discard(at.wrapping_add(page(id)), page(id + 1) - page(id));
-        };
-        drop_region(self.rows.cast(), SHARDS * (self.text.len() + 4096) * 4);
-        drop_region(self.postings.cast(), (self.text.len() + HUGE_PAGE) * 2);
-        drop_region(self.bitmaps.cast(), 2 * MAX_HEAVY * self.words_per_bitmap * 8);
-        drop_region(self.queries.as_ptr(), self.queries.len());
-        discard(self.workspace.add(id * WORKSPACE).cast(), WORKSPACE);
     }
 }
 
