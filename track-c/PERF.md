@@ -114,3 +114,6 @@ Removal probes on cpuset 0-5: stats updates -2%, region lookup -6 to -12%, name 
 
 
 **Not kept (2026-11-02, Cosmic trial 21a): plain-load filter before the locked bit-set.** A relaxed load skips the `lock or` when the name's bit is already set (most records, after warm-up). Board `run-67ab797f71f5`: T 22.43 ms, M 10.8 MB, S 297, 82.23 - above the ring-64 code's 22.03-22.34 ms band; the branch and its dependent load cost more than the skipped locked ops save on this runner (the words sit in L2 and the locked ops pipeline well). A confounded earlier push that stacked this filter on the trial-20 counter code scored 82.33 (T 22.14 ms) - inside the band, so the filter may pay when the wait path changes, but on the ring-64 code it loses. Reverted.
+
+
+**Not kept (2026-11-02, Cosmic trial 22): static-pie link (`+crt-static`) to skip the dynamic loader.** Board `run-b4b1e6364b5d`: T 22.94 ms, M 11.1 MB, S 294, 81.91 - about a millisecond slower than the dynamic build; the static initializer (plus a bigger image) costs more than `ld.so` did. Reverted to the dynamic raptorlake flags.
