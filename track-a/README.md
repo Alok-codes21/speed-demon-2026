@@ -1,25 +1,21 @@
 # Track A: Ingest
 
-The task specification and exact output format are available in the [Track A spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md).
+The retained implementation is C++20. `Dockerfile` builds `main.cpp` with pinned GCC 15 and runs the binary in a small Debian 13 image. It uses only the C++ standard library and Linux system calls.
 
 ## Approach
 
-Implemented in Rust using only the standard library (mmap/madvise/ftruncate via extern "C").
+The input is memory-mapped with a zero guard page and split at line boundaries. Up to 12 workers parse records into packed per-hour blocks. A shared endpoint table checks the full endpoint name, rather than treating a hash as an identity. Large latency values use an escape record.
 
-The log is mapped read-only behind one guard zero page and split into line-aligned ranges, one per worker thread. Each worker parses its range: the group hour comes straight from the fixed timestamp digits (the spec pins the 72-hour window), a single 64-byte SIMD probe locates the field separators, the endpoint is interned to a worker-local id through a small open-addressing table, and a 4-byte packed record (20-bit latency, 5xx flag, 11-bit local id) is appended to a per-hour chain of 16 KiB chunks carved from the worker's own anonymous mapping. Latencies of 2^20 us or more (about 1% of lines) overflow the packing and go to a per-hour side list.
+Each hour is sorted by endpoint rank and latency with three radix passes. The sorted records give exact nearest-rank p50, p95 and p99 values. Error counts and integer parts-per-million rates are written in hour and endpoint order.
 
-After a barrier, one worker merges the intern tables so that an endpoint's global id is its rank in unsigned byte order, which is exactly the output order. Workers then claim hours: an hour's records from every worker are counting-sorted by endpoint rank into one latency array, and nearest-rank p50/p95/p99 come from a full sort for small groups or three nested linear selections for large ones. The exact byte size of each hour's text follows from the digit widths, so after a prefix sum the output file is sized once and mapped shared, and every worker formats its hours straight into the file with no write serialization.
+Parsing, completed-hour processing and output overlap. Hours may close after a 90-minute input horizon; if late or reordered data invalidates that guess, a barrier resets the partial state and the entire input is processed again without early closing. Output offsets are computed from exact byte counts, and the output is truncated to its final length.
 
-## Dependencies
+## Validation and measurement
 
-No third-party Rust crates. Standard library only.
+The retained engine passed byte-for-byte comparisons against the reference on tiny, sample, full, shuffled and reversed inputs at 1, 2, 4, 7 and 12 workers. Further integer-oracle comparisons covered unseen seeds and input orders. These tests support exactness; they are not a proof over every possible input.
 
-## Validation
+The clean A1 restore passed all five official board gates. One source-verified receipt, run `run-39e2080d9c66`, measured 19.856 ms, 15,142,912 bytes, S411 and 85.482018 points. Public-board timings vary; final scoring uses the frozen commit and a hidden seed.
 
-Output matches the reference byte for byte (sha256) on the tiny, sample and full seed-1 datasets, at 1, 2, 3, 5 and 12 worker threads:
+An exact-name Rust adaptation was also tested and rejected. Its captured official receipt was 31.018 ms, 16,277,504 bytes and 78.310063 points. That receipt counted an externally re-added, inactive C++ source as well as Rust (S763), so it is not a clean source-size comparison. The slower runtime was enough to prefer the C++ restore. The Rust source and build switch were removed.
 
-- full: `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`
-
-## With another 24 hours
-
-Release parsed chunk pages back as hours complete to shave peak memory further, overlap input readahead with parsing, and trim the source line count.
+Required license notices are retained in the repository-level `THIRD_PARTY_NOTICES.md`.
